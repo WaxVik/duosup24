@@ -1324,7 +1324,7 @@ async def unwarn_cmd(msg: Message):
             "⚠️ Ответьте на сообщение пользователя либо укажите известный боту @username или ID."
         )
         return
-     allowed, permission_error, mod_level, target_level = await can_punish(
+        allowed, permission_error, mod_level, target_level = await can_punish(
         actor.id, target_id
     )
     if not allowed:
