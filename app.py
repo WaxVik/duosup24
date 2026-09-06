@@ -131,13 +131,14 @@ def message_url(chat_id: int, message_id: int) -> str | None:
     return f"https://t.me/c/{value[4:]}/{message_id}"
 
 
-def appeal_keyboard() -> InlineKeyboardMarkup:
+def appeal_keyboard(violation_number: str) -> InlineKeyboardMarkup:
+    payload = violation_number.replace("#", "")
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="Подать апелляцию",
-                    url=f"https://t.me/{BOT_USERNAME}?start=appeal",
+                    url=f"https://t.me/{BOT_USERNAME}?start=appeal_{payload}",
                 )
             ]
         ]
@@ -570,21 +571,38 @@ async def resolve_user(message: Message, token: str | None = None):
         username = token[1:].strip()
         if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
             return None, None, None
+
+        actor = message.from_user
+        actor_id = actor.id if actor else None
+        normalized = username.casefold()
+
+        # Сначала ищем точное совпадение среди известных пользователей.
+        # Если из-за старой записи username случайно указывает на автора
+        # команды, но автор уже сменил username, повторяем поиск без автора.
+        # Это защищает /warn @username и /unwarn @username от ложного
+        # сообщения «нельзя применить наказание к самому себе».
         row = await pool.fetchrow(
             """
             SELECT user_id, username, full_name
             FROM known_users
             WHERE LOWER(username)=LOWER($1)
+              AND ($2::BIGINT IS NULL OR user_id <> $2)
             ORDER BY updated_at DESC
             LIMIT 1
             """,
             username,
+            actor_id,
         )
-        return (
-            (row["user_id"], row["username"], row["full_name"])
-            if row
-            else (None, None, None)
-        )
+        if row:
+            return row["user_id"], row["username"], row["full_name"]
+
+        # Если совпадений кроме автора нет, разрешаем только его настоящий
+        # текущий username. Так команда /warn @имя не сможет случайно
+        # выбрать создателя из устаревшей записи.
+        if actor and (actor.username or "").lstrip("@").casefold() == normalized:
+            return actor.id, actor.username, actor.full_name
+
+        return None, None, None
 
     numeric = token.lstrip("-")
     if numeric.isdigit():
@@ -917,8 +935,13 @@ async def cancel_cmd(msg: Message, state: FSMContext):
 @dp.message(Command("start"))
 async def start_cmd(msg: Message, state: FSMContext):
     payload = command_payload(msg)
-    if payload == "appeal" and msg.chat.type == "private":
-        await appeal_start(msg, state)
+    if msg.chat.type == "private" and (payload == "appeal" or payload.startswith("appeal_")):
+        expected_violation = None
+        if payload.startswith("appeal_"):
+            raw_number = payload.removeprefix("appeal_")
+            if re.fullmatch(r"-\d{5}", raw_number):
+                expected_violation = f"#{raw_number}"
+        await appeal_start(msg, state, expected_violation)
         return
     await state.clear()
     await msg.answer(
@@ -1178,7 +1201,8 @@ async def warn_cmd(msg: Message):
     target_id, username, full_name, reason = await parse_target_and_reason(msg)
     if target_id is None:
         await msg.answer(
-            "⚠️ Ответьте на сообщение пользователя либо укажите известный боту @username или ID."
+            "⚠️ Не удалось найти пользователя. Используйте @username или Telegram ID "
+            "известного боту пользователя, либо ответьте на его сообщение."
         )
         return
     error = validate_reason(reason)
@@ -1222,7 +1246,7 @@ async def warn_cmd(msg: Message):
         return
     mention = user_mention(target_id, username, full_name)
     await msg.reply(
-        build_warn_msg(mention, count, reason, number), reply_markup=appeal_keyboard()
+        build_warn_msg(mention, count, reason, number), reply_markup=appeal_keyboard(number)
     )
     if action_error:
         await msg.answer(
@@ -1295,7 +1319,7 @@ async def ban_cmd(msg: Message):
         return
     mention = user_mention(target_id, username, full_name)
     await msg.reply(
-        build_ban_msg(mention, reason, number), reply_markup=appeal_keyboard()
+        build_ban_msg(mention, reason, number), reply_markup=appeal_keyboard(number)
     )
     await send_admin_log(
         "<b>ВЫДАН БАН</b>\n"
@@ -1324,7 +1348,7 @@ async def unwarn_cmd(msg: Message):
             "⚠️ Ответьте на сообщение пользователя либо укажите известный боту @username или ID."
         )
         return
-        allowed, permission_error, mod_level, target_level = await can_punish(
+    allowed, permission_error, mod_level, target_level = await can_punish(
         actor.id, target_id
     )
     if not allowed:
@@ -1350,7 +1374,6 @@ async def unwarn_cmd(msg: Message):
         LOGGER.exception("Не удалось снять ограничения Telegram")
         await msg.answer(f"❌ Не удалось снять ограничения Telegram: {esc(exc)}")
         return
-    pool = require_db()
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("UPDATE users SET warns=0 WHERE user_id=$1", target_id)
@@ -1481,17 +1504,24 @@ async def report_cmd(msg: Message):
     except asyncpg.UniqueViolationError:
         await msg.reply("⚠️ На это сообщение уже отправлен репорт.")
         return
+
     text = (
         f"<b>Получен репорт {esc(number)}</b>\n"
         f"Отправил: {user_mention(reporter.id, reporter.username, reporter.full_name)}\n"
         f"На кого: {user_mention(violator.id, violator.username, violator.full_name)}\n"
         f"ID чата: <code>{msg.chat.id}</code>\nПричина: {esc(reason)}"
     )
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Рассмотреть", callback_data=f"report_{number}")]
-        ]
+    source_url = message_url(msg.chat.id, msg.reply_to_message.message_id)
+    keyboard_rows = []
+    if source_url:
+        keyboard_rows.append(
+            [InlineKeyboardButton(text="Перейти к сообщению", url=source_url)]
+        )
+    keyboard_rows.append(
+        [InlineKeyboardButton(text="Рассмотреть", callback_data=f"report_take_{number}")]
     )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
     try:
         await require_bot().send_message(
             int(hubsup),
@@ -1514,25 +1544,96 @@ async def report_cb(cb: CallbackQuery):
     if not cb.from_user or not await check_permission(cb.from_user.id, 1):
         await cb.answer("⛔ Недостаточно прав.", show_alert=True)
         return
-    number = (cb.data or "").removeprefix("report_")
-    row = await require_db().fetchrow(
+
+    data = cb.data or ""
+    match = re.fullmatch(r"report_(take|finish)_(#-\d{5})", data)
+    if not match:
+        await cb.answer("Некорректная кнопка репорта.", show_alert=True)
+        return
+    action, number = match.groups()
+    pool = require_db()
+
+    if action == "take":
+        row = await pool.fetchrow(
+            """
+            UPDATE reports
+            SET status='reviewing', reviewed_by=$2
+            WHERE report_number=$1 AND status='pending'
+            RETURNING report_number, chat_id, message_id, reviewed_by
+            """,
+            number,
+            cb.from_user.id,
+        )
+        if not row:
+            current = await pool.fetchrow(
+                "SELECT status, reviewed_by, chat_id, message_id FROM reports WHERE report_number=$1",
+                number,
+            )
+            if current and current["status"] == "reviewing":
+                reviewer_id = int(current["reviewed_by"]) if current["reviewed_by"] else 0
+                await cb.answer(
+                    f"Этот репорт уже рассматривает администратор с ID {reviewer_id}.",
+                    show_alert=True,
+                )
+            elif current and current["status"] == "completed":
+                await cb.answer("Этот репорт уже завершён.", show_alert=True)
+            else:
+                await cb.answer("Репорт не найден.", show_alert=True)
+            return
+
+        if cb.message:
+            source_url = message_url(int(row["chat_id"]), int(row["message_id"]))
+            rows = []
+            if source_url:
+                rows.append([InlineKeyboardButton(text="Перейти к сообщению", url=source_url)])
+            rows.append([InlineKeyboardButton(text="Завершить рассмотрение", callback_data=f"report_finish_{number}")])
+            await cb.message.edit_text(
+                f"{cb.message.html_text}\n\n👀 <b>Рассматривает:</b> "
+                f"{user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            )
+        await cb.answer("Репорт закреплён за вами.")
+        return
+
+    row = await pool.fetchrow(
         """
-        UPDATE reports SET status='reviewing', reviewed_by=$2
-        WHERE report_number=$1 AND status='pending'
-        RETURNING report_number
+        UPDATE reports
+        SET status='completed'
+        WHERE report_number=$1 AND status='reviewing' AND reviewed_by=$2
+        RETURNING report_number, chat_id, message_id, reviewed_by
         """,
         number,
         cb.from_user.id,
     )
     if not row:
-        await cb.answer("Этот репорт уже взял другой администратор.", show_alert=True)
-        return
-    if cb.message:
-        await cb.message.edit_text(
-            f"{cb.message.html_text}\n\n👀 Рассматривает: "
-            f"{user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}"
+        current = await pool.fetchrow(
+            "SELECT status, reviewed_by FROM reports WHERE report_number=$1",
+            number,
         )
-    await cb.answer("Репорт закреплён за вами.")
+        if current and current["status"] == "reviewing":
+            reviewer_id = int(current["reviewed_by"]) if current["reviewed_by"] else 0
+            await cb.answer(
+                f"Завершить рассмотрение может только текущий проверяющий (ID {reviewer_id}).",
+                show_alert=True,
+            )
+        elif current and current["status"] == "completed":
+            await cb.answer("Репорт уже завершён.", show_alert=True)
+        else:
+            await cb.answer("Репорт ещё не взят на рассмотрение.", show_alert=True)
+        return
+
+    if cb.message:
+        source_url = message_url(int(row["chat_id"]), int(row["message_id"]))
+        rows = []
+        if source_url:
+            rows.append([InlineKeyboardButton(text="Перейти к сообщению", url=source_url)])
+        await cb.message.edit_text(
+            f"{cb.message.html_text}\n\n"
+            f"✅ <b>Рассмотрение завершено.</b>\n"
+            f"Рассматривал: {user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
+        )
+    await cb.answer("Рассмотрение репорта завершено.")
 
 
 @dp.message(Command("stats"))
@@ -1566,7 +1667,9 @@ async def stats_cmd(msg: Message):
 
 # ========================== АПЕЛЛЯЦИИ ==========================
 @dp.message(Command("appeal"))
-async def appeal_start(msg: Message, state: FSMContext):
+async def appeal_start(
+    msg: Message, state: FSMContext, expected_violation: str | None = None
+):
     if msg.chat.type != "private" or not msg.from_user:
         await msg.answer("📝 Используйте /appeal в личных сообщениях бота.")
         return
@@ -1588,13 +1691,22 @@ async def appeal_start(msg: Message, state: FSMContext):
     if pending:
         await msg.answer("⚠️ У вас уже есть апелляция, ожидающая рассмотрения.")
         return
-    await msg.answer(
-        "📝 <b>Подача апелляции</b>\n\n"
-        "Отправьте одним сообщением три части, каждую с новой строки:\n"
-        "<code>#-00001</code> — номер варна или бана\n"
-        "<code>@username</code> — ваш username\n"
-        "текст обжалования"
-    )
+
+    await state.update_data(appeal_violation=expected_violation)
+    if expected_violation:
+        await msg.answer(
+            "📝 <b>Подача апелляции</b>\n\n"
+            f"Номер наказания: <code>{esc(expected_violation)}</code>\n"
+            "Теперь отправьте текст обжалования одним сообщением."
+        )
+    else:
+        await msg.answer(
+            "📝 <b>Подача апелляции</b>\n\n"
+            "Отправьте одним сообщением три части, каждую с новой строки:\n"
+            "<code>#-00001</code> — номер вашего варна или бана\n"
+            "<code>@username</code> — ваш username\n"
+            "текст обжалования"
+        )
     await state.set_state(AppealState.waiting_text)
 
 
@@ -1603,16 +1715,50 @@ async def appeal_text(msg: Message, state: FSMContext):
     if not msg.from_user:
         await state.clear()
         return
+    data = await state.get_data()
+    expected_violation = data.get("appeal_violation")
     lines = [line.strip() for line in (msg.text or "").splitlines() if line.strip()]
     violation = next((line for line in lines if re.fullmatch(r"#-\d{5}", line)), None)
-    username = next(
-        (line for line in lines if re.fullmatch(r"@[A-Za-z0-9_]{5,32}", line)), None
-    )
-    body = [line for line in lines if line not in (violation, username)]
-    appeal_body = "\n".join(body).strip()
-    if not violation or not username or not appeal_body:
+
+    if expected_violation:
+        violation = expected_violation
+        appeal_body = "\n".join(lines).strip()
+        username = f"@{msg.from_user.username}" if msg.from_user.username else None
+    else:
+        username = next(
+            (line for line in lines if re.fullmatch(r"@[A-Za-z0-9_]{5,32}", line)), None
+        )
+        body = [line for line in lines if line not in (violation, username)]
+        appeal_body = "\n".join(body).strip()
+
+    if not violation or not appeal_body:
         await msg.answer(
-            "❌ Неверный формат: нужны номер, @username и текст обжалования."
+            "❌ Неверный формат апелляции: укажите номер наказания и текст обжалования."
+        )
+        return
+    if not expected_violation and not username:
+        await msg.answer("❌ Укажите ваш @username в апелляции.")
+        return
+    if expected_violation and violation != expected_violation:
+        await msg.answer("❌ Нельзя изменить наказание, выбранное кнопкой апелляции.")
+        return
+
+    pool = require_db()
+    is_owner = await pool.fetchval(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM warn_logs WHERE warn_number=$1 AND user_id=$2
+        ) OR EXISTS(
+            SELECT 1 FROM ban_logs WHERE ban_number=$1 AND user_id=$2
+        )
+        """,
+        violation,
+        msg.from_user.id,
+    )
+    if not is_owner:
+        await msg.answer(
+            "⛔ Апелляцию по этому наказанию может подать только пользователь, "
+            "которому оно было выдано."
         )
         return
     if len(appeal_body) > 2000:
@@ -1816,7 +1962,7 @@ async def handle_links(msg: Message):
         msg.chat.id,
         build_warn_msg(mention, count, "Ссылка", number),
         message_thread_id=msg.message_thread_id,
-        reply_markup=appeal_keyboard(),
+        reply_markup=appeal_keyboard(number),
     )
     if action_error:
         await send_admin_log(
