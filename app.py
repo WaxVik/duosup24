@@ -393,10 +393,70 @@ def format_number(number: int) -> str:
 
 
 async def get_user_warns(user_id: int) -> int:
-    value = await require_db().fetchval(
+    """Возвращает текущее количество варнов пользователя.
+
+    Основной счётчик хранится в users.warns, потому что именно он
+    увеличивается при выдаче варна и сбрасывается при /unwarn и /unban.
+    Для совместимости со старыми/частично заполненными данными есть
+    безопасный fallback на активные записи warn_logs.
+    """
+    pool = require_db()
+    row = await pool.fetchrow(
         "SELECT warns FROM users WHERE user_id=$1", user_id
     )
-    return int(value or 0)
+    if row is not None and int(row["warns"] or 0) > 0:
+        return int(row["warns"])
+
+    active_logs = await pool.fetchval(
+        "SELECT COUNT(*) FROM warn_logs WHERE user_id=$1 AND is_active=TRUE",
+        user_id,
+    )
+    return int(active_logs or 0)
+
+
+async def resolve_active_warn_target(token: str | None):
+    """Находит пользователя по @username/ID среди активных варнов."""
+    if not token:
+        return None, None, None
+
+    token = token.strip()
+    pool = require_db()
+
+    if token.startswith("@"):
+        username = token[1:].strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+            return None, None, None
+        row = await pool.fetchrow(
+            """
+            SELECT wl.user_id, ku.username, ku.full_name
+            FROM warn_logs wl
+            LEFT JOIN known_users ku ON ku.user_id = wl.user_id
+            WHERE wl.is_active=TRUE AND LOWER(ku.username)=LOWER($1)
+            ORDER BY wl.created_at DESC
+            LIMIT 1
+            """,
+            username,
+        )
+        if row:
+            return row["user_id"], row["username"], row["full_name"]
+        return None, None, None
+
+    numeric = token.lstrip("-")
+    if numeric.isdigit():
+        user_id = int(token)
+        has_warn = await pool.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM warn_logs WHERE user_id=$1 AND is_active=TRUE)",
+            user_id,
+        )
+        if not has_warn:
+            return None, None, None
+        row = await pool.fetchrow(
+            "SELECT username, full_name FROM known_users WHERE user_id=$1",
+            user_id,
+        )
+        return user_id, (row["username"] if row else None), (row["full_name"] if row else None)
+
+    return None, None, None
 
 
 async def add_warn(
@@ -1342,10 +1402,20 @@ async def unwarn_cmd(msg: Message):
         return
     payload = command_payload(msg)
     token = payload.split()[0] if payload else None
-    target_id, username, full_name = await resolve_user(msg, token)
+
+    # Для /unwarn сначала ищем цель именно среди активных варнов.
+    # Это исключает ситуацию, когда users.warns устарел или в known_users
+    # осталась старая запись username. Reply по-прежнему поддерживается.
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target_id, username, full_name = await resolve_user(msg)
+    else:
+        target_id, username, full_name = await resolve_active_warn_target(token)
+        if target_id is None:
+            target_id, username, full_name = await resolve_user(msg, token)
+
     if target_id is None:
         await msg.answer(
-            "⚠️ Ответьте на сообщение пользователя либо укажите известный боту @username или ID."
+            "⚠️ Не удалось найти пользователя с активным варном. Используйте @username или Telegram ID, известный боту, либо ответьте на его сообщение."
         )
         return
     allowed, permission_error, mod_level, target_level = await can_punish(
@@ -1374,6 +1444,7 @@ async def unwarn_cmd(msg: Message):
         LOGGER.exception("Не удалось снять ограничения Telegram")
         await msg.answer(f"❌ Не удалось снять ограничения Telegram: {esc(exc)}")
         return
+    pool = require_db()
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("UPDATE users SET warns=0 WHERE user_id=$1", target_id)
