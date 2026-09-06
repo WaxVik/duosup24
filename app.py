@@ -1324,10 +1324,7 @@ async def unwarn_cmd(msg: Message):
             "⚠️ Ответьте на сообщение пользователя либо укажите известный боту @username или ID."
         )
         return
-    if target_id == actor.id:
-        await msg.answer("❌ Нельзя снять варны с самого себя.")
-        return
-    allowed, permission_error, mod_level, target_level = await can_punish(
+     allowed, permission_error, mod_level, target_level = await can_punish(
         actor.id, target_id
     )
     if not allowed:
