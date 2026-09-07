@@ -21,6 +21,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    BotCommand,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
+BOT_VERSION = "1.09.8"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -747,6 +749,39 @@ async def moderation_chat_id(fallback_chat_id: int) -> int:
     return int(configured) if configured else fallback_chat_id
 
 
+async def is_hublox_topic(msg: Message, topic_key: str) -> bool:
+    hublox = await get_config("hublox_id")
+    return bool(hublox and msg.chat.id == int(hublox) and msg.message_thread_id == TOPICS[topic_key])
+
+
+async def require_topic(msg: Message, topic_key: str, label: str) -> bool:
+    if await is_hublox_topic(msg, topic_key):
+        return True
+    await msg.answer(f"⛔ Команда доступна только в теме «{esc(label)}» основного чата.")
+    return False
+
+
+async def require_group_chat(msg: Message) -> bool:
+    if msg.chat.type in ("group", "supergroup"):
+        return True
+    await msg.answer("⛔ Эта команда работает только в групповых чатах.")
+    return False
+
+
+async def strip_telegram_admin_status(user_id: int) -> None:
+    """Снимает Telegram-права администратора, сохраняя ранг в БД для команд бота."""
+    chat_ids = set()
+    for key in ("hublox_id", "hubsup_id"):
+        value = await get_config(key)
+        if value:
+            chat_ids.add(int(value))
+    for chat_id in chat_ids:
+        try:
+            await sync_telegram_admin(chat_id, user_id, 0)
+        except Exception:
+            LOGGER.exception("Не удалось снять Telegram-права администратора: user=%s chat=%s", user_id, chat_id)
+
+
 async def issue_warning(
     chat_id: int,
     user_id: int,
@@ -774,6 +809,8 @@ async def issue_warning(
         action_error = None
         ban_number = None
         try:
+            if warn_count in (2, 3, 4) and await get_moderator_level(user_id) > 0 and (admin_id != user_id or reason == "Запрещенная ссылка"):
+                await strip_telegram_admin_status(user_id)
             if warn_count == 2:
                 await require_bot().restrict_chat_member(
                     chat_id,
@@ -840,6 +877,9 @@ async def apply_ban(
     async with lock:
         if await is_banned(user_id):
             return False, None
+
+        if await get_moderator_level(user_id) > 0 and moderator_id != user_id:
+            await strip_telegram_admin_status(user_id)
 
         await require_bot().restrict_chat_member(
             chat_id,
@@ -1126,6 +1166,9 @@ async def cancel_cmd(msg: Message, state: FSMContext):
 
 @dp.message(Command("start"))
 async def start_cmd(msg: Message, state: FSMContext):
+    if msg.chat.type != "private":
+        await msg.answer("⛔ /start доступен только в личных сообщениях бота.")
+        return
     payload = command_payload(msg)
     if msg.chat.type == "private" and (payload == "appeal" or payload.startswith("appeal_")):
         expected_violation = None
@@ -1270,24 +1313,12 @@ async def save_rules(text: str, msg: Message) -> None:
     await msg.answer(f"✅ Правила обновлены до версии {esc(new_version)}.")
 
 
-@dp.message(Command("redactrule"))
-async def redact_rule(msg: Message, state: FSMContext):
-    if not msg.from_user or msg.from_user.id != CREATOR_ID:
-        await msg.answer("⛔ Доступно только создателю.")
-        return
-    text = command_payload(msg)
-    if text:
-        await save_rules(text, msg)
-        await state.clear()
-        return
-    await msg.answer("📝 Отправьте полный текст новых правил одним сообщением.")
-    await state.set_state(RuleState.waiting_text)
-
-
 @dp.message(Command("redact"))
 async def redact_cmd(msg: Message):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await msg.answer("⛔ Команда доступна только создателю.")
+        return
+    if not await require_topic(msg, "redact", "Редактирование"):
         return
     await msg.answer("🛠 <b>Редактирование DuoSup</b>\n\nВыберите раздел:", reply_markup=redact_keyboard())
 
@@ -1306,17 +1337,18 @@ async def redact_links_cb(cb: CallbackQuery):
 
 
 @dp.callback_query(F.data == "redact_rules")
-async def redact_rules_cb(cb: CallbackQuery):
+async def redact_rules_cb(cb: CallbackQuery, state: FSMContext):
     if not cb.from_user or cb.from_user.id != CREATOR_ID:
         await cb.answer("⛔ Только создатель.", show_alert=True)
         return
-    rules = await get_template("rules_version")
-    latest = await require_db().fetchrow("SELECT rule_text FROM rules ORDER BY created_at DESC LIMIT 1")
-    text = "📚 <b>Правила</b>\n\n" + (esc(latest["rule_text"]) if latest else "Правила ещё не опубликованы.")
-    if rules:
-        text = f"📚 <b>Правила v{esc(rules)}</b>\n\n" + (esc(latest["rule_text"]) if latest else "Правила ещё не опубликованы.")
-    await cb.message.edit_text(text, reply_markup=redact_keyboard())
-    await cb.answer()
+    await state.set_state(RuleState.waiting_text)
+    await cb.message.edit_text(
+        "📚 <b>Редактирование правил</b>\n\n"
+        "✍️ Напишите <b>новые правила</b> одним сообщением.\n"
+        "Можно отправить полный текст правил сразу.\n\n"
+        "Для отмены используйте /cancel."
+    )
+    await cb.answer("Ожидаю новые правила.")
 
 
 @dp.message(Command("redact_add"))
@@ -1336,6 +1368,8 @@ async def redact_add_cmd(msg: Message):
 async def redact_del_cmd(msg: Message):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await msg.answer("⛔ Только создатель.")
+        return
+    if not await require_topic(msg, "redact", "Редактирование"):
         return
     value = command_payload(msg).strip().lower().rstrip("/")
     if not value:
@@ -1468,6 +1502,8 @@ async def parse_target_and_reason(msg: Message):
 
 @dp.message(Command("warn"))
 async def warn_cmd(msg: Message):
+    if not await require_group_chat(msg):
+        return
     actor = msg.from_user
     if not actor or not await check_permission(actor.id, 4):
         await msg.answer("⛔ Выдавать варны могут только администраторы (ранг 4+).")
@@ -1565,6 +1601,8 @@ async def warn_cmd(msg: Message):
 
 @dp.message(Command("ban"))
 async def ban_cmd(msg: Message):
+    if not await require_group_chat(msg):
+        return
     actor = msg.from_user
     if not actor or not await check_permission(actor.id, 6):
         await msg.answer(
@@ -1638,6 +1676,8 @@ async def ban_cmd(msg: Message):
 
 @dp.message(Command("unwarn"))
 async def unwarn_cmd(msg: Message):
+    if not await require_group_chat(msg):
+        return
     actor = msg.from_user
     if not actor or not await check_permission(actor.id, 6):
         await msg.answer(
@@ -1724,6 +1764,8 @@ async def unwarn_cmd(msg: Message):
 
 @dp.message(Command("unban"))
 async def unban_cmd(msg: Message):
+    if not await require_group_chat(msg):
+        return
     actor = msg.from_user
     if not actor or not await check_permission(actor.id, 6):
         await msg.answer(
@@ -1783,6 +1825,8 @@ async def unban_cmd(msg: Message):
 # ========================== РЕПОРТЫ И СТАТИСТИКА ==========================
 @dp.message(Command("report"))
 async def report_cmd(msg: Message):
+    if not await require_group_chat(msg):
+        return
     if (
         not msg.from_user
         or not msg.reply_to_message
@@ -2091,6 +2135,10 @@ async def question_answer_text(msg: Message, state: FSMContext):
 async def mystats_cmd(msg: Message):
     if not msg.from_user:
         return
+    hublox = await get_config("hublox_id")
+    if not hublox or msg.chat.id != int(hublox) or msg.message_thread_id not in {TOPICS["chat"], TOPICS["trades"], TOPICS["raids"]}:
+        await msg.answer("⛔ /mystats доступна только в темах «Чат», «Трейды» и «Рейды».")
+        return
     pool = require_db()
     row = await pool.fetchrow("SELECT messages_count, joined_at FROM users WHERE user_id=$1", msg.from_user.id)
     warns = await get_user_warns(msg.from_user.id)
@@ -2108,8 +2156,10 @@ async def mystats_cmd(msg: Message):
 
 @dp.message(Command("stats"))
 async def stats_cmd(msg: Message):
-    if not msg.from_user or not await check_permission(msg.from_user.id, 5):
-        await msg.answer("⛔ Недостаточно прав: требуется уровень 5+.")
+    if not msg.from_user or not await require_group_chat(msg):
+        return
+    if not await check_permission(msg.from_user.id, 1):
+        await msg.answer("⛔ Команда доступна только администрации (ранг 1+).")
         return
     pool = require_db()
     (
@@ -2264,8 +2314,8 @@ async def appeal_start(
             "✍️ <b>Как заполнить:</b>\n"
             "Одним сообщением напишите, почему наказание следует отменить.\n"
             "Username указывать не нужно — бот автоматически проверит, что апелляцию подаёт именно владелец наказания.\n\n"
-            "⏳ Срок подачи — 24 часа с момента наказания.\n"
-            "❤️ Пожалуйста, изложите ситуацию спокойно и по существу."
+            + (("⏳ Срок подачи — 24 часа с момента наказания.\n" if (expected_type or "warn") == "warn" else "⏳ Апелляцию на вечный бан можно подать в любое время.\n"))
+            + "❤️ Пожалуйста, изложите ситуацию спокойно и по существу."
         )
     else:
         rows = await get_available_appeals(user_id)
@@ -2660,6 +2710,92 @@ async def appeal_cb(cb: CallbackQuery):
 
 
 # ========================== АВТОМОДЕРАЦИЯ ==========================
+# ========================== ЗАПРЕЩЁННЫЕ ССЫЛКИ ==========================
+LINK_RE = re.compile(
+    r"(?i)(?:https?://|ftp://|www\.)[^\s<>]+|(?:t\.me|telegram\.me|telegram\.dog)/[^\s<>]+|"
+    r"(?<![@\w])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?:/[^\s<>]*)?"
+)
+
+
+def extract_link_values(msg: Message) -> list[str]:
+    values: list[str] = []
+    for part in (msg.text or "", msg.caption or ""):
+        values.extend(m.group(0).rstrip(".,!?;:)]}") for m in LINK_RE.finditer(part))
+    for entity in list(msg.entities or []) + list(msg.caption_entities or []):
+        if entity.type == "text_link" and entity.url:
+            values.append(entity.url)
+    return list(dict.fromkeys(values))
+
+
+def link_domain(value: str) -> str:
+    value = value.lower().strip()
+    value = re.sub(r"^[a-z][a-z0-9+.-]*://", "", value)
+    value = value.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    value = value.split("@")[-1].split(":", 1)[0]
+    return value.removeprefix("www.").rstrip(".")
+
+
+async def is_whitelisted_link(value: str) -> bool:
+    domain = link_domain(value)
+    if not domain:
+        return False
+    rows = await require_db().fetch("SELECT value FROM link_whitelist")
+    for row in rows:
+        allowed = link_domain(str(row["value"]))
+        if domain == allowed or domain.endswith("." + allowed):
+            return True
+    return False
+
+
+@dp.message(F.text | F.caption)
+async def handle_forbidden_links(msg: Message):
+    if not msg.from_user or msg.from_user.is_bot or msg.chat.type not in ("group", "supergroup"):
+        return
+    if msg.message_thread_id in IGNORED_TOPICS:
+        return
+    links = extract_link_values(msg)
+    if not links:
+        return
+    if all([await is_whitelisted_link(link) for link in links]):
+        return
+    if msg.from_user.id == CREATOR_ID:
+        return
+
+    try:
+        await msg.delete()
+    except Exception:
+        LOGGER.debug("Не удалось удалить сообщение с запрещённой ссылкой", exc_info=True)
+
+    issued, count, number, action_error, ban_number = await issue_warning(
+        msg.chat.id, msg.from_user.id, "Запрещенная ссылка", msg.from_user.id, msg.message_id
+    )
+    if not issued:
+        return
+    mention = user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)
+    try:
+        await require_bot().send_message(
+            msg.chat.id, build_warn_msg(mention, count, "Запрещенная ссылка", number),
+            message_thread_id=msg.message_thread_id,
+            reply_markup=None if ban_number else appeal_keyboard(number, "warn"),
+        )
+        if ban_number:
+            await require_bot().send_message(
+                msg.chat.id, build_ban_msg(mention, "Достигнут лимит варнов (4/4)", ban_number),
+                message_thread_id=msg.message_thread_id, reply_markup=appeal_keyboard(ban_number, "ban")
+            )
+            await notify_ban_in_dm(msg.from_user.id, "Достигнут лимит варнов (4/4)", ban_number)
+    except Exception:
+        LOGGER.exception("Не удалось отправить автоматическое предупреждение за ссылку")
+
+    await send_admin_log(
+        "◆<b>АВТОМАТИЧЕСКИЙ ВАРН ⚠️</b>◆\n"
+        f"{SEPARATOR}\nПричина: Запрещенная ссылка\n𝐈𝐃: {esc(number)}\n"
+        f"Пользователь: {mention}\n𝐈𝐃: {msg.from_user.id}\n"
+        f"Чат 𝐈𝐃 {msg.chat.id}\nВремя: {msk_time()} МСК",
+        msg.chat.id, msg.message_id
+    )
+
+
 @dp.message(F.new_chat_members)
 async def welcome(msg: Message):
     hublox = await get_config("hublox_id")
@@ -2728,6 +2864,57 @@ async def verify_user_cb(cb: CallbackQuery):
     await cb.answer("✅ Профиль верифицирован!", show_alert=True)
 
 
+async def announce_bot_version() -> None:
+    """Один раз сообщает в теме «Оповещения» о новой версии бота."""
+    hublox = await get_config("hublox_id")
+    if not hublox:
+        return
+
+    announced_version = await get_config("bot_version_announced")
+    if announced_version == BOT_VERSION:
+        return
+
+    text = (
+        f"🤖 <b>Бот обновлен до v{BOT_VERSION}</b>\n\n"
+        "✨ Обновление успешно установлено и бот готов к работе.\n"
+        "📅 Версия: 26.09.08"
+    )
+    try:
+        await require_bot().send_message(
+            int(hublox),
+            text,
+            message_thread_id=TOPICS["announcements"],
+        )
+        await set_config("bot_version_announced", BOT_VERSION)
+    except Exception:
+        LOGGER.exception("Не удалось отправить сообщение об обновлении бота")
+
+
+async def set_bot_commands() -> None:
+    """Настраивает список быстрых команд Telegram (кнопка / у поля ввода)."""
+    commands = [
+        BotCommand(command="start", description="Запустить бота и открыть меню"),
+        BotCommand(command="warn", description="Выдать варн пользователю"),
+        BotCommand(command="ban", description="Выдать вечный бан-мут пользователю"),
+        BotCommand(command="unwarn", description="Снять варны с пользователя"),
+        BotCommand(command="unban", description="Снять бан и ограничения"),
+        BotCommand(command="report", description="Пожаловаться на сообщение"),
+        BotCommand(command="appeal", description="Подать апелляцию на нарушение"),
+        BotCommand(command="mystats", description="Показать свою статистику"),
+        BotCommand(command="stats", description="Показать статистику пользователя"),
+        BotCommand(command="cancel", description="Отменить текущее действие"),
+        BotCommand(command="upmod", description="Повысить ранг администратора"),
+        BotCommand(command="downmod", description="Понизить ранг администратора"),
+        BotCommand(command="redact", description="Открыть управление ссылками и правилами"),
+        BotCommand(command="redact_add", description="Добавить ссылку в белый список"),
+        BotCommand(command="redact_del", description="Удалить ссылку из белого списка"),
+        BotCommand(command="link_hublox", description="Связать основной чат с администрацией"),
+        BotCommand(command="link_hubsup", description="Завершить привязку админ-чата по коду"),
+    ]
+    await require_bot().set_my_commands(commands)
+
+
+
 # ========================== ЗАПУСК ==========================
 def validate_environment() -> None:
     missing = [
@@ -2760,6 +2947,14 @@ async def main() -> None:
         await init_db()
         me = await bot.get_me()
         BOT_USERNAME = me.username or BOT_USERNAME
+        try:
+            await set_bot_commands()
+        except Exception:
+            LOGGER.exception("Не удалось настроить быстрые команды Telegram")
+        try:
+            await announce_bot_version()
+        except Exception:
+            LOGGER.exception("Стартовое уведомление о версии не удалось")
         try:
             await update_admin_list()
         except Exception:
