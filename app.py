@@ -131,14 +131,15 @@ def message_url(chat_id: int, message_id: int) -> str | None:
     return f"https://t.me/c/{value[4:]}/{message_id}"
 
 
-def appeal_keyboard(violation_number: str) -> InlineKeyboardMarkup:
+def appeal_keyboard(violation_number: str, violation_type: str = "warn") -> InlineKeyboardMarkup:
     payload = violation_number.replace("#", "")
+    kind = "ban" if violation_type == "ban" else "warn"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Подать апелляцию",
-                    url=f"https://t.me/{BOT_USERNAME}?start=appeal_{payload}",
+                    text="📝 Подать апелляцию",
+                    url=f"https://t.me/{BOT_USERNAME}?start=appeal_{kind}_{payload}",
                 )
             ]
         ]
@@ -256,11 +257,13 @@ async def init_db() -> None:
             user_id BIGINT NOT NULL,
             username TEXT,
             violation_number TEXT NOT NULL,
+            violation_type TEXT NOT NULL DEFAULT 'warn',
             appeal_text TEXT NOT NULL,
             created_at BIGINT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending'
         )
         """,
+        "ALTER TABLE appeals ADD COLUMN IF NOT EXISTS violation_type TEXT NOT NULL DEFAULT 'warn'",
         "CREATE TABLE IF NOT EXISTS appeal_blocks (user_id BIGINT PRIMARY KEY, block_until BIGINT NOT NULL)",
         """
         CREATE TABLE IF NOT EXISTS moderators (
@@ -412,51 +415,6 @@ async def get_user_warns(user_id: int) -> int:
         user_id,
     )
     return int(active_logs or 0)
-
-
-async def resolve_active_warn_target(token: str | None):
-    """Находит пользователя по @username/ID среди активных варнов."""
-    if not token:
-        return None, None, None
-
-    token = token.strip()
-    pool = require_db()
-
-    if token.startswith("@"):
-        username = token[1:].strip()
-        if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
-            return None, None, None
-        row = await pool.fetchrow(
-            """
-            SELECT wl.user_id, ku.username, ku.full_name
-            FROM warn_logs wl
-            LEFT JOIN known_users ku ON ku.user_id = wl.user_id
-            WHERE wl.is_active=TRUE AND LOWER(ku.username)=LOWER($1)
-            ORDER BY wl.created_at DESC
-            LIMIT 1
-            """,
-            username,
-        )
-        if row:
-            return row["user_id"], row["username"], row["full_name"]
-        return None, None, None
-
-    numeric = token.lstrip("-")
-    if numeric.isdigit():
-        user_id = int(token)
-        has_warn = await pool.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM warn_logs WHERE user_id=$1 AND is_active=TRUE)",
-            user_id,
-        )
-        if not has_warn:
-            return None, None, None
-        row = await pool.fetchrow(
-            "SELECT username, full_name FROM known_users WHERE user_id=$1",
-            user_id,
-        )
-        return user_id, (row["username"] if row else None), (row["full_name"] if row else None)
-
-    return None, None, None
 
 
 async def add_warn(
@@ -620,6 +578,8 @@ async def resolve_user(message: Message, token: str | None = None):
     if message.reply_to_message and message.reply_to_message.from_user:
         user = message.reply_to_message.from_user
         await remember_user(user)
+        if user.id == require_bot().id:
+            return None, None, None
         return user.id, user.username, user.full_name
 
     if not token:
@@ -627,7 +587,7 @@ async def resolve_user(message: Message, token: str | None = None):
 
     token = token.strip()
     pool = require_db()
-    if token.startswith("@"):
+    if token.startswith("@"): 
         username = token[1:].strip()
         if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
             return None, None, None
@@ -635,31 +595,29 @@ async def resolve_user(message: Message, token: str | None = None):
         actor = message.from_user
         actor_id = actor.id if actor else None
         normalized = username.casefold()
+        bot_id = require_bot().id
 
-        # Сначала ищем точное совпадение среди известных пользователей.
-        # Если из-за старой записи username случайно указывает на автора
-        # команды, но автор уже сменил username, повторяем поиск без автора.
-        # Это защищает /warn @username и /unwarn @username от ложного
-        # сообщения «нельзя применить наказание к самому себе».
         row = await pool.fetchrow(
             """
             SELECT user_id, username, full_name
             FROM known_users
             WHERE LOWER(username)=LOWER($1)
-              AND ($2::BIGINT IS NULL OR user_id <> $2)
+              AND user_id <> $2
+              AND ($3::BIGINT IS NULL OR user_id <> $3)
             ORDER BY updated_at DESC
             LIMIT 1
             """,
             username,
+            bot_id,
             actor_id,
         )
         if row:
             return row["user_id"], row["username"], row["full_name"]
 
-        # Если совпадений кроме автора нет, разрешаем только его настоящий
-        # текущий username. Так команда /warn @имя не сможет случайно
-        # выбрать создателя из устаревшей записи.
-        if actor and (actor.username or "").lstrip("@").casefold() == normalized:
+        # Если совпадение есть только с автором команды, разрешаем его
+        # лишь для реального текущего username. Дальше обычная проверка
+        # команды не даст применить наказание к самому себе.
+        if actor and actor.id != bot_id and (actor.username or "").lstrip("@").casefold() == normalized:
             return actor.id, actor.username, actor.full_name
 
         return None, None, None
@@ -667,6 +625,8 @@ async def resolve_user(message: Message, token: str | None = None):
     numeric = token.lstrip("-")
     if numeric.isdigit():
         user_id = int(token)
+        if user_id == require_bot().id:
+            return None, None, None
         row = await pool.fetchrow(
             "SELECT username, full_name FROM known_users WHERE user_id=$1",
             user_id,
@@ -699,7 +659,11 @@ async def issue_warning(
     reason: str,
     admin_id: int,
     source_message_id: int | None = None,
-) -> tuple[bool, int | None, str | None, str | None]:
+) -> tuple[bool, int | None, str | None, str | None, str | None]:
+    """Выдаёт варн и на 4/4 автоматически оформляет вечный бан.
+
+    Возвращает: issued, warn_count, warn_number, action_error, ban_number.
+    """
     lock = get_warn_lock(chat_id, user_id)
     async with lock:
         result = await add_warn(
@@ -710,10 +674,11 @@ async def issue_warning(
             source_message_id,
         )
         if result is None:
-            return False, None, None, None
+            return False, None, None, None, None
 
         warn_count, warn_number = result
         action_error = None
+        ban_number = None
         try:
             if warn_count == 2:
                 await require_bot().restrict_chat_member(
@@ -730,21 +695,42 @@ async def issue_warning(
                     until_date=datetime.now(timezone.utc) + timedelta(hours=24),
                 )
             elif warn_count == 4:
+                # Четвёртый варн = автоматический вечный бан.
                 await require_bot().ban_chat_member(
                     chat_id, user_id, revoke_messages=True
                 )
-                await require_db().execute(
-                    """
-                    INSERT INTO users (user_id, banned, ban_until) VALUES ($1, TRUE, NULL)
-                    ON CONFLICT (user_id) DO UPDATE SET banned=TRUE, ban_until=NULL
-                    """,
-                    user_id,
-                )
+                pool = require_db()
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute(
+                            """
+                            INSERT INTO users (user_id, banned, ban_until)
+                            VALUES ($1, TRUE, NULL)
+                            ON CONFLICT (user_id) DO UPDATE
+                            SET banned=TRUE, ban_until=NULL
+                            """,
+                            user_id,
+                        )
+                        ban_number = format_number(await next_number(conn, "ban_counter"))
+                        await conn.execute(
+                            """
+                            INSERT INTO ban_logs
+                                (user_id, ban_number, reason, moderator_id, chat_id, message_id, created_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            """,
+                            user_id,
+                            ban_number,
+                            "Достигнут лимит варнов (4/4)",
+                            admin_id,
+                            chat_id,
+                            source_message_id,
+                            now_ts(),
+                        )
         except Exception as exc:
             action_error = str(exc)
             LOGGER.exception("Не удалось применить ступень наказания %s/4", warn_count)
 
-        return True, warn_count, warn_number, action_error
+        return True, warn_count, warn_number, action_error, ban_number
 
 
 async def apply_ban(
@@ -822,7 +808,10 @@ async def apply_unban(chat_id: int, user_id: int, moderator_id: int):
 
 
 async def clear_restrictions(chat_id: int, user_id: int) -> None:
-    await require_bot().restrict_chat_member(
+    bot_instance = require_bot()
+    if user_id == bot_instance.id:
+        raise RuntimeError("целью оказался сам бот; ограничение не изменено")
+    await bot_instance.restrict_chat_member(
         chat_id,
         user_id,
         permissions=ChatPermissions(
@@ -849,26 +838,35 @@ def build_warn_msg(mention: str, warn_count: int, reason: str, warn_number: str)
         for index, level in enumerate(levels, start=1)
     ]
     return (
-        f"{mention} получает варн ({warn_count}/4)\n"
-        f"Причина: «{esc(reason)}»\n— · —\n"
+        f"⚠️ {mention} получает варн ({warn_count}/4)\n"
+        f"Причина: «{esc(reason)}»\n"
+        "— • — • — • — • — • — • —\n"
         + "\n".join(lines)
-        + f"\n— · —\nID варна: {esc(warn_number)}\n— · —"
+        + "\n— • — • — • — • — • — • —\n"
+        f"🆔 ID варна: {esc(warn_number)}\n"
+        "⏳ Апелляцию можно подать в течение 24 часов с момента выдачи.\n"
+        "— • — • — • — • — • — • —"
     )
 
 
 def build_ban_msg(mention: str, reason: str, ban_number: str) -> str:
     return (
-        f"{mention} получает бан\nПричина: «{esc(reason)}»\n"
-        f"— · —\nID бана: {esc(ban_number)}\n— · —"
+        f"🔨 {mention} получает вечный бан\n"
+        f"Причина: «{esc(reason)}»\n"
+        "— • — • — • — • — • — • —\n"
+        f"🆔 ID бана: {esc(ban_number)}\n"
+        "⏳ Апелляцию можно подать в течение 24 часов с момента выдачи.\n"
+        "— • — • — • — • — • — • —"
     )
 
 
 def build_unwarn_msg(mention: str, unwarn_number: str) -> str:
-    return f"С пользователя {mention} сняты все варны (0/4)\n— · —\nНомер снятия: {esc(unwarn_number)}"
-
-
-def build_unban_msg(mention: str, unban_number: str) -> str:
-    return f"Пользователь {mention} разбанен\n— · —\nНомер разбана: {esc(unban_number)}"
+    return (
+        f"💚 С пользователя {mention} сняты все варны (0/4)\n"
+        "— • — • — • — • — • — • —\n"
+        f"🆔 Номер снятия: {esc(unwarn_number)}\n"
+        "— • — • — • — • — • — • —"
+    )
 
 
 async def send_admin_log(
@@ -883,7 +881,7 @@ async def send_admin_log(
         if url:
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="Перейти к сообщению", url=url)]
+                    [InlineKeyboardButton(text="🔗 Перейти к сообщению", url=url)]
                 ]
             )
     try:
@@ -997,11 +995,17 @@ async def start_cmd(msg: Message, state: FSMContext):
     payload = command_payload(msg)
     if msg.chat.type == "private" and (payload == "appeal" or payload.startswith("appeal_")):
         expected_violation = None
+        expected_type = None
         if payload.startswith("appeal_"):
-            raw_number = payload.removeprefix("appeal_")
-            if re.fullmatch(r"-\d{5}", raw_number):
+            raw = payload.removeprefix("appeal_")
+            typed_match = re.fullmatch(r"(warn|ban)_(-\d{5})", raw)
+            legacy_match = re.fullmatch(r"-\d{5}", raw)
+            if typed_match:
+                expected_type, raw_number = typed_match.groups()
                 expected_violation = f"#{raw_number}"
-        await appeal_start(msg, state, expected_violation)
+            elif legacy_match:
+                expected_violation = f"#{raw}"
+        await appeal_start(msg, state, expected_violation, expected_type)
         return
     await state.clear()
     await msg.answer(
@@ -1294,7 +1298,7 @@ async def warn_cmd(msg: Message):
         if msg.reply_to_message and msg.chat.id == target_chat
         else None
     )
-    issued, count, number, action_error = await issue_warning(
+    issued, count, number, action_error, ban_number = await issue_warning(
         target_chat,
         target_id,
         reason,
@@ -1306,18 +1310,26 @@ async def warn_cmd(msg: Message):
         return
     mention = user_mention(target_id, username, full_name)
     await msg.reply(
-        build_warn_msg(mention, count, reason, number), reply_markup=appeal_keyboard(number)
+        build_warn_msg(mention, count, reason, number),
+        reply_markup=None if ban_number else appeal_keyboard(number, "warn"),
     )
+    if ban_number:
+        await msg.reply(
+            build_ban_msg(mention, "Достигнут лимит варнов (4/4)", ban_number),
+            reply_markup=appeal_keyboard(ban_number, "ban"),
+        )
     if action_error:
         await msg.answer(
-            "⚠️ Варн записан, но автоматическое наказание Telegram не применилось. "
+            "⚠️ Наказание записано, но автоматическое ограничение Telegram не применилось. "
             f"Проверьте права бота. Ошибка: {esc(action_error)}"
         )
     await send_admin_log(
         "<b>ВЫДАН ВАРН</b>\n"
         f"Причина: {esc(reason)}\nID варна: {esc(number)}\n"
         f"Пользователь: {mention}\nID: <code>{target_id}</code>\n"
-        f"Предупреждений: {count}/4\nКем выдан: {user_mention(actor.id, actor.username, actor.full_name)}\n"
+        f"Предупреждений: {count}/4\n"
+        + (f"ID авто-бана: {esc(ban_number)}\n" if ban_number else "")
+        + f"Кем выдан: {user_mention(actor.id, actor.username, actor.full_name)}\n"
         f"Чат ID: <code>{target_chat}</code>\nВремя: {msk_time()} МСК",
         msg.chat.id if source_id else None,
         source_id,
@@ -1379,7 +1391,7 @@ async def ban_cmd(msg: Message):
         return
     mention = user_mention(target_id, username, full_name)
     await msg.reply(
-        build_ban_msg(mention, reason, number), reply_markup=appeal_keyboard(number)
+        build_ban_msg(mention, reason, number), reply_markup=appeal_keyboard(number, "ban")
     )
     await send_admin_log(
         "<b>ВЫДАН БАН</b>\n"
@@ -1403,20 +1415,19 @@ async def unwarn_cmd(msg: Message):
     payload = command_payload(msg)
     token = payload.split()[0] if payload else None
 
-    # Для /unwarn сначала ищем цель именно среди активных варнов.
-    # Это исключает ситуацию, когда users.warns устарел или в known_users
-    # осталась старая запись username. Reply по-прежнему поддерживается.
-    if msg.reply_to_message and msg.reply_to_message.from_user:
-        target_id, username, full_name = await resolve_user(msg)
-    else:
-        target_id, username, full_name = await resolve_active_warn_target(token)
-        if target_id is None:
-            target_id, username, full_name = await resolve_user(msg, token)
+    # Цель определяем одинаково для reply и /unwarn @username/ID.
+    # Наличие варнов проверяется отдельно через users.warns + warn_logs.
+    target_id, username, full_name = await resolve_user(
+        msg, None if msg.reply_to_message else token
+    )
 
     if target_id is None:
         await msg.answer(
-            "⚠️ Не удалось найти пользователя с активным варном. Используйте @username или Telegram ID, известный боту, либо ответьте на его сообщение."
+            "⚠️ Не удалось найти пользователя. Используйте @username или Telegram ID, известный боту, либо ответьте на его сообщение."
         )
+        return
+    if target_id == require_bot().id:
+        await msg.answer("⚠️ Нельзя снять ограничения с самого бота.")
         return
     allowed, permission_error, mod_level, target_level = await can_punish(
         actor.id, target_id
@@ -1586,10 +1597,10 @@ async def report_cmd(msg: Message):
     keyboard_rows = []
     if source_url:
         keyboard_rows.append(
-            [InlineKeyboardButton(text="Перейти к сообщению", url=source_url)]
+            [InlineKeyboardButton(text="🔗 Перейти к сообщению", url=source_url)]
         )
     keyboard_rows.append(
-        [InlineKeyboardButton(text="Рассмотреть", callback_data=f"report_take_{number}")]
+        [InlineKeyboardButton(text="👀 Рассмотреть", callback_data=f"report_take_{number}")]
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
@@ -1656,8 +1667,8 @@ async def report_cb(cb: CallbackQuery):
             source_url = message_url(int(row["chat_id"]), int(row["message_id"]))
             rows = []
             if source_url:
-                rows.append([InlineKeyboardButton(text="Перейти к сообщению", url=source_url)])
-            rows.append([InlineKeyboardButton(text="Завершить рассмотрение", callback_data=f"report_finish_{number}")])
+                rows.append([InlineKeyboardButton(text="🔗 Перейти к сообщению", url=source_url)])
+            rows.append([InlineKeyboardButton(text="✅ Завершить рассмотрение", callback_data=f"report_finish_{number}")])
             await cb.message.edit_text(
                 f"{cb.message.html_text}\n\n👀 <b>Рассматривает:</b> "
                 f"{user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}",
@@ -1697,7 +1708,7 @@ async def report_cb(cb: CallbackQuery):
         source_url = message_url(int(row["chat_id"]), int(row["message_id"]))
         rows = []
         if source_url:
-            rows.append([InlineKeyboardButton(text="Перейти к сообщению", url=source_url)])
+            rows.append([InlineKeyboardButton(text="🔗 Перейти к сообщению", url=source_url)])
         await cb.message.edit_text(
             f"{cb.message.html_text}\n\n"
             f"✅ <b>Рассмотрение завершено.</b>\n"
@@ -1737,47 +1748,166 @@ async def stats_cmd(msg: Message):
 
 
 # ========================== АПЕЛЛЯЦИИ ==========================
+async def get_available_appeals(user_id: int):
+    """Возвращает наказания, по которым пользователь ещё может подать апелляцию.
+
+    Срок — 24 часа с момента выдачи. Варн должен быть активным, бан — текущим.
+    """
+    cutoff = now_ts() - 24 * 60 * 60
+    pool = require_db()
+    rows = await pool.fetch(
+        """
+        SELECT warn_number AS violation_number, 'warn' AS violation_type,
+               reason, created_at
+        FROM warn_logs
+        WHERE user_id=$1 AND is_active=TRUE AND created_at >= $2
+          AND NOT EXISTS (SELECT 1 FROM users WHERE user_id=$1 AND banned=TRUE)
+
+        UNION ALL
+
+        SELECT b.ban_number AS violation_number, 'ban' AS violation_type,
+               b.reason, b.created_at
+        FROM ban_logs b
+        JOIN users u ON u.user_id=b.user_id
+        WHERE b.user_id=$1 AND u.banned=TRUE AND b.created_at >= $2
+
+        ORDER BY created_at DESC
+        LIMIT 20
+        """,
+        user_id,
+        cutoff,
+    )
+    return rows
+
+
+def available_appeals_keyboard(rows) -> InlineKeyboardMarkup | None:
+    buttons = []
+    for row in rows:
+        kind = str(row["violation_type"])
+        label = "🔨 Бан" if kind == "ban" else "⚠️ Варн"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"📝 {label} {row['violation_number']}",
+                url=f"https://t.me/{BOT_USERNAME}?start=appeal_{kind}_{str(row['violation_number']).replace('#', '')}",
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+
+
+async def get_appeal_target(user_id: int, violation_number: str, violation_type: str):
+    cutoff = now_ts() - 24 * 60 * 60
+    pool = require_db()
+    if violation_type == "ban":
+        return await pool.fetchrow(
+            """
+            SELECT ban_number AS violation_number, reason, created_at
+            FROM ban_logs
+            WHERE ban_number=$1 AND user_id=$2 AND created_at >= $3
+              AND EXISTS (SELECT 1 FROM users WHERE user_id=$2 AND banned=TRUE)
+            LIMIT 1
+            """,
+            violation_number, user_id, cutoff,
+        )
+    return await pool.fetchrow(
+        """
+        SELECT warn_number AS violation_number, reason, created_at
+        FROM warn_logs
+        WHERE warn_number=$1 AND user_id=$2 AND is_active=TRUE AND created_at >= $3
+        LIMIT 1
+        """,
+        violation_number, user_id, cutoff,
+    )
+
+
+async def delete_user_message_safely(msg: Message) -> None:
+    try:
+        await msg.delete()
+    except Exception:
+        LOGGER.debug("Не удалось удалить сообщение пользователя", exc_info=True)
+
+
 @dp.message(Command("appeal"))
 async def appeal_start(
-    msg: Message, state: FSMContext, expected_violation: str | None = None
+    msg: Message,
+    state: FSMContext,
+    expected_violation: str | None = None,
+    expected_type: str | None = None,
 ):
     if msg.chat.type != "private" or not msg.from_user:
         await msg.answer("📝 Используйте /appeal в личных сообщениях бота.")
         return
-    row = await require_db().fetchrow(
-        "SELECT block_until FROM appeal_blocks WHERE user_id=$1",
-        msg.from_user.id,
-    )
+
+    user_id = msg.from_user.id
+    pool = require_db()
     current_time = now_ts()
-    if row and int(row["block_until"]) > current_time:
-        until = datetime.fromtimestamp(int(row["block_until"]), MSK).strftime(
+
+    block = await pool.fetchrow(
+        "SELECT block_until FROM appeal_blocks WHERE user_id=$1", user_id
+    )
+    if block and int(block["block_until"]) > current_time:
+        until = datetime.fromtimestamp(int(block["block_until"]), MSK).strftime(
             "%d.%m.%Y %H:%M:%S"
         )
-        await msg.answer(f"⏳ Слишком много заявок. Повторите после {until} МСК.")
+        await msg.answer(
+            "⛔ <b>Подача апелляций временно заблокирована.</b>\n\n"
+            f"Повторить можно после <b>{until} МСК</b>."
+        )
         return
-    pending = await require_db().fetchval(
+    if block:
+        await pool.execute("DELETE FROM appeal_blocks WHERE user_id=$1", user_id)
+
+    pending = await pool.fetchval(
         "SELECT COUNT(*) FROM appeals WHERE user_id=$1 AND status='pending'",
-        msg.from_user.id,
+        user_id,
     )
-    if pending:
-        await msg.answer("⚠️ У вас уже есть апелляция, ожидающая рассмотрения.")
+    if pending and not expected_violation:
+        await msg.answer(
+            "⏳ <b>У вас уже есть активная апелляция.</b>\n\n"
+            "Дождитесь решения администрации."
+        )
         return
 
-    await state.update_data(appeal_violation=expected_violation)
     if expected_violation:
+        target = await get_appeal_target(user_id, expected_violation, expected_type or "warn")
+        if not target:
+            await msg.answer(
+                "⏰ <b>Срок подачи этой апелляции истёк</b> или наказание уже не является активным.\n\n"
+                "Апелляцию можно подать только в течение 24 часов после выдачи наказания."
+            )
+            return
+        await state.update_data(
+            appeal_violation=expected_violation,
+            appeal_type=expected_type or "warn",
+        )
+        kind = "бан" if (expected_type or "warn") == "ban" else "варн"
         await msg.answer(
             "📝 <b>Подача апелляции</b>\n\n"
-            f"Номер наказания: <code>{esc(expected_violation)}</code>\n"
-            "Теперь отправьте текст обжалования одним сообщением."
+            f"{('🔨' if (expected_type or 'warn') == 'ban' else '⚠️')} Наказание: <b>{kind}</b>\n"
+            f"🆔 Номер: <code>{esc(expected_violation)}</code>\n"
+            f"📌 Причина: «{esc(target['reason'])}»\n\n"
+            "✍️ <b>Как заполнить:</b>\n"
+            "Одним сообщением напишите, почему наказание следует отменить.\n"
+            "Username указывать не нужно — бот автоматически проверит, что апелляцию подаёт именно владелец наказания.\n\n"
+            "⏳ Срок подачи — 24 часа с момента наказания.\n"
+            "❤️ Пожалуйста, изложите ситуацию спокойно и по существу."
         )
     else:
+        rows = await get_available_appeals(user_id)
+        if not rows:
+            await state.clear()
+            await msg.answer(
+                "📭 <b>Доступных апелляций нет.</b>\n\n"
+                "Апелляция доступна только на активное наказание, выданное не более 24 часов назад."
+            )
+            return
         await msg.answer(
-            "📝 <b>Подача апелляции</b>\n\n"
-            "Отправьте одним сообщением три части, каждую с новой строки:\n"
-            "<code>#-00001</code> — номер вашего варна или бана\n"
-            "<code>@username</code> — ваш username\n"
-            "текст обжалования"
+            "📝 <b>Ваши доступные апелляции</b>\n\n"
+            "Выберите наказание ниже. Апелляцию можно подать только на своё наказание и только в течение 24 часов с момента его выдачи.",
+            reply_markup=available_appeals_keyboard(rows),
         )
+        await state.clear()
+        return
+
     await state.set_state(AppealState.waiting_text)
 
 
@@ -1786,115 +1916,127 @@ async def appeal_text(msg: Message, state: FSMContext):
     if not msg.from_user:
         await state.clear()
         return
+
     data = await state.get_data()
     expected_violation = data.get("appeal_violation")
-    lines = [line.strip() for line in (msg.text or "").splitlines() if line.strip()]
-    violation = next((line for line in lines if re.fullmatch(r"#-\d{5}", line)), None)
-
-    if expected_violation:
-        violation = expected_violation
-        appeal_body = "\n".join(lines).strip()
-        username = f"@{msg.from_user.username}" if msg.from_user.username else None
-    else:
-        username = next(
-            (line for line in lines if re.fullmatch(r"@[A-Za-z0-9_]{5,32}", line)), None
-        )
-        body = [line for line in lines if line not in (violation, username)]
-        appeal_body = "\n".join(body).strip()
-
-    if not violation or not appeal_body:
-        await msg.answer(
-            "❌ Неверный формат апелляции: укажите номер наказания и текст обжалования."
-        )
-        return
-    if not expected_violation and not username:
-        await msg.answer("❌ Укажите ваш @username в апелляции.")
-        return
-    if expected_violation and violation != expected_violation:
-        await msg.answer("❌ Нельзя изменить наказание, выбранное кнопкой апелляции.")
-        return
-
+    expected_type = data.get("appeal_type")
     pool = require_db()
-    is_owner = await pool.fetchval(
-        """
-        SELECT EXISTS(
-            SELECT 1 FROM warn_logs WHERE warn_number=$1 AND user_id=$2
-        ) OR EXISTS(
-            SELECT 1 FROM ban_logs WHERE ban_number=$1 AND user_id=$2
-        )
-        """,
-        violation,
-        msg.from_user.id,
-    )
-    if not is_owner:
+    user_id = msg.from_user.id
+
+    if not expected_violation:
+        await state.clear()
         await msg.answer(
-            "⛔ Апелляцию по этому наказанию может подать только пользователь, "
-            "которому оно было выдано."
+            "⚠️ Сначала выберите наказание для апелляции через кнопку 📝 или команду /appeal."
         )
+        return
+
+    lines = [line.strip() for line in (msg.text or "").splitlines() if line.strip()]
+    appeal_body = "\n".join(lines).strip()
+    if not appeal_body:
+        await msg.answer("✍️ Напишите текст апелляции одним сообщением.")
         return
     if len(appeal_body) > 2000:
         await msg.answer("⚠️ Текст апелляции слишком длинный: максимум 2000 символов.")
         return
+
+    # Повторно проверяем владельца и 24-часовой срок прямо перед созданием записи.
+    target = await get_appeal_target(user_id, expected_violation, expected_type or "warn")
+    if not target:
+        await state.clear()
+        await msg.answer(
+            "⏰ <b>Апелляцию отправить нельзя.</b>\n\n"
+            "Срок 24 часа истёк либо наказание уже не активно."
+        )
+        return
+
+    # Две попытки подачи за час = текущая заявка не создаётся, сообщение удаляется,
+    # после чего включается часовой cooldown.
     one_hour_ago = now_ts() - 3600
-    count = await require_db().fetchval(
+    recent_count = await pool.fetchval(
         "SELECT COUNT(*) FROM appeals WHERE user_id=$1 AND created_at>$2",
-        msg.from_user.id,
+        user_id,
         one_hour_ago,
     )
-    if count >= 2:
+    if recent_count >= 1:
         block_until = now_ts() + 3600
-        await require_db().execute(
+        await pool.execute(
             """
             INSERT INTO appeal_blocks (user_id, block_until) VALUES ($1, $2)
             ON CONFLICT (user_id) DO UPDATE SET block_until=EXCLUDED.block_until
             """,
-            msg.from_user.id,
+            user_id,
             block_until,
         )
-        await msg.answer(
-            "⛔ Лимит — две апелляции в час. Доступ заблокирован на один час."
-        )
+        await delete_user_message_safely(msg)
         await state.clear()
+        await msg.answer(
+            "🚫 <b>Слишком много попыток подачи апелляции.</b>\n\n"
+            "Вторая заявка за час автоматически отменена.\n"
+            "⏳ Следующую апелляцию можно подать через 1 час."
+        )
         return
-    pool = require_db()
+
+    pending = await pool.fetchval(
+        "SELECT COUNT(*) FROM appeals WHERE user_id=$1 AND status='pending'",
+        user_id,
+    )
+    if pending:
+        await delete_user_message_safely(msg)
+        await state.clear()
+        await msg.answer(
+            "⏳ <b>У вас уже есть активная апелляция.</b>\n\n"
+            "Повторная заявка отменена. Дождитесь решения администрации."
+        )
+        return
+
+    username = f"@{msg.from_user.username}" if msg.from_user.username else None
     async with pool.acquire() as conn:
         async with conn.transaction():
             number = format_number(await next_number(conn, "appeal_counter"))
             await conn.execute(
                 """
                 INSERT INTO appeals
-                    (appeal_number, user_id, username, violation_number, appeal_text, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                    (appeal_number, user_id, username, violation_number, violation_type, appeal_text, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 """,
                 number,
-                msg.from_user.id,
+                user_id,
                 username,
-                violation,
+                expected_violation,
+                expected_type or "warn",
                 appeal_body,
                 now_ts(),
             )
+
     await state.clear()
     hubsup = await get_config("hubsup_id")
     if not hubsup:
         await pool.execute("DELETE FROM appeals WHERE appeal_number=$1", number)
         await msg.answer("❌ Административный чат не подключён. Попробуйте позже.")
         return
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Принять", callback_data=f"appeal_approve_{number}"
+                    text="✅ Принять", callback_data=f"appeal_approve_{number}"
                 ),
                 InlineKeyboardButton(
-                    text="Отказать", callback_data=f"appeal_reject_{number}"
+                    text="❌ Отказать", callback_data=f"appeal_reject_{number}"
                 ),
             ]
         ]
     )
+    kind = "бан" if expected_type == "ban" else "варн"
     report = (
-        f"<b>Апелляция {esc(number)}</b>\n"
-        f"Нарушение: {esc(violation)}\nПользователь: {esc(username)}\n"
-        f"Telegram ID: <code>{msg.from_user.id}</code>\n\n{esc(appeal_body)}"
+        f"📝 <b>Апелляция {esc(number)}</b>\n"
+        "— • — • — • — • — • — • —\n"
+        f"{('🔨' if expected_type == 'ban' else '⚠️')} Наказание: <b>{kind}</b>\n"
+        f"🆔 Номер наказания: <code>{esc(expected_violation)}</code>\n"
+        f"👤 Пользователь: {user_mention(user_id, msg.from_user.username, msg.from_user.full_name)}\n"
+        f"🆔 Telegram ID: <code>{user_id}</code>\n\n"
+        f"💬 {esc(appeal_body)}\n"
+        "— • — • — • — • — • — • —"
     )
     try:
         await require_bot().send_message(
@@ -1908,7 +2050,111 @@ async def appeal_text(msg: Message, state: FSMContext):
         LOGGER.exception("Не удалось доставить апелляцию")
         await msg.answer("❌ Не удалось доставить апелляцию. Попробуйте позже.")
         return
-    await msg.answer(f"✅ Апелляция {esc(number)} принята. Ожидайте решения.")
+    await msg.answer(
+        f"💚 <b>Апелляция {esc(number)} отправлена.</b>\n\n"
+        "Ожидайте решения администрации."
+    )
+
+
+async def approve_appeal_punishment(
+    user_id: int,
+    violation_number: str,
+    violation_type: str,
+    moderator_id: int,
+) -> str:
+    """Применяет результат одобренной апелляции к наказанию пользователя."""
+    pool = require_db()
+
+    # Старая кнопка апелляции могла не содержать тип наказания.
+    if violation_type not in ("warn", "ban"):
+        ban_row = await pool.fetchrow(
+            "SELECT 1 FROM ban_logs WHERE ban_number=$1 AND user_id=$2 LIMIT 1",
+            violation_number,
+            user_id,
+        )
+        warn_row = await pool.fetchrow(
+            "SELECT 1 FROM warn_logs WHERE warn_number=$1 AND user_id=$2 LIMIT 1",
+            violation_number,
+            user_id,
+        )
+        if ban_row:
+            violation_type = "ban"
+        elif warn_row:
+            violation_type = "warn"
+        else:
+            raise RuntimeError("наказание для апелляции не найдено")
+
+    if violation_type == "ban":
+        rows = await pool.fetch(
+            "SELECT DISTINCT chat_id FROM ban_logs WHERE user_id=$1",
+            user_id,
+        )
+        errors = []
+        for row in rows:
+            chat_id = int(row["chat_id"])
+            try:
+                await require_bot().unban_chat_member(
+                    chat_id, user_id, only_if_banned=True
+                )
+            except Exception as exc:
+                errors.append(f"{chat_id}: {exc}")
+                LOGGER.exception(
+                    "Не удалось снять бан при принятии апелляции: user=%s chat=%s",
+                    user_id,
+                    chat_id,
+                )
+
+        if errors:
+            raise RuntimeError(
+                "не удалось снять бан во всех чатах: " + "; ".join(errors)
+            )
+
+        await remove_all_warns(user_id)
+        await pool.execute(
+            """
+            INSERT INTO users (user_id, warns, banned, ban_until)
+            VALUES ($1, 0, FALSE, NULL)
+            ON CONFLICT (user_id) DO UPDATE
+            SET banned=FALSE, ban_until=NULL
+            """,
+            user_id,
+        )
+        chat_id = int(rows[0]["chat_id"]) if rows else await moderation_chat_id(TOPICS["chat"])
+        result = await add_warn(
+            user_id,
+            "Апелляция по бану одобрена",
+            moderator_id,
+            chat_id,
+            None,
+        )
+        if result is None:
+            raise RuntimeError("не удалось выдать защитный 1-й варн после апелляции")
+        return "бан снят, все варны сняты, выдан 1 варн для подстраховки"
+
+    warn_chats = await pool.fetch(
+        "SELECT DISTINCT chat_id FROM warn_logs WHERE user_id=$1",
+        user_id,
+    )
+    await remove_all_warns(user_id)
+
+    restriction_errors = []
+    for row in warn_chats:
+        chat_id = int(row["chat_id"])
+        try:
+            await clear_restrictions(chat_id, user_id)
+        except Exception as exc:
+            restriction_errors.append(f"{chat_id}: {exc}")
+            LOGGER.exception(
+                "Не удалось снять ограничение при принятии апелляции на варн: user=%s chat=%s",
+                user_id,
+                chat_id,
+            )
+
+    if restriction_errors:
+        return "все варны сняты, но часть Telegram-ограничений не удалось снять: " + "; ".join(
+            restriction_errors
+        )
+    return "все варны сняты"
 
 
 @dp.callback_query(F.data.startswith("appeal_"))
@@ -1922,33 +2168,102 @@ async def appeal_cb(cb: CallbackQuery):
         return
     action, number = match.groups()
     status = "approved" if action == "approve" else "rejected"
-    row = await require_db().fetchrow(
-        """
-        UPDATE appeals SET status=$2
-        WHERE appeal_number=$1 AND status='pending'
-        RETURNING user_id
-        """,
-        number,
-        status,
-    )
-    if not row:
-        await cb.answer("Эта апелляция уже рассмотрена.", show_alert=True)
-        return
     approved = status == "approved"
-    try:
-        await require_bot().send_message(
-            int(row["user_id"]),
-            "✅ Ваша апелляция одобрена."
-            if approved
-            else "❌ Ваша апелляция отклонена.",
+    if approved:
+        # Сначала атомарно забираем апелляцию в обработку, чтобы два админа
+        # одновременно не выдали два защитных варна/дважды не сняли наказание.
+        row = await require_db().fetchrow(
+            """
+            UPDATE appeals SET status='processing'
+            WHERE appeal_number=$1 AND status='pending'
+            RETURNING user_id, violation_number, violation_type
+            """,
+            number,
         )
+        if not row:
+            await cb.answer("Эта апелляция уже рассматривается или рассмотрена.", show_alert=True)
+            return
+    else:
+        row = await require_db().fetchrow(
+            """
+            UPDATE appeals SET status='rejected'
+            WHERE appeal_number=$1 AND status='pending'
+            RETURNING user_id, violation_number, violation_type
+            """,
+            number,
+        )
+        if not row:
+            await cb.answer("Эта апелляция уже рассматривается или рассмотрена.", show_alert=True)
+            return
+
+    action_result = None
+    action_error = None
+    if approved:
+        try:
+            action_result = await approve_appeal_punishment(
+                int(row["user_id"]),
+                str(row["violation_number"]),
+                str(row["violation_type"] or "unknown"),
+                cb.from_user.id,
+            )
+            await require_db().execute(
+                "UPDATE appeals SET status='approved' WHERE appeal_number=$1 AND status='processing'",
+                number,
+            )
+        except Exception as exc:
+            action_error = str(exc)
+            LOGGER.exception("Не удалось применить одобренную апелляцию")
+            await require_db().execute(
+                "UPDATE appeals SET status='pending' WHERE appeal_number=$1 AND status='processing'",
+                number,
+            )
+
+    try:
+        if approved and action_error:
+            user_text = (
+                "⚠️ Ваша апелляция одобрена, но применить решение полностью не удалось. "
+                f"Администратор исправит это вручную. Ошибка: {action_error}"
+            )
+        elif approved:
+            if str(row["violation_type"] or "warn") == "ban":
+                user_text = (
+                    "💖 <b>Ваша апелляция принята!</b>\n\n"
+                    "🔓 Ваш вечный бан снят, а все предыдущие варны аннулированы.\n\n"
+                    "⚠️ <b>На вас наложен защитный варн (1/4).</b>\n"
+                    "Он выдан автоматически для подстраховки после принятия апелляции.\n\n"
+                    "Пожалуйста, соблюдайте правила чата — повторные нарушения снова учитываются.\n"
+                    "— • — • — • — • — • — • —"
+                )
+            else:
+                user_text = (
+                    "💖 <b>Ваша апелляция принята!</b>\n\n"
+                    "✅ Все ваши варны сняты.\n"
+                    "📊 Текущее количество варнов: <b>0/4</b>.\n\n"
+                    "Спасибо за обращение. Пожалуйста, соблюдайте правила чата.\n"
+                    "— • — • — • — • — • — • —"
+                )
+        else:
+            user_text = (
+                "❌ <b>Ваша апелляция отклонена.</b>\n\n"
+                "Решение администрации остаётся в силе.\n"
+                "Если срок апелляции по другому доступному наказанию ещё не истёк, "
+                "вы сможете подать отдельную апелляцию.\n"
+                "— • — • — • — • — • — • —"
+            )
+        await require_bot().send_message(int(row["user_id"]), user_text)
     except Exception:
         LOGGER.exception("Не удалось уведомить автора апелляции")
     if cb.message:
-        decision = "✅ Одобрено" if approved else "❌ Отказано"
+        decision = "💖 Одобрено" if approved else "❌ Отказано"
+        extra = ""
+        if approved and action_result:
+            extra = f"\nДействие: {esc(action_result)}"
+        if approved and action_error:
+            extra = f"\n⚠️ Ошибка применения: {esc(action_error)}"
         await cb.message.edit_text(
             f"{cb.message.html_text}\n\n{decision}: "
             f"{user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}"
+            f"{extra}"
         )
     await cb.answer("Готово.")
 
@@ -2009,7 +2324,7 @@ async def handle_links(msg: Message):
                 )
         return
 
-    issued, count, number, action_error = await issue_warning(
+    issued, count, number, action_error, ban_number = await issue_warning(
         msg.chat.id,
         msg.from_user.id,
         "Ссылка",
@@ -2033,8 +2348,15 @@ async def handle_links(msg: Message):
         msg.chat.id,
         build_warn_msg(mention, count, "Ссылка", number),
         message_thread_id=msg.message_thread_id,
-        reply_markup=appeal_keyboard(number),
+        reply_markup=None if ban_number else appeal_keyboard(number, "warn"),
     )
+    if ban_number:
+        await require_bot().send_message(
+            msg.chat.id,
+            build_ban_msg(mention, "Достигнут лимит варнов (4/4)", ban_number),
+            message_thread_id=msg.message_thread_id,
+            reply_markup=appeal_keyboard(ban_number, "ban"),
+        )
     if action_error:
         await send_admin_log(
             f"⚠️ Варн {esc(number)} записан, но наказание Telegram не применилось: {esc(action_error)}"
@@ -2102,3 +2424,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
