@@ -831,6 +831,9 @@ async def clear_restrictions(chat_id: int, user_id: int) -> None:
 
 
 # ========================== СООБЩЕНИЯ И ЛОГИ ==========================
+SEPARATOR = "— • — • — • — • — • — • —"
+
+
 def build_warn_msg(mention: str, warn_count: int, reason: str, warn_number: str) -> str:
     levels = ("предупреждение", "мут на 5 минут", "мут на 24 часа", "бан")
     lines = [
@@ -840,12 +843,12 @@ def build_warn_msg(mention: str, warn_count: int, reason: str, warn_number: str)
     return (
         f"⚠️ {mention} получает варн ({warn_count}/4)\n"
         f"Причина: «{esc(reason)}»\n"
-        "— • — • — • — • — • — • —\n"
+        f"{SEPARATOR}\n"
         + "\n".join(lines)
-        + "\n— • — • — • — • — • — • —\n"
-        f"🆔 ID варна: {esc(warn_number)}\n"
+        + f"\n{SEPARATOR}\n"
+        f"🆔 {esc(warn_number)}\n"
         "⏳ Апелляцию можно подать в течение 24 часов с момента выдачи.\n"
-        "— • — • — • — • — • — • —"
+        f"{SEPARATOR}"
     )
 
 
@@ -853,11 +856,36 @@ def build_ban_msg(mention: str, reason: str, ban_number: str) -> str:
     return (
         f"🔨 {mention} получает вечный бан\n"
         f"Причина: «{esc(reason)}»\n"
-        "— • — • — • — • — • — • —\n"
-        f"🆔 ID бана: {esc(ban_number)}\n"
+        f"{SEPARATOR}\n"
+        f"🆔 {esc(ban_number)}\n"
         "⏳ Апелляцию можно подать в течение 24 часов с момента выдачи.\n"
-        "— • — • — • — • — • — • —"
+        f"{SEPARATOR}"
     )
+
+
+def build_ban_dm_msg(reason: str, ban_number: str) -> str:
+    return (
+        "🔨 <b>Вам выдан вечный бан</b>\n"
+        f"Причина: «{esc(reason)}»\n"
+        f"{SEPARATOR}\n"
+        f"🆔 {esc(ban_number)}\n"
+        "⏳ Апелляцию можно подать в течение 24 часов с момента выдачи.\n"
+        f"{SEPARATOR}\n"
+        "💬 Если вы считаете бан ошибочным, нажмите кнопку ниже и подайте апелляцию."
+    )
+
+
+async def notify_ban_in_dm(user_id: int, reason: str, ban_number: str) -> None:
+    try:
+        await require_bot().send_message(
+            user_id,
+            build_ban_dm_msg(reason, ban_number),
+            reply_markup=appeal_keyboard(ban_number, "ban"),
+        )
+    except Exception:
+        # Бот не может написать пользователю первым, если тот не открыл ЛС с ботом
+        # или заблокировал его. Бан при этом уже остаётся применённым в чате.
+        LOGGER.info("Не удалось отправить ЛС о бане пользователю %s", user_id, exc_info=True)
 
 
 def build_unwarn_msg(mention: str, unwarn_number: str) -> str:
@@ -1269,12 +1297,12 @@ async def warn_cmd(msg: Message):
             "известного боту пользователя, либо ответьте на его сообщение."
         )
         return
+    if target_id == actor.id:
+        await msg.answer("❌ Нельзя выдать варн самому себе.")
+        return
     error = validate_reason(reason)
     if error:
         await msg.answer(error)
-        return
-    if target_id == actor.id:
-        await msg.answer("❌ Нельзя выдать варн самому себе.")
         return
     allowed, permission_error, mod_level, target_level = await can_punish(
         actor.id, target_id
@@ -1314,9 +1342,24 @@ async def warn_cmd(msg: Message):
         reply_markup=None if ban_number else appeal_keyboard(number, "warn"),
     )
     if ban_number:
+        auto_ban_reason = "Достигнут лимит варнов (4/4)"
         await msg.reply(
-            build_ban_msg(mention, "Достигнут лимит варнов (4/4)", ban_number),
+            build_ban_msg(mention, auto_ban_reason, ban_number),
             reply_markup=appeal_keyboard(ban_number, "ban"),
+        )
+        await notify_ban_in_dm(target_id, auto_ban_reason, ban_number)
+        await send_admin_log(
+            "◆<b>ВЫДАН БАН ⚠️</b>◆\n"
+            f"{SEPARATOR}\n"
+            f"Причина: {esc(auto_ban_reason)}\n"
+            f"𝐈𝐃: {esc(ban_number)}\n"
+            f"Пользователь: {mention}\n"
+            f"𝐈𝐃: {target_id}\n"
+            f"Кем выдан: {user_mention(actor.id, actor.username, actor.full_name)}\n"
+            f"Чат 𝐈𝐃 {target_chat}\n"
+            f"Время: {msk_time()} МСК",
+            msg.chat.id if source_id else None,
+            source_id,
         )
     if action_error:
         await msg.answer(
@@ -1324,13 +1367,15 @@ async def warn_cmd(msg: Message):
             f"Проверьте права бота. Ошибка: {esc(action_error)}"
         )
     await send_admin_log(
-        "<b>ВЫДАН ВАРН</b>\n"
-        f"Причина: {esc(reason)}\nID варна: {esc(number)}\n"
-        f"Пользователь: {mention}\nID: <code>{target_id}</code>\n"
-        f"Предупреждений: {count}/4\n"
-        + (f"ID авто-бана: {esc(ban_number)}\n" if ban_number else "")
-        + f"Кем выдан: {user_mention(actor.id, actor.username, actor.full_name)}\n"
-        f"Чат ID: <code>{target_chat}</code>\nВремя: {msk_time()} МСК",
+        "◆<b>ВЫДАН ВАРН ⚠️</b>◆\n"
+        f"{SEPARATOR}\n"
+        f"Причина: {esc(reason)}\n"
+        f"𝐈𝐃: {esc(number)}\n"
+        f"Пользователь: {mention}\n"
+        f"𝐈𝐃: {target_id}\n"
+        f"Кем выдан: {user_mention(actor.id, actor.username, actor.full_name)}\n"
+        f"Чат 𝐈𝐃 {target_chat}\n"
+        f"Время: {msk_time()} МСК",
         msg.chat.id if source_id else None,
         source_id,
     )
@@ -1350,12 +1395,12 @@ async def ban_cmd(msg: Message):
             "⚠️ Ответьте на сообщение пользователя либо укажите известный боту @username или ID."
         )
         return
+    if target_id == actor.id:
+        await msg.answer("❌ Нельзя забанить самого себя.")
+        return
     error = validate_reason(reason)
     if error:
         await msg.answer(error)
-        return
-    if target_id == actor.id:
-        await msg.answer("❌ Нельзя забанить самого себя.")
         return
     allowed, permission_error, mod_level, target_level = await can_punish(
         actor.id, target_id
@@ -1393,12 +1438,17 @@ async def ban_cmd(msg: Message):
     await msg.reply(
         build_ban_msg(mention, reason, number), reply_markup=appeal_keyboard(number, "ban")
     )
+    await notify_ban_in_dm(target_id, reason, number)
     await send_admin_log(
-        "<b>ВЫДАН БАН</b>\n"
-        f"Причина: {esc(reason)}\nID бана: {esc(number)}\n"
-        f"Пользователь: {mention}\nID: <code>{target_id}</code>\n"
+        "◆<b>ВЫДАН БАН ⚠️</b>◆\n"
+        f"{SEPARATOR}\n"
+        f"Причина: {esc(reason)}\n"
+        f"𝐈𝐃: {esc(number)}\n"
+        f"Пользователь: {mention}\n"
+        f"𝐈𝐃: {target_id}\n"
         f"Кем выдан: {user_mention(actor.id, actor.username, actor.full_name)}\n"
-        f"Чат ID: <code>{target_chat}</code>\nВремя: {msk_time()} МСК",
+        f"Чат 𝐈𝐃 {target_chat}\n"
+        f"Время: {msk_time()} МСК",
         msg.chat.id if source_id else None,
         source_id,
     )
@@ -1479,10 +1529,14 @@ async def unwarn_cmd(msg: Message):
     mention = user_mention(target_id, username, full_name)
     await msg.reply(build_unwarn_msg(mention, number))
     await send_admin_log(
-        "<b>СНЯТЫ ВСЕ ВАРНЫ</b>\n"
-        f"Номер снятия: {esc(number)}\nПользователь: {mention}\nID: <code>{target_id}</code>\n"
+        "◆<b>СНЯТЫ ВСЕ ВАРНЫ 💚</b>◆\n"
+        f"{SEPARATOR}\n"
+        f"𝐈𝐃: {esc(number)}\n"
+        f"Пользователь: {mention}\n"
+        f"𝐈𝐃: {target_id}\n"
         f"Кем сняты: {user_mention(actor.id, actor.username, actor.full_name)}\n"
-        f"Чат ID: <code>{target_chat}</code>\nВремя: {msk_time()} МСК"
+        f"Чат 𝐈𝐃 {target_chat}\n"
+        f"Время: {msk_time()} МСК"
     )
 
 
@@ -1533,10 +1587,14 @@ async def unban_cmd(msg: Message):
     mention = user_mention(target_id, username, full_name)
     await msg.reply(build_unban_msg(mention, number))
     await send_admin_log(
-        "<b>СНЯТ БАН</b>\n"
-        f"Номер разбана: {esc(number)}\nПользователь: {mention}\nID: <code>{target_id}</code>\n"
+        "◆<b>СНЯТ БАН 💚</b>◆\n"
+        f"{SEPARATOR}\n"
+        f"𝐈𝐃: {esc(number)}\n"
+        f"Пользователь: {mention}\n"
+        f"𝐈𝐃: {target_id}\n"
         f"Кем снят: {user_mention(actor.id, actor.username, actor.full_name)}\n"
-        f"Чат ID: <code>{target_chat}</code>\nВремя: {msk_time()} МСК"
+        f"Чат 𝐈𝐃 {target_chat}\n"
+        f"Время: {msk_time()} МСК"
     )
 
 
@@ -1588,10 +1646,16 @@ async def report_cmd(msg: Message):
         return
 
     text = (
-        f"<b>Получен репорт {esc(number)}</b>\n"
+        f"◆<b>ПОЛУЧЕН РЕПОРТ ⚠️</b>◆\n"
+        f"{SEPARATOR}\n"
+        f"Причина: {esc(reason)}\n"
+        f"𝐈𝐃: {esc(number)}\n"
+        f"Пользователь: {user_mention(violator.id, violator.username, violator.full_name)}\n"
+        f"𝐈𝐃: {violator.id}\n"
         f"Отправил: {user_mention(reporter.id, reporter.username, reporter.full_name)}\n"
-        f"На кого: {user_mention(violator.id, violator.username, violator.full_name)}\n"
-        f"ID чата: <code>{msg.chat.id}</code>\nПричина: {esc(reason)}"
+        f"Чат 𝐈𝐃 {msg.chat.id}\n"
+        f"Время: {msk_time()} МСК\n"
+        f"{SEPARATOR}"
     )
     source_url = message_url(msg.chat.id, msg.reply_to_message.message_id)
     keyboard_rows = []
@@ -2351,21 +2415,41 @@ async def handle_links(msg: Message):
         reply_markup=None if ban_number else appeal_keyboard(number, "warn"),
     )
     if ban_number:
+        auto_ban_reason = "Достигнут лимит варнов (4/4)"
         await require_bot().send_message(
             msg.chat.id,
-            build_ban_msg(mention, "Достигнут лимит варнов (4/4)", ban_number),
+            build_ban_msg(mention, auto_ban_reason, ban_number),
             message_thread_id=msg.message_thread_id,
             reply_markup=appeal_keyboard(ban_number, "ban"),
+        )
+        await notify_ban_in_dm(msg.from_user.id, auto_ban_reason, ban_number)
+        await send_admin_log(
+            "◆<b>ВЫДАН БАН ⚠️</b>◆\n"
+            f"{SEPARATOR}\n"
+            f"Причина: {esc(auto_ban_reason)}\n"
+            f"𝐈𝐃: {esc(ban_number)}\n"
+            f"Пользователь: {mention}\n"
+            f"𝐈𝐃: {msg.from_user.id}\n"
+            "Кем выдан: DuoSup\n"
+            f"Чат 𝐈𝐃 {msg.chat.id}\n"
+            f"Время: {msk_time()} МСК",
+            msg.chat.id,
+            msg.message_id,
         )
     if action_error:
         await send_admin_log(
             f"⚠️ Варн {esc(number)} записан, но наказание Telegram не применилось: {esc(action_error)}"
         )
     await send_admin_log(
-        "<b>ВЫДАН ВАРН АВТОМАТИЧЕСКИ</b>\nПричина: Ссылка\n"
-        f"ID варна: {esc(number)}\nПользователь: {mention}\n"
-        f"ID: <code>{msg.from_user.id}</code>\nПредупреждений: {count}/4\n"
-        f"Чат ID: <code>{msg.chat.id}</code>\nВремя: {msk_time()} МСК",
+        "◆<b>ВЫДАН ВАРН АВТОМАТИЧЕСКИ ⚠️</b>◆\n"
+        f"{SEPARATOR}\n"
+        "Причина: Ссылка\n"
+        f"𝐈𝐃: {esc(number)}\n"
+        f"Пользователь: {mention}\n"
+        f"𝐈𝐃: {msg.from_user.id}\n"
+        f"Кем выдан: DuoSup\n"
+        f"Чат 𝐈𝐃 {msg.chat.id}\n"
+        f"Время: {msk_time()} МСК",
         msg.chat.id,
         msg.message_id,
     )
@@ -2424,4 +2508,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
