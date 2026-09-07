@@ -601,7 +601,7 @@ async def resolve_user(message: Message, token: str | None = None):
             """
             SELECT user_id, username, full_name
             FROM known_users
-            WHERE LOWER(username)=LOWER($1)
+            WHERE LOWER(TRIM(BOTH '@' FROM username)) = LOWER($1)
               AND user_id <> $2
               AND ($3::BIGINT IS NULL OR user_id <> $3)
             ORDER BY updated_at DESC
@@ -1275,12 +1275,29 @@ async def parse_target_and_reason(msg: Message):
     if msg.reply_to_message:
         target_id, username, full_name = await resolve_user(msg)
         reason = payload
-    else:
-        parts = payload.split(maxsplit=1)
-        if not parts:
-            return None, None, None, ""
-        target_id, username, full_name = await resolve_user(msg, parts[0])
-        reason = parts[1] if len(parts) == 2 else ""
+        return target_id, username, full_name, reason.strip()
+
+    parts = payload.split(maxsplit=1)
+    if not parts:
+        return None, None, None, ""
+
+    target_token = parts[0].strip()
+    reason = parts[1] if len(parts) == 2 else ""
+
+    # Если Telegram прислал target как text_mention, берём настоящий user_id
+    # из entity, а не пытаемся угадывать его по username.
+    entities = msg.entities or []
+    text = msg.text or ""
+    offset = text.find(target_token)
+    if offset >= 0:
+        for entity in entities:
+            if getattr(entity, "type", None) == "text_mention" and entity.offset == offset:
+                mentioned = getattr(entity, "user", None)
+                if mentioned and not mentioned.is_bot and mentioned.id != require_bot().id:
+                    await remember_user(mentioned)
+                    return mentioned.id, mentioned.username, mentioned.full_name, reason.strip()
+
+    target_id, username, full_name = await resolve_user(msg, target_token)
     return target_id, username, full_name, reason.strip()
 
 
@@ -1293,8 +1310,8 @@ async def warn_cmd(msg: Message):
     target_id, username, full_name, reason = await parse_target_and_reason(msg)
     if target_id is None:
         await msg.answer(
-            "⚠️ Не удалось найти пользователя. Используйте @username или Telegram ID "
-            "известного боту пользователя, либо ответьте на его сообщение."
+            "⚠️ Не удалось найти пользователя по @username. Бот может использовать только "
+            "username, который уже видел и сохранил, Telegram ID или пользователя из ответа."
         )
         return
     if target_id == actor.id:
