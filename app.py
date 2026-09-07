@@ -2154,6 +2154,44 @@ async def mystats_cmd(msg: Message):
     )
 
 
+@dp.message(Command("youstats"))
+async def youstats_cmd(msg: Message):
+    """Показывает статистику пользователя, на сообщение которого ответили."""
+    if not msg.from_user:
+        return
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        await msg.answer("↩️ Используйте команду ответом на сообщение пользователя.")
+        return
+
+    target = msg.reply_to_message.from_user
+    if target.is_bot:
+        await msg.answer("🤖 У ботов нет пользовательской статистики.")
+        return
+
+    await remember_user(target, count_message=False)
+    pool = require_db()
+    row = await pool.fetchrow(
+        "SELECT messages_count, joined_at FROM users WHERE user_id=$1",
+        target.id,
+    )
+    warns = await get_user_warns(target.id)
+    banned = await is_banned(target.id)
+    joined = (
+        "неизвестно"
+        if not row or not row["joined_at"]
+        else datetime.fromtimestamp(int(row["joined_at"]), MSK).strftime("%d.%m.%Y %H:%M:%S") + " МСК"
+    )
+
+    await msg.answer(
+        "📊 <b>Статистика пользователя</b>\n" + SEPARATOR + "\n"
+        f"👤 Пользователь: {user_mention(target.id, target.username, target.full_name)}\n"
+        f"💬 Сообщений: <b>{int(row['messages_count']) if row else 0}</b>\n"
+        f"⚠️ Варны: <b>{warns}/4</b>\n"
+        f"🔨 Статус: <b>{'Вечный мут' if banned else 'Активен'}</b>\n"
+        f"📅 Присоединился: <b>{joined}</b>\n" + SEPARATOR
+    )
+
+
 @dp.message(Command("stats"))
 async def stats_cmd(msg: Message):
     if not msg.from_user or not await require_group_chat(msg):
@@ -2901,7 +2939,8 @@ async def set_bot_commands() -> None:
         BotCommand(command="report", description="Пожаловаться на сообщение"),
         BotCommand(command="appeal", description="Подать апелляцию на нарушение"),
         BotCommand(command="mystats", description="Показать свою статистику"),
-        BotCommand(command="stats", description="Показать статистику пользователя"),
+        BotCommand(command="youstats", description="Показать статистику по ответу"),
+        BotCommand(command="stats", description="Показать общую статистику"),
         BotCommand(command="cancel", description="Отменить текущее действие"),
         BotCommand(command="upmod", description="Повысить ранг администратора"),
         BotCommand(command="downmod", description="Понизить ранг администратора"),
