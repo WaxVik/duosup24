@@ -1,4 +1,3 @@
-
 import asyncio
 import html
 import logging
@@ -59,7 +58,10 @@ TOPICS = {
     "admin": env_int("TOPIC_ADMIN", 27),
     "raids": env_int("TOPIC_RAIDS", 17),
     "trades": env_int("TOPIC_TRADES", 8),
+    "questions": env_int("TOPIC_QUESTIONS", 387),
 }
+
+LINK_COOLDOWN_SECONDS = 2
 IGNORED_TOPICS = {TOPICS["admin"], TOPICS["appeals_hublox"]}
 
 MSK = timezone(timedelta(hours=3))
@@ -72,6 +74,7 @@ BOT_USERNAME = "duosup_bot"
 
 warning_record_locks: dict[tuple[int, int], asyncio.Lock] = {}
 ban_target_locks: dict[tuple[int, int], asyncio.Lock] = {}
+command_cooldowns: dict[int, float] = {}
 
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -132,6 +135,51 @@ def message_url(chat_id: int, message_id: int) -> str | None:
     return f"https://t.me/c/{value[4:]}/{message_id}"
 
 
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔴 Активные нарушения", callback_data="menu_active")],
+            [InlineKeyboardButton(text="📝 Подать аппеляцию", callback_data="menu_appeal")],
+            [InlineKeyboardButton(text="💬 Вопрос | ответ", callback_data="menu_question")],
+        ]
+    )
+
+
+def captcha_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="✅ Я не бот", callback_data=f"verify_user_{user_id}")]]
+    )
+
+
+def redact_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Ссылки", callback_data="redact_links")],
+            [InlineKeyboardButton(text="📚 Правила", callback_data="redact_rules")],
+        ]
+    )
+
+
+def question_answer_keyboard(question_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="💬 Ответить", callback_data=f"question_answer_{question_id}")]]
+    )
+
+
+def is_command_spam_blocked(user_id: int) -> bool:
+    now = datetime.now(timezone.utc).timestamp()
+    last = command_cooldowns.get(user_id, 0.0)
+    if now - last < LINK_COOLDOWN_SECONDS:
+        return True
+    command_cooldowns[user_id] = now
+    if len(command_cooldowns) > 5000:
+        cutoff = now - 60
+        for uid, ts in list(command_cooldowns.items()):
+            if ts < cutoff:
+                command_cooldowns.pop(uid, None)
+    return False
+
+
 def appeal_keyboard(violation_number: str, violation_type: str = "warn") -> InlineKeyboardMarkup:
     payload = violation_number.replace("#", "")
     kind = "ban" if violation_type == "ban" else "warn"
@@ -147,23 +195,38 @@ def appeal_keyboard(violation_number: str, violation_type: str = "warn") -> Inli
     )
 
 
-async def remember_user(user) -> None:
+async def remember_user(user, *, count_message: bool = False, joined_at: int | None = None) -> None:
     if user is None or user.is_bot:
         return
     pool = require_db()
+    if count_message:
+        await pool.execute(
+            """
+            INSERT INTO users (user_id, messages_count, joined_at)
+            VALUES ($1, 1, $2)
+            ON CONFLICT (user_id) DO UPDATE
+            SET messages_count=users.messages_count + 1
+            """,
+            user.id, joined_at,
+        )
+    else:
+        await pool.execute(
+            """
+            INSERT INTO users (user_id, joined_at)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE
+            SET joined_at=COALESCE(users.joined_at, EXCLUDED.joined_at)
+            """,
+            user.id, joined_at,
+        )
     await pool.execute(
         """
         INSERT INTO known_users (user_id, username, full_name, updated_at)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (user_id) DO UPDATE
-        SET username=EXCLUDED.username,
-            full_name=EXCLUDED.full_name,
-            updated_at=EXCLUDED.updated_at
+        SET username=EXCLUDED.username, full_name=EXCLUDED.full_name, updated_at=EXCLUDED.updated_at
         """,
-        user.id,
-        user.username,
-        user.full_name,
-        now_ts(),
+        user.id, user.username, user.full_name, now_ts(),
     )
 
 
@@ -171,7 +234,26 @@ class RememberUserMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
         try:
-            await remember_user(user)
+            event_message = event if isinstance(event, Message) else None
+            should_count = bool(
+                event_message
+                and event_message.chat
+                and event_message.chat.type in ("group", "supergroup")
+            )
+            if (
+                event_message
+                and event_message.text
+                and event_message.text.startswith("/")
+                and event_message.chat
+                and event_message.chat.type == "private"
+                and user
+                and user.id != CREATOR_ID
+                and await get_moderator_level(user.id) == 0
+                and is_command_spam_blocked(user.id)
+            ):
+                await event_message.answer("⏳ Не спамьте командами. Попробуйте через пару секунд.")
+                return
+            await remember_user(user, count_message=should_count)
         except Exception:
             LOGGER.exception("Не удалось обновить профиль пользователя")
         return await handler(event, data)
@@ -266,6 +348,12 @@ async def init_db() -> None:
         """,
         "ALTER TABLE appeals ADD COLUMN IF NOT EXISTS violation_type TEXT NOT NULL DEFAULT 'warn'",
         "CREATE TABLE IF NOT EXISTS appeal_blocks (user_id BIGINT PRIMARY KEY, block_until BIGINT NOT NULL)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS messages_count BIGINT NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at BIGINT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verified BOOL NOT NULL DEFAULT FALSE",
+        "CREATE TABLE IF NOT EXISTS captcha_pending (user_id BIGINT PRIMARY KEY, chat_id BIGINT NOT NULL, joined_at BIGINT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS link_whitelist (id BIGSERIAL PRIMARY KEY, value TEXT NOT NULL UNIQUE, created_at BIGINT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS questions (id BIGSERIAL PRIMARY KEY, question_number TEXT NOT NULL UNIQUE, user_id BIGINT NOT NULL, username TEXT, question_text TEXT NOT NULL, created_at BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answered_by BIGINT, answer_text TEXT)",
         """
         CREATE TABLE IF NOT EXISTS moderators (
             user_id BIGINT PRIMARY KEY,
@@ -323,6 +411,7 @@ async def init_db() -> None:
             "unwarn_counter",
             "appeal_counter",
             "report_counter",
+            "question_counter",
         ):
             await conn.execute(
                 "INSERT INTO config (key, value) VALUES ($1, '0') ON CONFLICT (key) DO NOTHING",
@@ -557,7 +646,11 @@ async def check_permission(user_id: int, min_level: int) -> bool:
 async def can_punish(moderator_id: int, target_id: int):
     mod_level = await get_moderator_level(moderator_id)
     target_level = await get_moderator_level(target_id)
-    if moderator_id == CREATOR_ID or mod_level == 7:
+    if moderator_id == CREATOR_ID:
+        return True, None, mod_level, target_level
+    if target_level > 0:
+        return (False, "❌ Управлять наказаниями администрации может только создатель.", mod_level, target_level)
+    if mod_level == 7:
         return True, None, mod_level, target_level
     if mod_level < 1:
         return (
@@ -602,7 +695,7 @@ async def resolve_user(message: Message, token: str | None = None):
             """
             SELECT user_id, username, full_name
             FROM known_users
-            WHERE LOWER(username)=LOWER($1)
+            WHERE LOWER(TRIM(BOTH '@' FROM username)) = LOWER($1)
               AND user_id <> $2
               AND ($3::BIGINT IS NULL OR user_id <> $3)
             ORDER BY updated_at DESC
@@ -697,8 +790,10 @@ async def issue_warning(
                 )
             elif warn_count == 4:
                 # Четвёртый варн = автоматический вечный бан.
-                await require_bot().ban_chat_member(
-                    chat_id, user_id, revoke_messages=True
+                await require_bot().restrict_chat_member(
+                    chat_id,
+                    user_id,
+                    permissions=ChatPermissions(can_send_messages=False),
                 )
                 pool = require_db()
                 async with pool.acquire() as conn:
@@ -746,7 +841,11 @@ async def apply_ban(
         if await is_banned(user_id):
             return False, None
 
-        await require_bot().ban_chat_member(chat_id, user_id, revoke_messages=True)
+        await require_bot().restrict_chat_member(
+            chat_id,
+            user_id,
+            permissions=ChatPermissions(can_send_messages=False),
+        )
         pool = require_db()
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -780,7 +879,13 @@ async def apply_unban(chat_id: int, user_id: int, moderator_id: int):
     async with lock:
         if not await is_banned(user_id):
             return False, None
-        await require_bot().unban_chat_member(chat_id, user_id, only_if_banned=True)
+        try:
+            await require_bot().unban_chat_member(chat_id, user_id, only_if_banned=True)
+        except Exception:
+            # Для нового формата "бан" — это вечный мут, а не удаление.
+            # Старые записи, созданные до этой версии, могли быть настоящим ban.
+            pass
+        await clear_restrictions(chat_id, user_id)
         pool = require_db()
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -1038,11 +1143,9 @@ async def start_cmd(msg: Message, state: FSMContext):
         return
     await state.clear()
     await msg.answer(
-        "👋 <b>Duosup Bot</b>\n\n"
-        "Я модерирую сообщество HuBBlox.\n"
-        "Для связи чатов создатель использует:\n"
-        "• в HuBBlox: /link_hublox\n"
-        "• в администрации: /link_hubsup &lt;код&gt;"
+        "👋 <b>Добро пожаловать в DuoSup</b> ❤️\n\n"
+        "Выберите нужный раздел:",
+        reply_markup=main_menu_keyboard(),
     )
 
 
@@ -1181,6 +1284,67 @@ async def redact_rule(msg: Message, state: FSMContext):
     await state.set_state(RuleState.waiting_text)
 
 
+@dp.message(Command("redact"))
+async def redact_cmd(msg: Message):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await msg.answer("⛔ Команда доступна только создателю.")
+        return
+    await msg.answer("🛠 <b>Редактирование DuoSup</b>\n\nВыберите раздел:", reply_markup=redact_keyboard())
+
+
+@dp.callback_query(F.data == "redact_links")
+async def redact_links_cb(cb: CallbackQuery):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    rows = await require_db().fetch("SELECT id, value FROM link_whitelist ORDER BY id")
+    text = "🔗 <b>Белый список ссылок</b>\n\n"
+    text += "\n".join(f"• <code>{esc(r['value'])}</code>" for r in rows) if rows else "Список пуст."
+    text += "\n\nДобавление: <code>/redact_add ссылка</code>\nУдаление: <code>/redact_del ссылка</code>"
+    await cb.message.edit_text(text, reply_markup=redact_keyboard())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "redact_rules")
+async def redact_rules_cb(cb: CallbackQuery):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    rules = await get_template("rules_version")
+    latest = await require_db().fetchrow("SELECT rule_text FROM rules ORDER BY created_at DESC LIMIT 1")
+    text = "📚 <b>Правила</b>\n\n" + (esc(latest["rule_text"]) if latest else "Правила ещё не опубликованы.")
+    if rules:
+        text = f"📚 <b>Правила v{esc(rules)}</b>\n\n" + (esc(latest["rule_text"]) if latest else "Правила ещё не опубликованы.")
+    await cb.message.edit_text(text, reply_markup=redact_keyboard())
+    await cb.answer()
+
+
+@dp.message(Command("redact_add"))
+async def redact_add_cmd(msg: Message):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await msg.answer("⛔ Только создатель.")
+        return
+    value = command_payload(msg).strip().lower().rstrip("/")
+    if not value:
+        await msg.answer("🔗 Укажите домен или ссылку: <code>/redact_add example.com</code>")
+        return
+    await require_db().execute("INSERT INTO link_whitelist(value, created_at) VALUES($1,$2) ON CONFLICT(value) DO NOTHING", value, now_ts())
+    await msg.answer(f"✅ Добавлено в белый список: <code>{esc(value)}</code>")
+
+
+@dp.message(Command("redact_del"))
+async def redact_del_cmd(msg: Message):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await msg.answer("⛔ Только создатель.")
+        return
+    value = command_payload(msg).strip().lower().rstrip("/")
+    if not value:
+        await msg.answer("🔗 Укажите домен или ссылку для удаления.")
+        return
+    result = await require_db().execute("DELETE FROM link_whitelist WHERE value=$1", value)
+    await msg.answer("✅ Ссылка удалена из белого списка." if result.endswith("1") else "ℹ️ Такой записи нет в белом списке.")
+
+
 @dp.message(RuleState.waiting_text, F.text)
 async def rule_text(msg: Message, state: FSMContext):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
@@ -1276,12 +1440,29 @@ async def parse_target_and_reason(msg: Message):
     if msg.reply_to_message:
         target_id, username, full_name = await resolve_user(msg)
         reason = payload
-    else:
-        parts = payload.split(maxsplit=1)
-        if not parts:
-            return None, None, None, ""
-        target_id, username, full_name = await resolve_user(msg, parts[0])
-        reason = parts[1] if len(parts) == 2 else ""
+        return target_id, username, full_name, reason.strip()
+
+    parts = payload.split(maxsplit=1)
+    if not parts:
+        return None, None, None, ""
+
+    target_token = parts[0].strip()
+    reason = parts[1] if len(parts) == 2 else ""
+
+    # Если Telegram прислал target как text_mention, берём настоящий user_id
+    # из entity, а не пытаемся угадывать его по username.
+    entities = msg.entities or []
+    text = msg.text or ""
+    offset = text.find(target_token)
+    if offset >= 0:
+        for entity in entities:
+            if getattr(entity, "type", None) == "text_mention" and entity.offset == offset:
+                mentioned = getattr(entity, "user", None)
+                if mentioned and not mentioned.is_bot and mentioned.id != require_bot().id:
+                    await remember_user(mentioned)
+                    return mentioned.id, mentioned.username, mentioned.full_name, reason.strip()
+
+    target_id, username, full_name = await resolve_user(msg, target_token)
     return target_id, username, full_name, reason.strip()
 
 
@@ -1294,8 +1475,8 @@ async def warn_cmd(msg: Message):
     target_id, username, full_name, reason = await parse_target_and_reason(msg)
     if target_id is None:
         await msg.answer(
-            "⚠️ Не удалось найти пользователя. Используйте @username или Telegram ID "
-            "известного боту пользователя, либо ответьте на его сообщение."
+            "⚠️ Не удалось найти пользователя по @username. Бот может использовать только "
+            "username, который уже видел и сохранил, Telegram ID или пользователя из ответа."
         )
         return
     if target_id == actor.id:
@@ -1783,6 +1964,148 @@ async def report_cb(cb: CallbackQuery):
     await cb.answer("Рассмотрение репорта завершено.")
 
 
+@dp.callback_query(F.data == "menu_active")
+async def menu_active_cb(cb: CallbackQuery):
+    if not cb.from_user:
+        return
+    user_id = cb.from_user.id
+    warns = await get_user_warns(user_id)
+    banned = await is_banned(user_id)
+    pool = require_db()
+    warn_rows = await pool.fetch("SELECT warn_number, reason, created_at FROM warn_logs WHERE user_id=$1 AND is_active=TRUE ORDER BY created_at DESC LIMIT 10", user_id)
+    ban_rows = await pool.fetch("SELECT ban_number, reason, created_at FROM ban_logs WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10", user_id)
+    lines = [f"🔴 <b>Активные нарушения</b>", f"\n⚠️ Варны: <b>{warns}/4</b>"]
+    for r in warn_rows:
+        lines.append(f"• {esc(r['warn_number'])} — {esc(r['reason'])}")
+    if banned:
+        r = ban_rows[0] if ban_rows else None
+        lines.append("\n🔨 <b>Вечный бан (мут)</b>")
+        if r:
+            lines.append(f"• {esc(r['ban_number'])} — {esc(r['reason'])}")
+    if not warn_rows and not banned:
+        lines.append("\n✅ Активных нарушений нет.")
+    rows = []
+    for r in warn_rows:
+        rows.append([InlineKeyboardButton(text=f"📝 Апелляция {r['warn_number']}", url=f"https://t.me/{BOT_USERNAME}?start=appeal_warn_{str(r['warn_number']).replace('#','')}")])
+    if banned and ban_rows:
+        rows.append([InlineKeyboardButton(text=f"📝 Апелляция {ban_rows[0]['ban_number']}", url=f"https://t.me/{BOT_USERNAME}?start=appeal_ban_{str(ban_rows[0]['ban_number']).replace('#','')}")])
+    await cb.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else main_menu_keyboard())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "menu_appeal")
+async def menu_appeal_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user:
+        return
+    await cb.answer()
+    # Переводим пользователя в тот же список, что и /appeal.
+    rows = await get_available_appeals(cb.from_user.id)
+    if not rows:
+        await cb.message.answer("📭 <b>Доступных апелляций нет.</b>\n\nДля варна срок — 24 часа. Апелляция на бан доступна без ограничения по времени.")
+        return
+    await cb.message.answer("📝 <b>Выберите наказание для апелляции:</b>", reply_markup=available_appeals_keyboard(rows))
+
+
+class QuestionState(StatesGroup):
+    waiting_question = State()
+
+
+class QuestionAnswerState(StatesGroup):
+    waiting_answer = State()
+
+
+@dp.callback_query(F.data == "menu_question")
+async def menu_question_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user:
+        return
+    await state.set_state(QuestionState.waiting_question)
+    await cb.message.answer("💬 <b>Вопрос | ответ</b>\n\nНапишите одним сообщением ваш вопрос по делу. Он будет передан администрации.")
+    await cb.answer()
+
+
+@dp.message(QuestionState.waiting_question, F.text)
+async def question_text(msg: Message, state: FSMContext):
+    if not msg.from_user:
+        await state.clear(); return
+    text = (msg.text or "").strip()
+    if not text or len(text) > 2000:
+        await msg.answer("⚠️ Вопрос должен содержать от 1 до 2000 символов.")
+        return
+    pool = require_db()
+    async with pool.acquire() as conn, conn.transaction():
+        number = format_number(await next_number(conn, "question_counter"))
+        await conn.execute("INSERT INTO questions(question_number,user_id,username,question_text,created_at) VALUES($1,$2,$3,$4,$5)", number, msg.from_user.id, f"@{msg.from_user.username}" if msg.from_user.username else None, text, now_ts())
+        row = await conn.fetchrow("SELECT id FROM questions WHERE question_number=$1", number)
+    await state.clear()
+    hubsup = await get_config("hubsup_id")
+    if not hubsup:
+        await pool.execute("DELETE FROM questions WHERE id=$1", row["id"])
+        await msg.answer("❌ Административный чат не подключён.")
+        return
+    qmsg = (f"💬 <b>Вопрос {esc(number)}</b>\n{SEPARATOR}\n"
+            f"👤 Пользователь: {user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)}\n"
+            f"🆔 {msg.from_user.id}\n\n{esc(text)}\n{SEPARATOR}")
+    await require_bot().send_message(int(hubsup), qmsg, message_thread_id=TOPICS["questions"], reply_markup=question_answer_keyboard(int(row["id"])))
+    await msg.answer("💚 <b>Вопрос отправлен администрации.</b> Ожидайте ответа в личных сообщениях бота.")
+
+
+@dp.callback_query(F.data.startswith("question_answer_"))
+async def question_answer_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user or not await check_permission(cb.from_user.id, 1):
+        await cb.answer("⛔ Недостаточно прав.", show_alert=True); return
+    try:
+        qid = int((cb.data or "").rsplit("_",1)[1])
+    except ValueError:
+        await cb.answer("Некорректный вопрос.", show_alert=True); return
+    row = await require_db().fetchrow("SELECT user_id, question_text, status FROM questions WHERE id=$1", qid)
+    if not row or row["status"] != "pending":
+        await cb.answer("Вопрос уже обработан.", show_alert=True); return
+    await state.update_data(question_id=qid, question_user_id=int(row["user_id"]))
+    await state.set_state(QuestionAnswerState.waiting_answer)
+    await cb.message.answer("💬 Пришлите готовый ответ одним сообщением. Он будет отправлен участнику в ЛС.")
+    await cb.answer()
+
+
+@dp.message(QuestionAnswerState.waiting_answer, F.text)
+async def question_answer_text(msg: Message, state: FSMContext):
+    if not msg.from_user or not await check_permission(msg.from_user.id, 1):
+        await state.clear(); return
+    data = await state.get_data(); qid = data.get("question_id"); user_id = data.get("question_user_id")
+    text = (msg.text or "").strip()
+    if not qid or not user_id or not text:
+        await state.clear(); return
+    row = await require_db().fetchrow("UPDATE questions SET status='answered', answered_by=$2, answer_text=$3 WHERE id=$1 AND status='pending' RETURNING question_number", int(qid), msg.from_user.id, text)
+    if not row:
+        await state.clear(); await msg.answer("⚠️ На этот вопрос уже ответили."); return
+    try:
+        await require_bot().send_message(int(user_id), f"💬 <b>Ответ администрации на ваш вопрос {esc(row['question_number'])}</b>\n{SEPARATOR}\n{esc(text)}\n{SEPARATOR}")
+    except Exception:
+        LOGGER.exception("Не удалось отправить ответ на вопрос пользователю")
+        await msg.answer("⚠️ Ответ сохранён, но отправить его пользователю не удалось.")
+    else:
+        await msg.answer("✅ Ответ отправлен участнику в ЛС.")
+    await state.clear()
+
+
+@dp.message(Command("mystats"))
+async def mystats_cmd(msg: Message):
+    if not msg.from_user:
+        return
+    pool = require_db()
+    row = await pool.fetchrow("SELECT messages_count, joined_at FROM users WHERE user_id=$1", msg.from_user.id)
+    warns = await get_user_warns(msg.from_user.id)
+    banned = await is_banned(msg.from_user.id)
+    joined = "неизвестно" if not row or not row["joined_at"] else datetime.fromtimestamp(int(row["joined_at"]), MSK).strftime("%d.%m.%Y %H:%M:%S") + " МСК"
+    await msg.answer(
+        "📊 <b>Ваша статистика</b>\n" + SEPARATOR + "\n"
+        f"👤 Пользователь: {user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)}\n"
+        f"💬 Сообщений: <b>{int(row['messages_count']) if row else 0}</b>\n"
+        f"⚠️ Варны: <b>{warns}/4</b>\n"
+        f"🔨 Статус: <b>{'Вечный мут' if banned else 'Активен'}</b>\n"
+        f"📅 Присоединился: <b>{joined}</b>\n" + SEPARATOR
+    )
+
+
 @dp.message(Command("stats"))
 async def stats_cmd(msg: Message):
     if not msg.from_user or not await check_permission(msg.from_user.id, 5):
@@ -1814,35 +2137,27 @@ async def stats_cmd(msg: Message):
 
 # ========================== АПЕЛЛЯЦИИ ==========================
 async def get_available_appeals(user_id: int):
-    """Возвращает наказания, по которым пользователь ещё может подать апелляцию.
-
-    Срок — 24 часа с момента выдачи. Варн должен быть активным, бан — текущим.
-    """
     cutoff = now_ts() - 24 * 60 * 60
     pool = require_db()
-    rows = await pool.fetch(
+    return await pool.fetch(
         """
-        SELECT warn_number AS violation_number, 'warn' AS violation_type,
-               reason, created_at
-        FROM warn_logs
-        WHERE user_id=$1 AND is_active=TRUE AND created_at >= $2
-          AND NOT EXISTS (SELECT 1 FROM users WHERE user_id=$1 AND banned=TRUE)
+        SELECT w.warn_number AS violation_number, 'warn' AS violation_type, w.reason, w.created_at
+        FROM warn_logs w
+        WHERE w.user_id=$1 AND w.is_active=TRUE AND w.created_at >= $2
+          AND NOT EXISTS (SELECT 1 FROM appeals a WHERE a.user_id=$1 AND a.violation_number=w.warn_number)
 
         UNION ALL
 
-        SELECT b.ban_number AS violation_number, 'ban' AS violation_type,
-               b.reason, b.created_at
+        SELECT b.ban_number AS violation_number, 'ban' AS violation_type, b.reason, b.created_at
         FROM ban_logs b
-        JOIN users u ON u.user_id=b.user_id
-        WHERE b.user_id=$1 AND u.banned=TRUE AND b.created_at >= $2
+        WHERE b.user_id=$1
+          AND NOT EXISTS (SELECT 1 FROM appeals a WHERE a.user_id=$1 AND a.violation_number=b.ban_number)
 
         ORDER BY created_at DESC
-        LIMIT 20
+        LIMIT 30
         """,
-        user_id,
-        cutoff,
+        user_id, cutoff,
     )
-    return rows
 
 
 def available_appeals_keyboard(rows) -> InlineKeyboardMarkup | None:
@@ -1860,26 +2175,22 @@ def available_appeals_keyboard(rows) -> InlineKeyboardMarkup | None:
 
 
 async def get_appeal_target(user_id: int, violation_number: str, violation_type: str):
-    cutoff = now_ts() - 24 * 60 * 60
     pool = require_db()
+    if await pool.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM appeals WHERE user_id=$1 AND violation_number=$2)",
+        user_id, violation_number,
+    ):
+        return None
     if violation_type == "ban":
         return await pool.fetchrow(
-            """
-            SELECT ban_number AS violation_number, reason, created_at
-            FROM ban_logs
-            WHERE ban_number=$1 AND user_id=$2 AND created_at >= $3
-              AND EXISTS (SELECT 1 FROM users WHERE user_id=$2 AND banned=TRUE)
-            LIMIT 1
-            """,
-            violation_number, user_id, cutoff,
+            """SELECT ban_number AS violation_number, reason, created_at FROM ban_logs
+               WHERE ban_number=$1 AND user_id=$2 LIMIT 1""",
+            violation_number, user_id,
         )
+    cutoff = now_ts() - 24 * 60 * 60
     return await pool.fetchrow(
-        """
-        SELECT warn_number AS violation_number, reason, created_at
-        FROM warn_logs
-        WHERE warn_number=$1 AND user_id=$2 AND is_active=TRUE AND created_at >= $3
-        LIMIT 1
-        """,
+        """SELECT warn_number AS violation_number, reason, created_at FROM warn_logs
+           WHERE warn_number=$1 AND user_id=$2 AND is_active=TRUE AND created_at >= $3 LIMIT 1""",
         violation_number, user_id, cutoff,
     )
 
@@ -1936,8 +2247,8 @@ async def appeal_start(
         target = await get_appeal_target(user_id, expected_violation, expected_type or "warn")
         if not target:
             await msg.answer(
-                "⏰ <b>Срок подачи этой апелляции истёк</b> или наказание уже не является активным.\n\n"
-                "Апелляцию можно подать только в течение 24 часов после выдачи наказания."
+                "⏰ <b>Эта апелляция недоступна.</b>\n\n"
+                "Для варна срок подачи — 24 часа. Апелляцию на вечный бан можно подать в любое время, если этот ID ещё не обжаловался."
             )
             return
         await state.update_data(
@@ -1962,12 +2273,12 @@ async def appeal_start(
             await state.clear()
             await msg.answer(
                 "📭 <b>Доступных апелляций нет.</b>\n\n"
-                "Апелляция доступна только на активное наказание, выданное не более 24 часов назад."
+                "Для варнов действует срок 24 часа. Апелляцию на вечный бан можно подать в любое время."
             )
             return
         await msg.answer(
             "📝 <b>Ваши доступные апелляции</b>\n\n"
-            "Выберите наказание ниже. Апелляцию можно подать только на своё наказание и только в течение 24 часов с момента его выдачи.",
+            "Выберите наказание ниже. Для варна действует срок 24 часа, а апелляцию на вечный бан можно подать в любое время.",
             reply_markup=available_appeals_keyboard(rows),
         )
         await state.clear()
@@ -2010,7 +2321,20 @@ async def appeal_text(msg: Message, state: FSMContext):
         await state.clear()
         await msg.answer(
             "⏰ <b>Апелляцию отправить нельзя.</b>\n\n"
-            "Срок 24 часа истёк либо наказание уже не активно."
+            "Срок варна 24 часа истёк либо наказание уже не активно. Апелляцию на вечный бан можно подать в любое время."
+        )
+        return
+
+    already_appealed = await pool.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM appeals WHERE user_id=$1 AND violation_number=$2)",
+        user_id, expected_violation,
+    )
+    if already_appealed:
+        await state.clear()
+        await delete_user_message_safely(msg)
+        await msg.answer(
+            "🚫 <b>Апелляция на этот ID уже подавалась.</b>\n\n"
+            "Повторно отправить апелляцию на тот же варн или бан нельзя."
         )
         return
 
@@ -2158,9 +2482,11 @@ async def approve_appeal_punishment(
         for row in rows:
             chat_id = int(row["chat_id"])
             try:
-                await require_bot().unban_chat_member(
-                    chat_id, user_id, only_if_banned=True
-                )
+                try:
+                    await require_bot().unban_chat_member(chat_id, user_id, only_if_banned=True)
+                except Exception:
+                    pass
+                await clear_restrictions(chat_id, user_id)
             except Exception as exc:
                 errors.append(f"{chat_id}: {exc}")
                 LOGGER.exception(
@@ -2339,121 +2665,67 @@ async def welcome(msg: Message):
     hublox = await get_config("hublox_id")
     if not hublox or msg.chat.id != int(hublox):
         return
-    template = (
-        await get_template("welcome_template") or "{user}\nДобро пожаловать в HuBBlox!"
-    )
     for member in msg.new_chat_members or []:
         if member.id == require_bot().id:
             continue
-        await remember_user(member)
+        joined = now_ts()
+        await remember_user(member, joined_at=joined)
+        # Это НЕ CAPTCHA: новый участник ничего не теряет и не получает ограничений.
+        # Кнопка только подтверждает профиль и после нажатия исчезает.
+        await require_db().execute(
+            "INSERT INTO users (user_id, verified, joined_at) VALUES ($1, FALSE, $2) "
+            "ON CONFLICT (user_id) DO UPDATE SET verified=FALSE, joined_at=COALESCE(users.joined_at, EXCLUDED.joined_at)",
+            member.id, joined,
+        )
         mention = user_mention(member.id, member.username, member.full_name)
         text = (
-            template.replace("{user}", mention)
-            if "{user}" in template
-            else f"{mention}\n{esc(template)}"
+            f"👋 <b>Добро пожаловать, {mention}!</b> ❤️\n\n"
+            "Рады видеть вас в нашем сообществе!\n"
+            "Пожалуйста, подтвердите свой профиль кнопкой ниже.\n\n"
+            "Статус профиля: ⏳ <b>Ожидает подтверждения</b>"
         )
-        if "{user}" in template:
-            before, _, after = template.partition("{user}")
-            text = f"{esc(before)}{mention}{esc(after)}"
-        await require_bot().send_message(
-            msg.chat.id,
-            text,
-            message_thread_id=TOPICS["welcome"],
-        )
-
-
-@dp.message(lambda message: bool(message.text) and message.text.casefold() == "бот")
-async def bot_mention(msg: Message):
-    await msg.reply("На месте ✅")
-
-
-@dp.message(F.text)
-async def handle_links(msg: Message):
-    if not msg.from_user or msg.message_thread_id in IGNORED_TOPICS:
-        return
-    hublox = await get_config("hublox_id")
-    if not hublox or msg.chat.id != int(hublox):
-        return
-    if (
-        msg.from_user.id == CREATOR_ID
-        or await get_moderator_level(msg.from_user.id) > 0
-    ):
-        return
-    if not re.search(r"(?i)\b(?:https?://|www\.)\S+", msg.text or ""):
-        if await is_banned(msg.from_user.id):
+        # Приветствие дублируется в трёх пользовательских темах.
+        for topic in (TOPICS["chat"], TOPICS["trades"], TOPICS["raids"]):
             try:
-                await msg.delete()
-            except Exception:
-                LOGGER.exception(
-                    "Не удалось удалить сообщение забаненного пользователя"
+                await require_bot().send_message(
+                    int(hublox),
+                    text,
+                    message_thread_id=topic,
+                    reply_markup=captcha_keyboard(member.id),
                 )
-        return
+            except Exception:
+                LOGGER.exception("Не удалось отправить приветствие в topic=%s", topic)
 
-    issued, count, number, action_error, ban_number = await issue_warning(
-        msg.chat.id,
-        msg.from_user.id,
-        "Ссылка",
-        require_bot().id,
-        msg.message_id,
-    )
-    if not issued:
-        try:
-            await msg.delete()
-        except Exception:
-            LOGGER.exception("Не удалось удалить запрещённую ссылку")
+
+@dp.callback_query(F.data.startswith("verify_user_"))
+async def verify_user_cb(cb: CallbackQuery):
+    if not cb.from_user or not cb.data:
         return
-    mention = user_mention(
-        msg.from_user.id, msg.from_user.username, msg.from_user.full_name
+    try:
+        target_id = int(cb.data.removeprefix("verify_user_"))
+    except ValueError:
+        await cb.answer("⚠️ Некорректная кнопка.", show_alert=True)
+        return
+    # Нажать кнопку за другого человека нельзя.
+    if cb.from_user.id != target_id:
+        await cb.answer("⛔ Эта кнопка предназначена для другого участника.", show_alert=True)
+        return
+    await require_db().execute(
+        "INSERT INTO users (user_id, verified) VALUES ($1, TRUE) "
+        "ON CONFLICT (user_id) DO UPDATE SET verified=TRUE",
+        target_id,
     )
     try:
-        await msg.delete()
+        await cb.message.edit_text(
+            f"👋 <b>{user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}</b>, добро пожаловать! ❤️\n\n"
+            "Статус профиля: ✅ <b>Верифицирован</b>",
+        )
     except Exception:
-        LOGGER.exception("Не удалось удалить сообщение со ссылкой")
-    await require_bot().send_message(
-        msg.chat.id,
-        build_warn_msg(mention, count, "Ссылка", number),
-        message_thread_id=msg.message_thread_id,
-        reply_markup=None if ban_number else appeal_keyboard(number, "warn"),
-    )
-    if ban_number:
-        auto_ban_reason = "Достигнут лимит варнов (4/4)"
-        await require_bot().send_message(
-            msg.chat.id,
-            build_ban_msg(mention, auto_ban_reason, ban_number),
-            message_thread_id=msg.message_thread_id,
-            reply_markup=appeal_keyboard(ban_number, "ban"),
-        )
-        await notify_ban_in_dm(msg.from_user.id, auto_ban_reason, ban_number)
-        await send_admin_log(
-            "◆<b>ВЫДАН БАН ⚠️</b>◆\n"
-            f"{SEPARATOR}\n"
-            f"Причина: {esc(auto_ban_reason)}\n"
-            f"𝐈𝐃: {esc(ban_number)}\n"
-            f"Пользователь: {mention}\n"
-            f"𝐈𝐃: {msg.from_user.id}\n"
-            "Кем выдан: DuoSup\n"
-            f"Чат 𝐈𝐃 {msg.chat.id}\n"
-            f"Время: {msk_time()} МСК",
-            msg.chat.id,
-            msg.message_id,
-        )
-    if action_error:
-        await send_admin_log(
-            f"⚠️ Варн {esc(number)} записан, но наказание Telegram не применилось: {esc(action_error)}"
-        )
-    await send_admin_log(
-        "◆<b>ВЫДАН ВАРН АВТОМАТИЧЕСКИ ⚠️</b>◆\n"
-        f"{SEPARATOR}\n"
-        "Причина: Ссылка\n"
-        f"𝐈𝐃: {esc(number)}\n"
-        f"Пользователь: {mention}\n"
-        f"𝐈𝐃: {msg.from_user.id}\n"
-        f"Кем выдан: DuoSup\n"
-        f"Чат 𝐈𝐃 {msg.chat.id}\n"
-        f"Время: {msk_time()} МСК",
-        msg.chat.id,
-        msg.message_id,
-    )
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await cb.answer("✅ Профиль верифицирован!", show_alert=True)
 
 
 # ========================== ЗАПУСК ==========================
