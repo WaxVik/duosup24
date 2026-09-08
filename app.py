@@ -21,6 +21,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    MessageEntity,
     BotCommand,
 )
 
@@ -137,14 +138,33 @@ def message_url(chat_id: int, message_id: int) -> str | None:
     return f"https://t.me/c/{value[4:]}/{message_id}"
 
 
+def custom_emoji(slot: str, fallback: str = "✨") -> str:
+    """Возвращает HTML custom emoji, если для слота сохранён custom_emoji_id."""
+    try:
+        emoji_id = None
+        # get_config синхронно здесь вызвать нельзя, поэтому эта функция используется
+        # только через async custom_emoji_html ниже.
+        return fallback
+    except Exception:
+        return fallback
+
+
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔴 Активные нарушения", callback_data="menu_active")],
             [InlineKeyboardButton(text="📝 Подать аппеляцию", callback_data="menu_appeal")],
             [InlineKeyboardButton(text="💬 Вопрос | ответ", callback_data="menu_question")],
+            [InlineKeyboardButton(text="⚔️ Рейд", callback_data="menu_raid")],
         ]
     )
+
+
+async def custom_emoji_html(slot: str, fallback: str = "✨") -> str:
+    emoji_id = await get_config(f"custom_emoji_{slot}")
+    if emoji_id:
+        return f'<tg-emoji emoji-id="{esc(emoji_id)}">{fallback}</tg-emoji>'
+    return fallback
 
 
 def captcha_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -1144,6 +1164,143 @@ async def update_admin_list() -> None:
             )
 
 
+# ========================== ФУНКЦИИ HUВBLOX ==========================
+# Единый каталог Premium Emoji.
+# Для фруктов порядок специально задан от Rocket до Dragon.
+# После /addemoji → «🍎 Фрукты» бот будет просить эмодзи именно в этом порядке.
+FRUIT_EMOJI_ORDER = [
+    ("rocket", "Rocket"),
+    ("spin", "Spin"),
+    ("blade", "Blade"),
+    ("spring", "Spring"),
+    ("bomb", "Bomb"),
+    ("smoke", "Smoke"),
+    ("spike", "Spike"),
+    ("flame", "Flame"),
+    ("ice", "Ice"),
+    ("sand", "Sand"),
+    ("dark", "Dark"),
+    ("eagle", "Eagle"),
+    ("diamond", "Diamond"),
+    ("light", "Light"),
+    ("rubber", "Rubber"),
+    ("ghost", "Ghost"),
+    ("magma", "Magma"),
+    ("quake", "Quake"),
+    ("buddha", "Buddha"),
+    ("love", "Love"),
+    ("creation", "Creation"),
+    ("spider", "Spider"),
+    ("sound", "Sound"),
+    ("phoenix", "Phoenix"),
+    ("portal", "Portal"),
+    ("lightning", "Lightning"),
+    ("pain", "Pain"),
+    ("blizzard", "Blizzard"),
+    ("gravity", "Gravity"),
+    ("mammoth", "Mammoth"),
+    ("trex", "T-Rex"),
+    ("dough", "Dough"),
+    ("shadow", "Shadow"),
+    ("venom", "Venom"),
+    ("gas", "Gas"),
+    ("spirit", "Spirit"),
+    ("tiger", "Tiger"),
+    ("yeti", "Yeti"),
+    ("kitsune", "Kitsune"),
+    ("control", "Control"),
+    ("dragon", "Dragon"),
+]
+
+EMOJI_SLOTS = {
+    "mirage_stock": "✨ Mirage Stock",
+    "standard_stock": "🏪 Standard Stock",
+    "raid": "⚔️ Рейды",
+    "sea_events": "🌊 Морские ивенты",
+    "trade": "💰 Трейды",
+    "trial": "🧬 Триалы",
+    "help": "🤝 Кнопка «Помочь»",
+    "profile": "👤 Профиль",
+    "applications": "📋 Мои заявки",
+}
+
+RAID_FRUITS = {
+    "flame": ("Пламя", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
+    "ice": ("Лёд", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
+    "sand": ("Песок", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
+    "dark": ("Тьма", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
+    "light": ("Свет", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
+    "magma": ("Магма", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
+    "quake": ("Дрожь", {"Z": 1000, "X": 3000, "C": 5000, "V": 8000}),
+    "buddha": ("Будда", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
+    "spider": ("Паук", {"Z": 800, "X": 3500, "C": 4500, "V": 6000, "F": 2500}),
+    "phoenix": ("Феникс", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
+}
+
+
+def emoji_admin_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🍎 Настроить эмодзи фруктов", callback_data="emoji_fruits_setup")],
+            [InlineKeyboardButton(text="✨ Настроить эмодзи разделов", callback_data="emoji_sections_setup")],
+            [InlineKeyboardButton(text="📋 Установленные эмодзи", callback_data="emoji_list")],
+            [InlineKeyboardButton(text="🗑 Сбросить эмодзи фруктов", callback_data="emoji_fruits_reset")],
+        ]
+    )
+
+
+def emoji_sections_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for key, title in EMOJI_SLOTS.items():
+        rows.append([InlineKeyboardButton(text=title, callback_data=f"emoji_slot_{key}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="emoji_admin_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def fruit_emoji_setup_prompt(index: int) -> str:
+    key, name = FRUIT_EMOJI_ORDER[index]
+    return (
+        "🍎 <b>Настройка Premium Emoji фруктов</b>\n"
+        f"{SEPARATOR}\n"
+        f"Эмодзи <b>{index + 1}/{len(FRUIT_EMOJI_ORDER)}</b>\n"
+        f"Фрукт: <b>{esc(name)}</b>\n\n"
+        "📨 Отправьте одним сообщением <b>Premium Emoji</b> из набора BloxFruitEmodge.\n"
+        "Бот сохранит его и перейдёт к следующему фрукту.\n\n"
+        "Для отмены: /cancel"
+    )
+
+
+def stock_fruit_emoji_fallback(name: str) -> str:
+    return "🍎"
+
+
+async def fruit_emoji_html(fruit_key: str, fallback: str = "🍎") -> str:
+    return await custom_emoji_html(f"fruit_{fruit_key}", fallback)
+
+
+async def stock_line_html(fruit_key: str, fruit_name: str, price: str | int) -> str:
+    emoji = await fruit_emoji_html(fruit_key, stock_fruit_emoji_fallback(fruit_name))
+    return f"{emoji} <b>{esc(fruit_name)}</b> • ${esc(str(price))}"
+
+
+def raid_fruit_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    for key, (name, _) in RAID_FRUITS.items():
+        buttons.append(InlineKeyboardButton(text=name, callback_data=f"raid_fruit_{key}"))
+    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def raid_skill_keyboard(fruit_key: str, selected: set[str]) -> InlineKeyboardMarkup:
+    _, skills = RAID_FRUITS[fruit_key]
+    rows = []
+    for key, price in skills.items():
+        mark = "✅ " if key in selected else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{key} • {price:,}".replace(",", "."), callback_data=f"raid_skill_{fruit_key}_{key}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="raid_back_fruits"), InlineKeyboardButton(text="➡️ Далее", callback_data=f"raid_next_{fruit_key}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 # ========================== FSM ==========================
 class AppealState(StatesGroup):
     waiting_text = State()
@@ -1151,6 +1308,16 @@ class AppealState(StatesGroup):
 
 class RuleState(StatesGroup):
     waiting_text = State()
+
+
+class EmojiState(StatesGroup):
+    waiting_emoji = State()
+    waiting_fruit_emoji = State()
+
+
+class RaidState(StatesGroup):
+    waiting_balance = State()
+    waiting_comment = State()
 
 
 # ========================== БАЗОВЫЕ КОМАНДЫ ==========================
@@ -1311,6 +1478,168 @@ async def save_rules(text: str, msg: Message) -> None:
                     "Не удалось уведомить тему %s об обновлении правил", topic
                 )
     await msg.answer(f"✅ Правила обновлены до версии {esc(new_version)}.")
+
+
+@dp.message(Command("addemoji"))
+async def addemoji_cmd(msg: Message, state: FSMContext):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await msg.answer("⛔ Настраивать Premium Emoji может только создатель.")
+        return
+    await state.clear()
+    await msg.answer(
+        "🎨 <b>Центр Premium Emoji DuoSup</b>\n" + SEPARATOR + "\n"
+        "Здесь можно настроить эмодзи для фруктов и всех разделов бота.\n\n"
+        "🍎 <b>Фрукты</b> — бот попросит эмодзи по порядку от Rocket до Dragon и сохранит каждое для Stock, рейдов, трейдов и других функций.\n"
+        "✨ <b>Разделы</b> — отдельные эмодзи для Stock, Рейдов, Трейдов, Триалов и т.д.",
+        reply_markup=emoji_admin_keyboard(),
+    )
+
+
+@dp.callback_query(F.data == "emoji_fruits_setup")
+async def emoji_fruits_setup_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await state.update_data(emoji_fruit_index=0)
+    await state.set_state(EmojiState.waiting_fruit_emoji)
+    await cb.message.edit_text(fruit_emoji_setup_prompt(0))
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "emoji_sections_setup")
+async def emoji_sections_setup_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await state.clear()
+    await cb.message.edit_text(
+        "✨ <b>Premium Emoji разделов</b>\n" + SEPARATOR + "\n"
+        "Выберите раздел, затем отправьте один Premium Emoji.",
+        reply_markup=emoji_sections_keyboard(),
+    )
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "emoji_admin_back")
+async def emoji_admin_back_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await state.clear()
+    await cb.message.edit_text("🎨 <b>Центр Premium Emoji DuoSup</b>", reply_markup=emoji_admin_keyboard())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "emoji_fruits_reset")
+async def emoji_fruits_reset_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    for key, _ in FRUIT_EMOJI_ORDER:
+        await set_config(f"custom_emoji_fruit_{key}", "")
+    await state.clear()
+    await cb.answer("✅ Эмодзи фруктов сброшены.", show_alert=True)
+    await cb.message.edit_text("🗑 <b>Эмодзи всех фруктов сброшены.</b>", reply_markup=emoji_admin_keyboard())
+
+
+@dp.callback_query(F.data == "emoji_list")
+async def emoji_list_cb(cb: CallbackQuery):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    lines = ["📋 <b>Установленные Premium Emoji</b>", SEPARATOR, "<b>🍎 Фрукты:</b>"]
+    installed = 0
+    for key, name in FRUIT_EMOJI_ORDER:
+        emoji_id = await get_config(f"custom_emoji_fruit_{key}")
+        if emoji_id:
+            installed += 1
+            emoji = await custom_emoji_html(f"fruit_{key}", "🍎")
+            lines.append(f"{emoji} {esc(name)}")
+    lines.append(f"\nУстановлено: <b>{installed}/{len(FRUIT_EMOJI_ORDER)}</b>")
+    lines.append("\n<b>Разделы:</b>")
+    for key, title in EMOJI_SLOTS.items():
+        emoji_id = await get_config(f"custom_emoji_{key}")
+        lines.append(f"{'✅' if emoji_id else '▫️'} {esc(title)}")
+    await cb.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="emoji_admin_back")]]))
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("emoji_slot_"))
+async def emoji_slot_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    slot = (cb.data or "").removeprefix("emoji_slot_")
+    if slot not in EMOJI_SLOTS:
+        await cb.answer("⚠️ Неизвестный слот.", show_alert=True)
+        return
+    await state.update_data(emoji_slot=slot)
+    await state.set_state(EmojiState.waiting_emoji)
+    await cb.message.edit_text(
+        f"🎨 <b>{esc(EMOJI_SLOTS[slot])}</b>\n\n"
+        "Отправьте сейчас <b>один Premium Emoji</b> из набора BloxFruitEmodge.\n"
+        "Для отмены: /cancel"
+    )
+    await cb.answer()
+
+
+def extract_custom_emoji_id(msg: Message) -> str | None:
+    entities = list(msg.entities or []) + list(msg.caption_entities or [])
+    for entity in entities:
+        if str(entity.type) == "custom_emoji" and entity.custom_emoji_id:
+            return str(entity.custom_emoji_id)
+    return None
+
+
+@dp.message(EmojiState.waiting_fruit_emoji)
+async def save_fruit_custom_emoji(msg: Message, state: FSMContext):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await state.clear()
+        return
+    emoji_id = extract_custom_emoji_id(msg)
+    if not emoji_id:
+        await msg.answer("⚠️ Я не вижу Premium Emoji. Отправьте именно один custom emoji из набора BloxFruitEmodge.")
+        return
+    data = await state.get_data()
+    index = int(data.get("emoji_fruit_index", 0))
+    if index >= len(FRUIT_EMOJI_ORDER):
+        await state.clear()
+        return
+    fruit_key, fruit_name = FRUIT_EMOJI_ORDER[index]
+    await set_config(f"custom_emoji_fruit_{fruit_key}", emoji_id)
+    next_index = index + 1
+    if next_index >= len(FRUIT_EMOJI_ORDER):
+        await state.clear()
+        await msg.answer(
+            "🎉 <b>Готово!</b>\n" + SEPARATOR + "\n"
+            f"Все {len(FRUIT_EMOJI_ORDER)} Premium Emoji фруктов сохранены от Rocket до Dragon.\n\n"
+            "Теперь DuoSup сможет использовать их в Stock, рейдах, трейдах и других функциях."
+        )
+        return
+    await state.update_data(emoji_fruit_index=next_index)
+    await msg.answer(f"✅ {esc(fruit_name)} сохранён.\n\n{fruit_emoji_setup_prompt(next_index)}")
+
+
+@dp.message(EmojiState.waiting_emoji)
+async def save_custom_emoji(msg: Message, state: FSMContext):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await state.clear()
+        return
+    emoji_id = extract_custom_emoji_id(msg)
+    if not emoji_id:
+        await msg.answer("⚠️ Я не вижу в сообщении Premium Emoji. Отправьте один custom emoji из набора BloxFruitEmodge.")
+        return
+    data = await state.get_data()
+    slot = data.get("emoji_slot")
+    if slot not in EMOJI_SLOTS:
+        await state.clear()
+        return
+    await set_config(f"custom_emoji_{slot}", emoji_id)
+    await state.clear()
+    await msg.answer(
+        f"✅ Premium Emoji сохранён для: <b>{esc(EMOJI_SLOTS[slot])}</b>\n\n"
+        f"🆔 <code>{esc(emoji_id)}</code>"
+    )
 
 
 @dp.message(Command("redact"))
@@ -2131,6 +2460,157 @@ async def question_answer_text(msg: Message, state: FSMContext):
     await state.clear()
 
 
+@dp.callback_query(F.data == "menu_raid")
+async def menu_raid_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user:
+        return
+    if cb.message and cb.message.chat.type != "private":
+        await cb.answer("⚠️ Создание заявки на рейд доступно в ЛС бота.", show_alert=True)
+        return
+    await state.clear()
+    await cb.message.edit_text(
+        "⚔️ <b>Создание заявки на рейд</b>\n" + SEPARATOR + "\n"
+        "Выберите фрукт для прокачки V2:",
+        reply_markup=raid_fruit_keyboard(),
+    )
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("raid_fruit_"))
+async def raid_fruit_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user or not cb.message or cb.message.chat.type != "private":
+        return
+    fruit_key = (cb.data or "").removeprefix("raid_fruit_")
+    if fruit_key not in RAID_FRUITS:
+        await cb.answer("⚠️ Неизвестный фрукт.", show_alert=True)
+        return
+    name, skills = RAID_FRUITS[fruit_key]
+    await state.update_data(raid_fruit=fruit_key, raid_skills=[])
+    await cb.message.edit_text(
+        f"⚔️ <b>Рейд: {esc(name)}</b>\n{SEPARATOR}\n"
+        "Выберите уже пробуждённые навыки.\n"
+        "Минимум: <b>4</b>, максимум: <b>5</b>.\n\n"
+        + "\n".join(f"• {k} — {v:,}".replace(",", ".") + " фрагментов" for k, v in skills.items()),
+        reply_markup=raid_skill_keyboard(fruit_key, set()),
+    )
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "raid_back_fruits")
+async def raid_back_fruits_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("⚔️ <b>Выберите фрукт для прокачки V2:</b>", reply_markup=raid_fruit_keyboard())
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("raid_skill_"))
+async def raid_skill_cb(cb: CallbackQuery, state: FSMContext):
+    data = (cb.data or "").split("_")
+    if len(data) != 4:
+        return
+    fruit_key, skill = data[2], data[3]
+    if fruit_key not in RAID_FRUITS or skill not in RAID_FRUITS[fruit_key][1]:
+        await cb.answer("⚠️ Некорректный навык.", show_alert=True)
+        return
+    state_data = await state.get_data()
+    selected = set(state_data.get("raid_skills") or [])
+    if skill in selected:
+        selected.remove(skill)
+    elif len(selected) < 5:
+        selected.add(skill)
+    else:
+        await cb.answer("⚠️ Можно выбрать максимум 5 навыков.", show_alert=True)
+        return
+    await state.update_data(raid_skills=list(selected))
+    await cb.message.edit_reply_markup(reply_markup=raid_skill_keyboard(fruit_key, selected))
+    await cb.answer(f"Выбрано: {len(selected)}")
+
+
+@dp.callback_query(F.data.startswith("raid_next_"))
+async def raid_next_cb(cb: CallbackQuery, state: FSMContext):
+    fruit_key = (cb.data or "").removeprefix("raid_next_")
+    data = await state.get_data()
+    selected = set(data.get("raid_skills") or [])
+    if len(selected) < 4:
+        await cb.answer("⚠️ Выберите минимум 4 навыка.", show_alert=True)
+        return
+    await state.set_state(RaidState.waiting_balance)
+    await state.update_data(raid_fruit=fruit_key, raid_skills=list(selected))
+    name, skills = RAID_FRUITS[fruit_key]
+    await cb.message.edit_text(
+        f"⚔️ <b>Рейд: {esc(name)}</b>\n{SEPARATOR}\n"
+        f"Навыки: <b>{', '.join(sorted(selected, key=lambda x: 'ZXCVF'.index(x)))} </b>\n\n"
+        "💎 Укажите ваш баланс фрагментов.\n"
+        "<i>Важно: баланс округляется вниз до 1000. Например, 1984 → 1000.</i>\n\n"
+        "Отправьте только число.",
+    )
+    await cb.answer()
+
+
+@dp.message(RaidState.waiting_balance, F.text)
+async def raid_balance_msg(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip().replace(" ", "").replace(".", "")
+    if not raw.isdigit():
+        await msg.answer("⚠️ Отправьте баланс только числом, например: <code>1984</code>.")
+        return
+    balance = int(raw)
+    rounded = (balance // 1000) * 1000
+    await state.update_data(raid_balance=rounded)
+    await state.set_state(RaidState.waiting_comment)
+    await msg.answer(
+        f"💎 Баланс для заявки: <b>{rounded:,}</b> фрагментов".replace(",", ".") + "\n\n"
+        "💬 Теперь напишите комментарий к заявке.\n"
+        "Если комментарий не нужен — отправьте <code>-</code>."
+    )
+
+
+@dp.message(RaidState.waiting_comment, F.text)
+async def raid_comment_msg(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    fruit_key = data.get("raid_fruit")
+    selected = set(data.get("raid_skills") or [])
+    balance = int(data.get("raid_balance") or 0)
+    if fruit_key not in RAID_FRUITS or len(selected) < 4:
+        await state.clear()
+        await msg.answer("⚠️ Заявка устарела. Начните создание рейда заново.")
+        return
+    comment = (msg.text or "").strip()
+    if comment == "-":
+        comment = ""
+    if len(comment) > 1000:
+        await msg.answer("⚠️ Комментарий слишком длинный. Максимум 1000 символов.")
+        return
+    name, skills = RAID_FRUITS[fruit_key]
+    total = sum(skills[k] for k in selected)
+    hublox = await get_config("hublox_id")
+    if not hublox:
+        await state.clear()
+        await msg.answer("❌ Основной чат HuBBlox ещё не подключён.")
+        return
+    skill_lines = "\n".join(f"• {k} — {skills[k]:,}".replace(",", ".") for k in sorted(selected, key=lambda x: 'ZXCVF'.index(x)))
+    emoji = await custom_emoji_html("raid", "⚔️")
+    text = (
+        f"{emoji} <b>ПОИСК УЧАСТНИКОВ НА РЕЙД</b>\n{SEPARATOR}\n"
+        f"🍎 Фрукт: <b>{esc(name)}</b>\n\n"
+        f"👤 Ник в РБ: {user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)}\n"
+        f"💬 Ник в TG: {user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)}\n\n"
+        f"{skill_lines}\n"
+        f"💰 Общая стоимость выбранных навыков: <b>{total:,}</b> фрагментов".replace(",", ".") + "\n"
+        f"💎 Баланс: <b>{balance:,}</b> фрагментов".replace(",", ".") + "\n\n"
+        f"💬 Комментарий: {esc(comment) if comment else '—'}\n\n{SEPARATOR}\n"
+        "🟢 <b>Заявка активна</b>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🤝 Помочь", callback_data="raid_help_disabled")]])
+    sent = await require_bot().send_message(int(hublox), text, message_thread_id=TOPICS["raids"], reply_markup=kb)
+    await state.clear()
+    await msg.answer("✅ Заявка на рейд опубликована в теме «Рейды».")
+
+
+@dp.callback_query(F.data == "raid_help_disabled")
+async def raid_help_placeholder(cb: CallbackQuery):
+    await cb.answer("🤝 Система помощи будет привязана к конкретной заявке в следующем модуле.", show_alert=True)
+
+
 @dp.message(Command("mystats"))
 async def mystats_cmd(msg: Message):
     if not msg.from_user:
@@ -2940,6 +3420,7 @@ async def set_bot_commands() -> None:
         BotCommand(command="appeal", description="Подать апелляцию на нарушение"),
         BotCommand(command="mystats", description="Показать свою статистику"),
         BotCommand(command="youstats", description="Показать статистику по ответу"),
+        BotCommand(command="addemoji", description="Настроить Premium Emoji"),
         BotCommand(command="stats", description="Показать общую статистику"),
         BotCommand(command="cancel", description="Отменить текущее действие"),
         BotCommand(command="upmod", description="Повысить ранг администратора"),
