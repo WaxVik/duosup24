@@ -45,7 +45,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "1.09.8"
+BOT_VERSION = "1.09.9"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -61,9 +61,6 @@ TOPICS = {
     "admin": env_int("TOPIC_ADMIN", 27),
     "raids": env_int("TOPIC_RAIDS", 17),
     "trades": env_int("TOPIC_TRADES", 8),
-    "sea_events": env_int("TOPIC_SEA_EVENTS", 1232),
-    "stock": env_int("TOPIC_STOCK", 1233),
-    "trials": env_int("TOPIC_TRIALS", 1762),
     "questions": env_int("TOPIC_QUESTIONS", 387),
 }
 
@@ -155,13 +152,10 @@ def custom_emoji(slot: str, fallback: str = "✨") -> str:
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⚔️ Рейд", callback_data="menu_raid"), InlineKeyboardButton(text="🌊 Морские ивенты", callback_data="menu_sea_events")],
-            [InlineKeyboardButton(text="💰 Трейд", callback_data="menu_trade"), InlineKeyboardButton(text="🧬 Создать Триал", callback_data="menu_trial")],
-            [InlineKeyboardButton(text="🏪 Сток", callback_data="menu_stock"), InlineKeyboardButton(text="👤 Профиль", callback_data="menu_profile")],
-            [InlineKeyboardButton(text="📋 Мои заявки", callback_data="menu_my_apps")],
             [InlineKeyboardButton(text="🔴 Активные нарушения", callback_data="menu_active")],
-            [InlineKeyboardButton(text="📝 Подать апелляцию", callback_data="menu_appeal")],
+            [InlineKeyboardButton(text="📝 Подать аппеляцию", callback_data="menu_appeal")],
             [InlineKeyboardButton(text="💬 Вопрос | ответ", callback_data="menu_question")],
+            [InlineKeyboardButton(text="⚔️ Рейд", callback_data="menu_raid")],
         ]
     )
 
@@ -777,19 +771,37 @@ async def moderation_chat_id(fallback_chat_id: int) -> int:
 
 async def is_hublox_topic(msg: Message, topic_key: str) -> bool:
     hublox = await get_config("hublox_id")
-    return bool(hublox and msg.chat.id == int(hublox) and msg.message_thread_id == TOPICS[topic_key])
+    return bool(
+        hublox
+        and msg.chat.id == int(hublox)
+        and msg.message_thread_id == TOPICS[topic_key]
+    )
 
 
-async def require_topic(msg: Message, topic_key: str, label: str) -> bool:
-    # Для /redact разрешаем работу непосредственно в теме 8 даже если
-    # привязка hublox_id ещё не записана в config. Это устраняет ситуацию,
-    # когда команда физически находится в теме «Редакт», но бот отвечает,
-    # что команда доступна не там.
-    if topic_key == "redact" and msg.message_thread_id == TOPICS["redact"]:
+async def is_hubsup_topic(msg: Message, topic_key: str) -> bool:
+    hubsup = await get_config("hubsup_id")
+    return bool(
+        hubsup
+        and msg.chat.id == int(hubsup)
+        and msg.message_thread_id == TOPICS[topic_key]
+    )
+
+
+async def require_topic(
+    msg: Message, topic_key: str, label: str, *, admin_chat: bool = False
+) -> bool:
+    """Проверяет нужную тему. Для /redact можно явно требовать админ-чат."""
+    valid = (
+        await is_hubsup_topic(msg, topic_key)
+        if admin_chat
+        else await is_hublox_topic(msg, topic_key)
+    )
+    if valid:
         return True
-    if await is_hublox_topic(msg, topic_key):
-        return True
-    await msg.answer(f"⛔ Команда доступна только в теме «{esc(label)}» основного чата.")
+    where = "административного чата" if admin_chat else "основного чата"
+    await msg.answer(
+        f"⛔ Команда доступна только в теме «{esc(label)}» {where}."
+    )
     return False
 
 
@@ -1659,7 +1671,7 @@ async def redact_cmd(msg: Message):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await msg.answer("⛔ Команда доступна только создателю.")
         return
-    if not await require_topic(msg, "redact", "Редактирование"):
+    if not await require_topic(msg, "redact", "Редактирование", admin_chat=True):
         return
     await msg.answer("🛠 <b>Редактирование DuoSup</b>\n\nВыберите раздел:", reply_markup=redact_keyboard())
 
@@ -1697,8 +1709,6 @@ async def redact_add_cmd(msg: Message):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await msg.answer("⛔ Только создатель.")
         return
-    if not await require_topic(msg, "redact", "Редактирование"):
-        return
     value = command_payload(msg).strip().lower().rstrip("/")
     if not value:
         await msg.answer("🔗 Укажите домен или ссылку: <code>/redact_add example.com</code>")
@@ -1712,7 +1722,7 @@ async def redact_del_cmd(msg: Message):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await msg.answer("⛔ Только создатель.")
         return
-    if not await require_topic(msg, "redact", "Редактирование"):
+    if not await require_topic(msg, "redact", "Редактирование", admin_chat=True):
         return
     value = command_payload(msg).strip().lower().rstrip("/")
     if not value:
@@ -2630,8 +2640,8 @@ async def mystats_cmd(msg: Message):
     if not msg.from_user:
         return
     hublox = await get_config("hublox_id")
-    if not hublox or msg.chat.id != int(hublox) or msg.message_thread_id not in {TOPICS["chat"], TOPICS["trades"], TOPICS["raids"], TOPICS["sea_events"], TOPICS["stock"], TOPICS["trials"]}:
-        await msg.answer("⛔ /mystats доступна в пользовательских темах «Чат», «Трейды», «Рейды», «Морские ивенты», «Сток» и «Триалы».")
+    if not hublox or msg.chat.id != int(hublox) or msg.message_thread_id not in {TOPICS["chat"], TOPICS["trades"], TOPICS["raids"]}:
+        await msg.answer("⛔ /mystats доступна только в темах «Чат», «Трейды» и «Рейды».")
         return
     pool = require_db()
     row = await pool.fetchrow("SELECT messages_count, joined_at FROM users WHERE user_id=$1", msg.from_user.id)
@@ -3279,16 +3289,6 @@ async def is_whitelisted_link(value: str) -> bool:
     return False
 
 
-@dp.message(F.text.regexp(re.compile(r"(?iu)(?<!\w)бот(?!\w)")))
-async def bot_word_ping(msg: Message):
-    """Отвечает на слово «бот» без слеша."""
-    if not msg.from_user or msg.from_user.is_bot:
-        return
-    if msg.text and msg.text.startswith("/"):
-        return
-    await msg.answer("на месте ✅")
-
-
 @dp.message(F.text | F.caption)
 async def handle_forbidden_links(msg: Message):
     if not msg.from_user or msg.from_user.is_bot or msg.chat.type not in ("group", "supergroup"):
@@ -3395,19 +3395,8 @@ async def verify_user_cb(cb: CallbackQuery):
     )
     try:
         await cb.message.edit_text(
-            f"👋 <b>{user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}</b>, добро пожаловать в HuBBlox! ❤️\n\n"
-            "🤖 Статус профиля: ✅ <b>Вы не бот</b>\n\n"
-            "📚 <b>Перед общением обязательно ознакомьтесь с правилами.</b>\n"
-            "Незнание правил не освобождает от наказания.\n\n"
-            "🧭 <b>Навигация:</b>\n"
-            "• ⚔️ Рейды — поиск участников и помощь с пробуждением фруктов\n"
-            "• 🌊 Морские ивенты — сбор участников\n"
-            "• 💰 Трейды — создание и просмотр действующих обменов\n"
-            "• 🧬 Триалы — поиск помощи для расы\n"
-            "• 🏪 Сток — актуальный Stock\n"
-            "• 💬 Вопрос | ответ — задать вопрос администрации\n\n"
-            "🚨 <b>Жалоба:</b> если вы заметили нарушение, используйте /report ответом на сообщение нарушителя.\n"
-            "📝 Если получили наказание и не согласны — подайте апелляцию через меню или /appeal.",
+            f"👋 <b>{user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}</b>, добро пожаловать! ❤️\n\n"
+            "Статус профиля: ✅ <b>Верифицирован</b>",
         )
     except Exception:
         try:
@@ -3430,7 +3419,7 @@ async def announce_bot_version() -> None:
     text = (
         f"🤖 <b>Бот обновлен до v{BOT_VERSION}</b>\n\n"
         "✨ Обновление успешно установлено и бот готов к работе.\n"
-        "📅 Версия: 26.09.08"
+        "📅 Версия: 26.09.09"
     )
     try:
         await require_bot().send_message(
@@ -3460,7 +3449,7 @@ async def set_bot_commands() -> None:
         BotCommand(command="cancel", description="Отменить текущее действие"),
         BotCommand(command="upmod", description="Повысить ранг администратора"),
         BotCommand(command="downmod", description="Понизить ранг администратора"),
-        BotCommand(command="redact", description="Редактирование: ссылки и правила (тема 8)"),
+        BotCommand(command="redact", description="Открыть управление ссылками и правилами"),
         BotCommand(command="redact_add", description="Добавить ссылку в белый список"),
         BotCommand(command="redact_del", description="Удалить ссылку из белого списка"),
         BotCommand(command="link_hublox", description="Связать основной чат с администрацией"),
