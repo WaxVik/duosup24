@@ -46,7 +46,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.11.1"
+BOT_VERSION = "2.11.2"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -1484,6 +1484,7 @@ RAID_FRUITS = {
 
 def emoji_admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Настроить всё автоматически", callback_data="emoji_setup_all")],
         [InlineKeyboardButton(text="🍎 Эмодзи фруктов", callback_data="emoji_fruits_setup")],
         [InlineKeyboardButton(text="💬 Эмодзи сообщений", callback_data="emoji_sections_setup")],
         [InlineKeyboardButton(text="🧬 Эмодзи рас триалов", callback_data="emoji_races_setup")],
@@ -1499,6 +1500,44 @@ def emoji_sections_keyboard() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="emoji_admin_back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+
+EMOJI_AUTO_MODE_KEY = "emoji_auto_mode"
+
+def emoji_section_items():
+    return list(EMOJI_SLOTS.items())
+
+def emoji_section_setup_prompt(index: int) -> str:
+    items = emoji_section_items()
+    key, title = items[index]
+    return (
+        "💬 <b>Настройка Premium Emoji сообщений</b>\n" + SEPARATOR + "\n"
+        f"Эмодзи <b>{index + 1}/{len(items)}</b>\n"
+        f"Раздел: <b>{esc(title)}</b>\n\n"
+        "Отправьте одним сообщением один Premium Emoji.\n"
+        "После сохранения бот автоматически перейдёт к следующему разделу.\n\n"
+        "Для отмены: /cancel"
+    )
+
+def emoji_race_setup_prompt(index: int) -> str:
+    key, name = TRIAL_RACES[index]
+    return (
+        "🧬 <b>Настройка Premium Emoji рас</b>\n" + SEPARATOR + "\n"
+        f"Эмодзи <b>{index + 1}/{len(TRIAL_RACES)}</b>\n"
+        f"Раса: <b>{esc(name)}</b>\n\n"
+        "Отправьте одним сообщением один Premium Emoji.\n"
+        "Он будет использоваться на inline-кнопке выбора этой расы и в сообщениях триалов.\n\n"
+        "После сохранения бот автоматически перейдёт к следующей расе.\n"
+        "Для отмены: /cancel"
+    )
+
+def auto_emoji_setup_prompt() -> str:
+    return (
+        "🚀 <b>Автоматическая настройка Premium Emoji</b>\n" + SEPARATOR + "\n"
+        "Сейчас бот по очереди запросит все эмодзи: сначала 41 фрукт, затем эмодзи сообщений, затем 6 рас триалов.\n\n"
+        "Тебе не нужно нажимать кнопки между ними — просто отправляй следующий Premium Emoji.\n"
+        "Для отмены: /cancel"
+    )
 
 
 def fruit_emoji_setup_prompt(index: int) -> str:
@@ -1796,12 +1835,25 @@ async def addemoji_cmd(msg: Message, state: FSMContext):
     )
 
 
+@dp.callback_query(F.data == "emoji_setup_all")
+async def emoji_setup_all_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(emoji_fruit_index=0, emoji_auto_mode=True)
+    await state.set_state(EmojiState.waiting_fruit_emoji)
+    await cb.message.edit_text(auto_emoji_setup_prompt() + "\n\n" + fruit_emoji_setup_prompt(0))
+    await cb.answer()
+
+
 @dp.callback_query(F.data == "emoji_fruits_setup")
 async def emoji_fruits_setup_cb(cb: CallbackQuery, state: FSMContext):
     if not cb.from_user or cb.from_user.id != CREATOR_ID:
         await cb.answer("⛔ Только создатель.", show_alert=True)
         return
-    await state.update_data(emoji_fruit_index=0)
+    await state.clear()
+    await state.update_data(emoji_fruit_index=0, emoji_auto_mode=False)
     await state.set_state(EmojiState.waiting_fruit_emoji)
     await cb.message.edit_text(fruit_emoji_setup_prompt(0))
     await cb.answer()
@@ -1813,11 +1865,21 @@ async def emoji_sections_setup_cb(cb: CallbackQuery, state: FSMContext):
         await cb.answer("⛔ Только создатель.", show_alert=True)
         return
     await state.clear()
-    await cb.message.edit_text(
-        "✨ <b>Premium Emoji разделов</b>\n" + SEPARATOR + "\n"
-        "Выберите раздел, затем отправьте один Premium Emoji.",
-        reply_markup=emoji_sections_keyboard(),
-    )
+    await state.update_data(emoji_section_index=0, emoji_auto_mode=False)
+    await state.set_state(EmojiState.waiting_emoji)
+    await cb.message.edit_text(emoji_section_setup_prompt(0))
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "emoji_races_setup")
+async def emoji_races_setup_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(emoji_race_index=0, emoji_auto_mode=False)
+    await state.set_state(EmojiState.waiting_race_emoji)
+    await cb.message.edit_text(emoji_race_setup_prompt(0))
     await cb.answer()
 
 
@@ -1841,58 +1903,6 @@ async def emoji_fruits_reset_cb(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.answer("✅ Эмодзи фруктов сброшены.", show_alert=True)
     await cb.message.edit_text("🗑 <b>Эмодзи всех фруктов сброшены.</b>", reply_markup=emoji_admin_keyboard())
-
-
-def race_emoji_setup_prompt(index: int) -> str:
-    key, name = TRIAL_RACES[index]
-    return (
-        "🧬 <b>Настройка Premium Emoji рас</b>\n" + SEPARATOR + "\n"
-        f"Эмодзи <b>{index + 1}/{len(TRIAL_RACES)}</b>\n"
-        f"Раса: <b>{esc(name)}</b>\n\n"
-        "Отправьте одним сообщением один Premium Emoji.\n"
-        "Он будет использоваться на inline-кнопке выбора этой расы и в сообщениях триалов.\n\n"
-        "Для отмены: /cancel"
-    )
-
-
-@dp.callback_query(F.data == "emoji_races_setup")
-async def emoji_races_setup_cb(cb: CallbackQuery, state: FSMContext):
-    if not cb.from_user or cb.from_user.id != CREATOR_ID:
-        await cb.answer("⛔ Только создатель.", show_alert=True)
-        return
-    await state.update_data(emoji_race_index=0)
-    await state.set_state(EmojiState.waiting_race_emoji)
-    await cb.message.edit_text(race_emoji_setup_prompt(0))
-    await cb.answer()
-
-
-@dp.message(EmojiState.waiting_race_emoji)
-async def save_race_custom_emoji(msg: Message, state: FSMContext):
-    if not msg.from_user or msg.from_user.id != CREATOR_ID:
-        await state.clear()
-        return
-    emoji_id = extract_custom_emoji_id(msg)
-    if not emoji_id:
-        await msg.answer("⚠️ Я не вижу Premium Emoji. Отправьте именно один custom emoji.")
-        return
-    data = await state.get_data()
-    index = int(data.get("emoji_race_index", 0))
-    if index >= len(TRIAL_RACES):
-        await state.clear()
-        return
-    race_key, race_name = TRIAL_RACES[index]
-    await set_config(f"custom_emoji_race_{race_key}", emoji_id)
-    next_index = index + 1
-    if next_index >= len(TRIAL_RACES):
-        await state.clear()
-        await msg.answer(
-            "🎉 <b>Готово!</b>\n" + SEPARATOR + "\n"
-            f"Все {len(TRIAL_RACES)} Premium Emoji рас сохранены.\n\n"
-            "Они будут использоваться на inline-кнопках выбора рас и в сообщениях триалов."
-        )
-        return
-    await state.update_data(emoji_race_index=next_index)
-    await msg.answer(f"✅ {esc(race_name)} сохранён.\n\n{race_emoji_setup_prompt(next_index)}")
 
 
 @dp.callback_query(F.data == "emoji_list")
@@ -1921,33 +1931,6 @@ async def emoji_list_cb(cb: CallbackQuery):
     await cb.answer()
 
 
-@dp.callback_query(F.data.startswith("emoji_slot_"))
-async def emoji_slot_cb(cb: CallbackQuery, state: FSMContext):
-    if not cb.from_user or cb.from_user.id != CREATOR_ID:
-        await cb.answer("⛔ Только создатель.", show_alert=True)
-        return
-    slot = (cb.data or "").removeprefix("emoji_slot_")
-    if slot not in EMOJI_SLOTS:
-        await cb.answer("⚠️ Неизвестный слот.", show_alert=True)
-        return
-    await state.update_data(emoji_slot=slot)
-    await state.set_state(EmojiState.waiting_emoji)
-    await cb.message.edit_text(
-        f"🎨 <b>{esc(EMOJI_SLOTS[slot])}</b>\n\n"
-        "Отправьте сейчас <b>один Premium Emoji</b> из набора BloxFruitEmodge.\n"
-        "Для отмены: /cancel"
-    )
-    await cb.answer()
-
-
-def extract_custom_emoji_id(msg: Message) -> str | None:
-    entities = list(msg.entities or []) + list(msg.caption_entities or [])
-    for entity in entities:
-        if str(entity.type) == "custom_emoji" and entity.custom_emoji_id:
-            return str(entity.custom_emoji_id)
-    return None
-
-
 @dp.message(EmojiState.waiting_fruit_emoji)
 async def save_fruit_custom_emoji(msg: Message, state: FSMContext):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
@@ -1955,7 +1938,7 @@ async def save_fruit_custom_emoji(msg: Message, state: FSMContext):
         return
     emoji_id = extract_custom_emoji_id(msg)
     if not emoji_id:
-        await msg.answer("⚠️ Я не вижу Premium Emoji. Отправьте именно один custom emoji из набора BloxFruitEmodge.")
+        await msg.answer("⚠️ Я не вижу Premium Emoji. Отправьте именно один custom emoji.")
         return
     data = await state.get_data()
     index = int(data.get("emoji_fruit_index", 0))
@@ -1965,16 +1948,23 @@ async def save_fruit_custom_emoji(msg: Message, state: FSMContext):
     fruit_key, fruit_name = FRUIT_EMOJI_ORDER[index]
     await set_config(f"custom_emoji_fruit_{fruit_key}", emoji_id)
     next_index = index + 1
-    if next_index >= len(FRUIT_EMOJI_ORDER):
-        await state.clear()
+    auto = bool(data.get(EMOJI_AUTO_MODE_KEY, False))
+    if next_index < len(FRUIT_EMOJI_ORDER):
+        await state.update_data(emoji_fruit_index=next_index)
+        await msg.answer(f"✅ {esc(fruit_name)} сохранён.\n\n{fruit_emoji_setup_prompt(next_index)}")
+        return
+    if auto:
+        await state.update_data(emoji_section_index=0)
+        await state.set_state(EmojiState.waiting_emoji)
         await msg.answer(
-            "🎉 <b>Готово!</b>\n" + SEPARATOR + "\n"
-            f"Все {len(FRUIT_EMOJI_ORDER)} Premium Emoji фруктов сохранены от Rocket до Dragon.\n\n"
-            "Теперь DuoSup сможет использовать их в Stock, рейдах, трейдах и других функциях."
+            "🎉 <b>Все 41 эмодзи фруктов сохранены.</b>\n\n" + emoji_section_setup_prompt(0)
         )
         return
-    await state.update_data(emoji_fruit_index=next_index)
-    await msg.answer(f"✅ {esc(fruit_name)} сохранён.\n\n{fruit_emoji_setup_prompt(next_index)}")
+    await state.clear()
+    await msg.answer(
+        "🎉 <b>Готово!</b>\n" + SEPARATOR + "\n"
+        f"Все {len(FRUIT_EMOJI_ORDER)} Premium Emoji фруктов сохранены от Rocket до Dragon."
+    )
 
 
 @dp.message(EmojiState.waiting_emoji)
@@ -1984,18 +1974,63 @@ async def save_custom_emoji(msg: Message, state: FSMContext):
         return
     emoji_id = extract_custom_emoji_id(msg)
     if not emoji_id:
-        await msg.answer("⚠️ Я не вижу в сообщении Premium Emoji. Отправьте один custom emoji из набора BloxFruitEmodge.")
+        await msg.answer("⚠️ Я не вижу Premium Emoji. Отправьте именно один custom emoji.")
         return
     data = await state.get_data()
-    slot = data.get("emoji_slot")
-    if slot not in EMOJI_SLOTS:
+    # Автоматическая последовательная настройка разделов.
+    if data.get(EMOJI_AUTO_MODE_KEY) or "emoji_section_index" in data:
+        items = emoji_section_items()
+        index = int(data.get("emoji_section_index", 0))
+        if index >= len(items):
+            await state.clear()
+            return
+        slot, title = items[index]
+        await set_config(f"custom_emoji_{slot}", emoji_id)
+        next_index = index + 1
+        if next_index < len(items):
+            await state.update_data(emoji_section_index=next_index)
+            await msg.answer(f"✅ {esc(title)} сохранён.\n\n{emoji_section_setup_prompt(next_index)}")
+            return
+        if data.get(EMOJI_AUTO_MODE_KEY):
+            await state.update_data(emoji_race_index=0)
+            await state.set_state(EmojiState.waiting_race_emoji)
+            await msg.answer("🎉 <b>Эмодзи сообщений сохранены.</b>\n\n" + emoji_race_setup_prompt(0))
+            return
+        await state.clear()
+        await msg.answer(f"🎉 <b>Все {len(items)} эмодзи сообщений сохранены.</b>")
+        return
+    await msg.answer("⚠️ Сессия настройки устарела. Запустите /addemoji заново.")
+    await state.clear()
+
+
+@dp.message(EmojiState.waiting_race_emoji)
+async def save_race_custom_emoji(msg: Message, state: FSMContext):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await state.clear()
         return
-    await set_config(f"custom_emoji_{slot}", emoji_id)
+    emoji_id = extract_custom_emoji_id(msg)
+    if not emoji_id:
+        await msg.answer("⚠️ Я не вижу Premium Emoji. Отправьте именно один custom emoji.")
+        return
+    data = await state.get_data()
+    index = int(data.get("emoji_race_index", 0))
+    if index >= len(TRIAL_RACES):
+        await state.clear()
+        return
+    race_key, race_name = TRIAL_RACES[index]
+    await set_config(f"custom_emoji_race_{race_key}", emoji_id)
+    next_index = index + 1
+    auto = bool(data.get(EMOJI_AUTO_MODE_KEY, False))
+    if next_index < len(TRIAL_RACES):
+        await state.update_data(emoji_race_index=next_index)
+        await msg.answer(f"✅ {esc(race_name)} сохранён.\n\n{emoji_race_setup_prompt(next_index)}")
+        return
     await state.clear()
     await msg.answer(
-        f"✅ Premium Emoji сохранён для: <b>{esc(EMOJI_SLOTS[slot])}</b>\n\n"
-        f"🆔 <code>{esc(emoji_id)}</code>"
+        "🎉 <b>Готово!</b>\n" + SEPARATOR + "\n"
+        f"Все {len(TRIAL_RACES)} Premium Emoji рас сохранены.\n\n"
+        "Теперь они будут использоваться на inline-кнопках выбора рас и в сообщениях триалов."
+        + ("\n\n🚀 Автоматическая настройка завершена полностью." if auto else "")
     )
 
 
@@ -3082,11 +3117,33 @@ async def publish_application(kind: str, user, text: str, keyboard: InlineKeyboa
     hublox = await get_config("hublox_id")
     if not hublox:
         return None
-    sent = await require_bot().send_message(int(hublox), text, message_thread_id=TOPICS[application_topic_key(kind)], reply_markup=keyboard)
+    # Сначала публикуем сообщение, затем создаём ID заявки и сразу привязываем
+    # кнопку помощи к конкретной заявке. Это надёжнее, чем отдельные вызовы
+    # в каждом обработчике рейда/морского/триала.
+    sent = await require_bot().send_message(
+        int(hublox), text, message_thread_id=TOPICS[application_topic_key(kind)], reply_markup=keyboard
+    )
     row = await require_db().fetchrow(
         "INSERT INTO applications(user_id,kind,status,chat_message_id,payload,created_at) VALUES($1,$2,'active',$3,$4::jsonb,$5) RETURNING id",
-        user.id, kind, sent.message_id, json.dumps(payload or {}, ensure_ascii=False), now_ts())
-    return int(row["id"])
+        user.id, kind, sent.message_id, json.dumps(payload or {}, ensure_ascii=False), now_ts()
+    )
+    aid = int(row["id"])
+    if kind in {"raid", "sea", "trial"}:
+        try:
+            await require_bot().edit_message_reply_markup(
+                int(hublox), int(sent.message_id), reply_markup=application_help_keyboard(aid)
+            )
+        except Exception:
+            LOGGER.exception("Не удалось добавить кнопку помощи к заявке #%s", aid)
+            # Второй способ: редактируем сообщение целиком, сохраняя текст и добавляя кнопку.
+            try:
+                await require_bot().edit_message_text(
+                    text, chat_id=int(hublox), message_id=int(sent.message_id),
+                    reply_markup=application_help_keyboard(aid)
+                )
+            except Exception:
+                LOGGER.exception("Не удалось восстановить кнопку помощи у заявки #%s", aid)
+    return aid
 
 
 async def application_row_text(row, helper_user=None) -> str:
@@ -3213,9 +3270,6 @@ async def sea_details_msg(msg: Message, state: FSMContext):
             f"👤 Автор: {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\n"
             f"👥 Участников: <b>{n}/12</b>\n💬 Комментарий: {esc(details)}\n{SEPARATOR}\n🤝 <b>Нужна помощь участника</b>")
     aid = await publish_application("sea", msg, text, None, {"event": name, "count": n, "details": details})
-    if aid:
-        row = await require_db().fetchrow("SELECT chat_message_id FROM applications WHERE id=$1", aid)
-        await require_bot().edit_message_reply_markup(int(await get_config("hublox_id")), int(row["chat_message_id"]), reply_markup=application_help_keyboard(aid))
     await state.clear(); await msg.answer("✅ Заявка опубликована в теме «Морские ивенты».")
 
 
@@ -3374,9 +3428,6 @@ async def trial_comment_msg(msg: Message, state: FSMContext):
             f"💬 Комментарий: {esc(details)}\n{SEPARATOR}\n🤝 <b>Нужна помощь участника</b>")
     if mode == "paid": text += "\n⚠️ <b>Администрация HuBBlox и DuoSup не несут ответственности за оплату.</b>"
     aid = await publish_application("trial", msg, text, None, payload)
-    if aid:
-        row = await require_db().fetchrow("SELECT chat_message_id FROM applications WHERE id=$1", aid)
-        await require_bot().edit_message_reply_markup(int(await get_config("hublox_id")), int(row["chat_message_id"]), reply_markup=application_help_keyboard(aid))
     await state.clear(); await msg.answer("✅ Заявка на триал опубликована.")
 
 
@@ -4376,11 +4427,12 @@ async def announce_bot_version() -> None:
         f"{apps} Мои заявки: рейды, трейды, триалы и морские ивенты в одном разделе; удаление заявки удаляет её сообщение.\n"
         f"{profile} Профиль: статистика перенесена в профиль, добавлены Roblox и достижения.\n"
         f"{ach} Достижения: выдача через «Наградить &lt;название&gt;» ответом на сообщение.\n"
-        f"{premium} Premium Emoji: добавлена настройка фруктов, сообщений и отдельных эмодзи для всех рас триалов.\n"
+        f"{premium} Premium Emoji: добавлен единый автоматический мастер настройки фруктов, сообщений и рас триалов без постоянного нажатия кнопок.\n"
+        f"🤝 Рейды / морские ивенты / триалы: кнопка помощи теперь автоматически привязывается к конкретной заявке и после подтверждения показывает помощника прямо в исходном сообщении.\n"
         f"📜 После верификации участнику показываются правила и запрашивается Roblox-ник.\n"
         f"🛡 Апелляции могут одобрять только создатель и главный администратор.\n"
         f"👑 Для администрации добавлены 3 жизни, Simulator Data и ежемесячная проверка нормы 50.\n\n"
-        f"{premium} Версия: <b>26.09.09</b>"
+        f"{premium} Версия: <b>{BOT_VERSION}</b>"
     )
     try:
         await require_bot().send_message(int(hublox), text, message_thread_id=TOPICS["announcements"])
