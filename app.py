@@ -46,7 +46,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.09.9"
+BOT_VERSION = "2.11.1"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -153,6 +153,19 @@ def custom_emoji(slot: str, fallback: str = "✨") -> str:
         return fallback
 
 
+def _btn(text: str, callback_data: str, *, icon_key: str | None = None, url: str | None = None) -> InlineKeyboardButton:
+    """Безопасная кнопка. Custom Emoji для кнопок, где возможно, добавляются отдельно асинхронно."""
+    kwargs = {"text": text}
+    if callback_data:
+        kwargs["callback_data"] = callback_data
+    if url:
+        kwargs["url"] = url
+    # В синхронных построителях меню нельзя вызвать get_config();
+    # поэтому здесь оставляем текстовый fallback. Для специальных меню
+    # (например, рас) используется async-версия с icon_custom_emoji_id.
+    return InlineKeyboardButton(**kwargs)
+
+
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -172,9 +185,49 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 
 async def custom_emoji_html(slot: str, fallback: str = "✨") -> str:
     emoji_id = await get_config(f"custom_emoji_{slot}")
+    emoji_id = emoji_id or PREMIUM_EMOJI_IDS.get(slot)
     if emoji_id:
         return f'<tg-emoji emoji-id="{esc(emoji_id)}">{fallback}</tg-emoji>'
     return fallback
+
+
+def custom_emoji_position(position: int, fallback: str = "✨") -> str:
+    emoji_id = SCREEN_CUSTOM_EMOJI_IDS.get(position)
+    if emoji_id:
+        return f'<tg-emoji emoji-id="{esc(emoji_id)}">{fallback}</tg-emoji>'
+    return fallback
+
+
+def custom_emoji_sequence(spec: str, fallback_map: dict[int, str] | None = None) -> str:
+    """Рендерит последовательность вида 7_26.80.81. '.' = без пробела, '_' = два пробела.
+    Если номер ещё не существует в переданном наборе, используется fallback и сам номер не выводится.
+    """
+    fallback_map = fallback_map or {}
+    out = []
+    for token in re.split(r'([._])', spec):
+        if token == '.':
+            continue
+        if token == '_':
+            if out: out.append('  ')
+            continue
+        if not token:
+            continue
+        # Токен обычно является одним числом. Если разделителя между двумя числами нет,
+        # поддерживаем greedy-разбор по 2 цифры, затем по 1.
+        rest = token
+        while rest:
+            n = None; width = 0
+            if len(rest) >= 2 and rest[:2].isdigit():
+                candidate = int(rest[:2])
+                if 1 <= candidate <= 99:
+                    n, width = candidate, 2
+            if n is None and rest[:1].isdigit():
+                n, width = int(rest[:1]), 1
+            if n is None:
+                break
+            out.append(custom_emoji_position(n, fallback_map.get(n, "")))
+            rest = rest[width:]
+    return "".join(out)
 
 
 def captcha_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -386,6 +439,7 @@ async def init_db() -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_tag TEXT",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_comment TEXT",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS roblox_username TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS roblox_prompt_pending BOOL NOT NULL DEFAULT FALSE",
         """CREATE TABLE IF NOT EXISTS applications (
             id BIGSERIAL PRIMARY KEY,
             user_id BIGINT NOT NULL,
@@ -406,7 +460,27 @@ async def init_db() -> None:
             user_id BIGINT PRIMARY KEY,
             username TEXT,
             level INT NOT NULL DEFAULT 0 CHECK (level BETWEEN 0 AND 7),
-            role TEXT
+            role TEXT,
+            lives INT NOT NULL DEFAULT 3 CHECK (lives >= 0),
+            simulator_data INT NOT NULL DEFAULT 0 CHECK (simulator_data >= 0),
+            activity_month TEXT
+        )
+        """,
+        "ALTER TABLE moderators ADD COLUMN IF NOT EXISTS lives INT NOT NULL DEFAULT 3",
+        "ALTER TABLE moderators ADD COLUMN IF NOT EXISTS simulator_data INT NOT NULL DEFAULT 0",
+        "ALTER TABLE moderators ADD COLUMN IF NOT EXISTS activity_month TEXT",
+        """
+        CREATE TABLE IF NOT EXISTS admin_punishment_requests (
+            id BIGSERIAL PRIMARY KEY,
+            requester_id BIGINT NOT NULL,
+            target_id BIGINT NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            chat_id BIGINT NOT NULL,
+            source_message_id BIGINT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at BIGINT NOT NULL,
+            decided_by BIGINT
         )
         """,
         "CREATE TABLE IF NOT EXISTS templates (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -473,10 +547,10 @@ async def init_db() -> None:
 
         await conn.execute(
             """
-            INSERT INTO moderators (user_id, username, level, role)
-            VALUES ($1, $2, 7, 'Создатель')
+            INSERT INTO moderators (user_id, username, level, role, lives, simulator_data, activity_month)
+            VALUES ($1, $2, 7, 'Создатель', 3, 0, to_char(NOW(), 'YYYY-MM'))
             ON CONFLICT (user_id) DO UPDATE
-            SET username=EXCLUDED.username, level=7, role='Создатель'
+            SET username=EXCLUDED.username, level=7, role='Создатель', lives=3, activity_month=to_char(NOW(), 'YYYY-MM')
             """,
             CREATOR_ID,
             CREATOR_USERNAME or None,
@@ -666,24 +740,124 @@ def get_admin_title(level: int) -> str:
     return titles[level]
 
 
-async def set_moderator_level(
-    user_id: int, level: int, username: str | None = None
-) -> None:
+
+async def current_activity_month() -> str:
+    return datetime.now(MSK).strftime("%Y-%m")
+
+
+async def add_simulator_data(user_id: int, amount: int = 10) -> None:
+    if user_id == CREATOR_ID or amount <= 0:
+        return
+    month = await current_activity_month()
+    await require_db().execute(
+        """
+        INSERT INTO moderators(user_id, level, role, lives, simulator_data, activity_month)
+        VALUES($1, 0, 'Участник', 3, $2, $3)
+        ON CONFLICT(user_id) DO UPDATE SET
+            simulator_data=CASE WHEN moderators.activity_month=$3 THEN moderators.simulator_data+$2 ELSE $2 END,
+            activity_month=$3
+        """, user_id, amount, month)
+
+
+async def apply_admin_life_loss(user_id: int) -> None:
+    if user_id == CREATOR_ID:
+        return
+    row = await require_db().fetchrow(
+        "UPDATE moderators SET lives=GREATEST(lives-1,0) WHERE user_id=$1 RETURNING lives,level,username",
+        user_id,
+    )
+    if not row:
+        return
+    lives = int(row["lives"])
+    if lives <= 0:
+        await set_moderator_level(user_id, 0)
+        await strip_telegram_admin_status(user_id)
+        try:
+            await require_bot().send_message(user_id, "Ваши 3 жизни администрации закончились. Вы сняты с должности.")
+        except Exception:
+            pass
+    await update_admin_list()
+
+
+async def request_creator_admin_punishment(msg: Message, target_id: int, action: str, reason: str) -> bool:
+    if not msg.from_user:
+        return False
+    hubsup = await get_config("hubsup_id")
+    if not hubsup:
+        await msg.answer("⚠️ Административный чат не подключён. Запрос создателю отправить нельзя.")
+        return False
+    row = await require_db().fetchrow(
+        """INSERT INTO admin_punishment_requests(requester_id,target_id,action,reason,chat_id,source_message_id,created_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id""",
+        msg.from_user.id, target_id, action, reason, msg.chat.id,
+        msg.reply_to_message.message_id if msg.reply_to_message else None, now_ts())
+    target_known = await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1", target_id)
+    target = user_mention(target_id, target_known["username"] if target_known else None, target_known["full_name"] if target_known else None)
+    requester = user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Принять", callback_data=f"adminreq_approve_{row['id']}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"adminreq_reject_{row['id']}"),
+    ]])
+    text = (f"🚨 <b>АДМИНИСТРАТИВНЫЙ ЗАПРОС НА {esc(action.upper())}</b>\n{SEPARATOR}\n"
+            f"Кто запросил: {requester}\nЦель: {target}\nПричина: «{esc(reason)}»\n"
+            f"ID запроса: <code>#{row['id']}</code>")
+    await require_bot().send_message(int(hubsup), text, message_thread_id=TOPICS["admin"], reply_markup=keyboard)
+    await msg.answer("Запрос отправлен создателю на подтверждение.")
+    return True
+
+
+async def monthly_admin_maintenance() -> None:
+    month = await current_activity_month()
+    rows = await require_db().fetch("SELECT user_id,level,simulator_data,activity_month FROM moderators WHERE level>0 AND user_id<>$1", CREATOR_ID)
+    for row in rows:
+        previous = row["activity_month"]
+        if not previous:
+            await require_db().execute("UPDATE moderators SET activity_month=$2 WHERE user_id=$1", int(row["user_id"]), month)
+            continue
+        if str(previous) == month:
+            continue
+        if int(row["simulator_data"] or 0) < 50:
+            uid = int(row["user_id"])
+            await set_moderator_level(uid, 0)
+            await strip_telegram_admin_status(uid)
+            try:
+                cid = await get_config("hubsup_id")
+                if cid:
+                    await require_bot().ban_chat_member(int(cid), uid)
+                    await require_bot().unban_chat_member(int(cid), uid, only_if_banned=True)
+            except Exception:
+                LOGGER.exception("Не удалось удалить снятого администратора из админ-чата")
+            try:
+                await require_bot().send_message(uid, "Вы сняты с должности: за прошлый месяц не набрано 50 Simulator Data.")
+            except Exception:
+                pass
+        else:
+            await require_db().execute("UPDATE moderators SET simulator_data=0,lives=3,activity_month=$2 WHERE user_id=$1", int(row["user_id"]), month)
+    await update_admin_list()
+
+
+async def monthly_admin_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            await monthly_admin_maintenance()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("Ошибка ежемесячного контроля администрации")
+
+
+async def set_moderator_level(user_id: int, level: int, username: str | None = None) -> None:
     if level == 0:
         await require_db().execute("DELETE FROM moderators WHERE user_id=$1", user_id)
         return
+    month = await current_activity_month()
     await require_db().execute(
         """
-        INSERT INTO moderators (user_id, username, level, role)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (user_id) DO UPDATE
-        SET username=EXCLUDED.username, level=EXCLUDED.level, role=EXCLUDED.role
-        """,
-        user_id,
-        username,
-        level,
-        get_role_name(level),
-    )
+        INSERT INTO moderators (user_id, username, level, role, lives, simulator_data, activity_month)
+        VALUES ($1,$2,$3,$4,3,0,$5)
+        ON CONFLICT(user_id) DO UPDATE SET username=COALESCE($2, moderators.username), level=$3, role=$4
+        """, user_id, username, level, get_role_name(level), month)
 
 
 async def check_permission(user_id: int, min_level: int) -> bool:
@@ -695,23 +869,13 @@ async def can_punish(moderator_id: int, target_id: int):
     target_level = await get_moderator_level(target_id)
     if moderator_id == CREATOR_ID:
         return True, None, mod_level, target_level
-    if target_level > 0:
-        return (False, "❌ Управлять наказаниями администрации может только создатель.", mod_level, target_level)
-    if mod_level == 7:
+    if mod_level < 3:
+        return False, "⛔ Ваш ранг не позволяет выдавать варны.", mod_level, target_level
+    if target_level >= mod_level and target_level > 0:
+        return False, "⚠️ Нельзя применить наказание к администратору равного или более высокого ранга. Запрос будет передан создателю.", mod_level, target_level
+    if mod_level >= 6:
         return True, None, mod_level, target_level
-    if mod_level < 1:
-        return (
-            False,
-            "⛔ Ваш ранг слишком низок для выдачи наказаний.",
-            mod_level,
-            target_level,
-        )
-    if target_level >= mod_level:
-        error = (
-            "❌ Нельзя применить наказание к пользователю с таким же или более высоким "
-            f"рангом: цель — {target_level}, ваш ранг — {mod_level}."
-        )
-        return False, error, mod_level, target_level
+    # Уровни 3-5 могут выдавать максимум 3 варна одному пользователю и не могут банить.
     return True, None, mod_level, target_level
 
 
@@ -1050,44 +1214,32 @@ SEPARATOR = "— • — • — • — • — • — • —"
 
 
 def build_warn_msg(mention: str, warn_count: int, reason: str, warn_number: str) -> str:
-    levels = ("предупреждение", "мут на 5 минут", "мут на 24 часа", "бан")
+    icon = custom_emoji_position(7, "⚠️")
+    num = custom_emoji_sequence("8.9", {8:"•",9:"•"})
     lines = [
-        f" • {index}/4 — {level}{' ⚠️' if index == warn_count else ''}"
-        for index, level in enumerate(levels, start=1)
+        f"• {index}/4 — {level}{icon if index == warn_count else ''}"
+        for index, level in enumerate(("предупреждение", "мут на 5 минут", "мут на 24 часа", "бан"), start=1)
     ]
-    return (
-        f"⚠️ {mention} получает варн ({warn_count}/4)\n"
-        f"Причина: «{esc(reason)}»\n"
-        f"{SEPARATOR}\n"
-        + "\n".join(lines)
-        + f"\n{SEPARATOR}\n"
-        f"🆔 {esc(warn_number)}\n"
-        "⏳ Апелляцию можно подать в течение 24 часов с момента выдачи.\n"
-        f"{SEPARATOR}"
-    )
+    return (f"{icon} {mention} получает варн ({warn_count}/4)\nПричина: «{esc(reason)}»\n{SEPARATOR}\n"
+            + "\n".join(lines) + f"\n{SEPARATOR}\n{num} • {esc(warn_number)}\n"
+            + f"{custom_emoji_position(3,'⏳')} Апелляцию можно подать в течение 24 часов с момента выдачи.\n{SEPARATOR}")
 
 
 def build_ban_msg(mention: str, reason: str, ban_number: str) -> str:
-    return (
-        f"🔨 {mention} получает вечный бан\n"
-        f"Причина: «{esc(reason)}»\n"
-        f"{SEPARATOR}\n"
-        f"🆔 {esc(ban_number)}\n"
-        "⏳ Апелляцию можно подать в течение 24 часов с момента выдачи.\n"
-        f"{SEPARATOR}"
-    )
+    ban = custom_emoji_position(11, "🔨")
+    return (f"{ban} {mention} получает вечный бан\nПричина: «{esc(reason)}»\n{SEPARATOR}\n"
+            f"{custom_emoji_sequence('8.9')} • {esc(ban_number)}\n"
+            f"{custom_emoji_position(3,'⏳')} Апелляцию можно подать в течение 24 часов с момента выдачи.\n{SEPARATOR}")
 
 
 def build_ban_dm_msg(reason: str, ban_number: str) -> str:
-    return (
-        "🔨 <b>Вам выдан вечный бан</b>\n"
-        f"Причина: «{esc(reason)}»\n"
-        f"{SEPARATOR}\n"
-        f"🆔 {esc(ban_number)}\n"
-        "⏳ Апелляцию можно подать в течение 24 часов с момента выдачи.\n"
-        f"{SEPARATOR}\n"
-        "💬 Если вы считаете бан ошибочным, нажмите кнопку ниже и подайте апелляцию."
-    )
+    ban = custom_emoji_position(11, "🔨")
+    return (f"{ban} <b>Вам выдан вечный бан</b>\nПричина: «{esc(reason)}»\n{SEPARATOR}\n"
+            f"{custom_emoji_sequence('8.9')} • {esc(ban_number)}\n"
+            f"{custom_emoji_position(3,'⏳')} Апелляцию можно подать в течение 24 часов с момента выдачи.\n{SEPARATOR}\n"
+            "Если вы считаете бан ошибочным, нажмите кнопку ниже и подайте апелляцию.")
+
+
 
 
 async def notify_ban_in_dm(user_id: int, reason: str, ban_number: str) -> None:
@@ -1168,13 +1320,13 @@ async def log_forbidden_attempt(
 
 async def update_admin_list() -> None:
     rows = await require_db().fetch(
-        "SELECT user_id, username, level, role FROM moderators WHERE level > 0 ORDER BY level DESC, user_id"
+        "SELECT user_id, username, level, role, lives, simulator_data FROM moderators WHERE level > 0 ORDER BY level DESC, user_id"
     )
     if not rows:
         text = "👥 Список администраторов пуст."
     else:
         lines = [
-            f"{user_mention(row['user_id'], row['username'])} — {esc(row['role'] or get_role_name(row['level']))}"
+            f"{user_mention(row['user_id'], row['username'])} — {esc(row['role'] or get_role_name(row['level']))} • ❤️ {int(row['lives'] or 0)} • Simulator Data: {int(row['simulator_data'] or 0)}"
             for row in rows
         ]
         text = "👥 <b>Состав администрации:</b>\n" + "\n".join(lines)
@@ -1262,16 +1414,58 @@ FRUIT_EMOJI_ORDER = [
 ]
 
 EMOJI_SLOTS = {
-    "mirage_stock": "✨ Mirage Stock",
-    "standard_stock": "🏪 Standard Stock",
+    "welcome": "👋 Приветствие",
+    "blocked": "⛔ Запрет",
+    "waiting": "⏳ Ожидание",
+    "info": "ℹ️ Информация",
+    "success": "✅ Успех",
+    "admin_warn": "🚨 Административный варн",
+    "warning": "⚠️ Предупреждение",
+    "user": "👤 Пользователь",
+    "alert": "🚨 Сигнал",
+    "close": "❌ Закрытие",
+    "ban": "🔨 Бан",
+    "report": "📋 Репорт",
+    "appeal": "📝 Апелляция",
+    "question": "💬 Вопрос | ответ",
+    "achievements": "🏆 Достижения",
     "raid": "⚔️ Рейды",
     "sea_events": "🌊 Морские ивенты",
     "trade": "💰 Трейды",
     "trial": "🧬 Триалы",
-    "help": "🤝 Кнопка «Помочь»",
     "profile": "👤 Профиль",
     "applications": "📋 Мои заявки",
+    "active": "🔴 Активные нарушения",
+    "navigation": "🧭 Навигация",
+    "rules": "📜 Правила",
+    "premium": "💎 Premium Emoji",
+    "redact": "✏️ Redact",
+    "administration": "🛡 Администрация",
+    "admin_list": "👥 Список администрации",
+    "update": "🤖 Версия / обновление",
+    "roblox": "🎮 Roblox",
+    "stats": "📊 Статистика",
+    "balance": "💎 Баланс",
+    "comment": "💬 Комментарий",
+    "help": "🤝 Помочь",
+    "back": "↩️ Назад",
+    "link": "🔗 Ссылка",
+    "time": "🕒 Время",
+    "calendar": "📅 Дата",
+    "trash": "🗑 Удаление",
+    "creator": "👑 Создатель",
+    "chief_admin": "🛡 Главный админ",
+    "admin": "🔧 Администратор",
+    "junior_admin": "🔰 Младший админ",
 }
+
+# Premium Emoji не хардкодятся в коде.
+# Создатель задаёт их через /addemoji; значения сохраняются в config.
+# Это позволяет менять набор без выпуска новой версии бота.
+SCREEN_CUSTOM_EMOJI_IDS = {}
+PREMIUM_EMOJI_IDS = {}
+
+FRUIT_CUSTOM_EMOJI_IDS: dict[str, str] = {}
 
 RAID_FRUITS = {
     "flame": ("Пламя", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
@@ -1284,18 +1478,18 @@ RAID_FRUITS = {
     "buddha": ("Будда", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
     "spider": ("Паук", {"Z": 800, "X": 3500, "C": 4500, "V": 6000, "F": 2500}),
     "phoenix": ("Феникс", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
+    "dough": ("Тесто", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
 }
 
 
 def emoji_admin_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🍎 Настроить эмодзи фруктов", callback_data="emoji_fruits_setup")],
-            [InlineKeyboardButton(text="✨ Настроить эмодзи разделов", callback_data="emoji_sections_setup")],
-            [InlineKeyboardButton(text="📋 Установленные эмодзи", callback_data="emoji_list")],
-            [InlineKeyboardButton(text="🗑 Сбросить эмодзи фруктов", callback_data="emoji_fruits_reset")],
-        ]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🍎 Эмодзи фруктов", callback_data="emoji_fruits_setup")],
+        [InlineKeyboardButton(text="💬 Эмодзи сообщений", callback_data="emoji_sections_setup")],
+        [InlineKeyboardButton(text="🧬 Эмодзи рас триалов", callback_data="emoji_races_setup")],
+        [InlineKeyboardButton(text="📋 Установленные эмодзи", callback_data="emoji_list")],
+        [InlineKeyboardButton(text="🗑 Сбросить эмодзи фруктов", callback_data="emoji_fruits_reset")],
+    ])
 
 
 def emoji_sections_keyboard() -> InlineKeyboardMarkup:
@@ -1304,6 +1498,7 @@ def emoji_sections_keyboard() -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text=title, callback_data=f"emoji_slot_{key}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="emoji_admin_back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 def fruit_emoji_setup_prompt(index: int) -> str:
@@ -1333,10 +1528,41 @@ async def stock_line_html(fruit_key: str, fruit_name: str, price: str | int) -> 
 
 
 def raid_fruit_keyboard() -> InlineKeyboardMarkup:
+    # Telegram inline-кнопка поддерживает icon_custom_emoji_id, поэтому здесь
+    # используем фруктовые Premium Emoji, если они были настроены через /addemoji.
     buttons = []
     for key, (name, _) in RAID_FRUITS.items():
-        buttons.append(InlineKeyboardButton(text=name, callback_data=f"raid_fruit_{key}"))
+        kwargs = {"text": name, "callback_data": f"raid_fruit_{key}"}
+        emoji_id = None
+        # Не угадываем фруктовый ID: его задаёт /addemoji.
+        try:
+            # Нельзя await в sync-функции, поэтому icon будет добавлен безопасно
+            # в тексте заявки; кнопка остаётся обычной при отсутствии API-значения.
+            pass
+        except Exception:
+            pass
+        buttons.append(InlineKeyboardButton(**kwargs))
     rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def raid_fruit_keyboard_async() -> InlineKeyboardMarkup:
+    rows = []
+    current = []
+    for key, (name, _) in RAID_FRUITS.items():
+        fruit_id = await get_config(f"custom_emoji_fruit_{key}")
+        kwargs = {"text": name, "callback_data": f"raid_fruit_{key}"}
+        if fruit_id:
+            kwargs["icon_custom_emoji_id"] = fruit_id
+        try:
+            button = InlineKeyboardButton(**kwargs)
+        except Exception:
+            kwargs.pop("icon_custom_emoji_id", None)
+            button = InlineKeyboardButton(**kwargs)
+        current.append(button)
+        if len(current) == 2:
+            rows.append(current); current = []
+    if current: rows.append(current)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1362,6 +1588,7 @@ class RuleState(StatesGroup):
 class EmojiState(StatesGroup):
     waiting_emoji = State()
     waiting_fruit_emoji = State()
+    waiting_race_emoji = State()
 
 
 class RaidState(StatesGroup):
@@ -1376,6 +1603,7 @@ class SeaState(StatesGroup):
 
 class TradeState(StatesGroup):
     waiting_trade = State()
+    waiting_fruit = State()
 
 
 class TrialState(StatesGroup):
@@ -1558,10 +1786,12 @@ async def addemoji_cmd(msg: Message, state: FSMContext):
         return
     await state.clear()
     await msg.answer(
-        "🎨 <b>Центр Premium Emoji DuoSup</b>\n" + SEPARATOR + "\n"
-        "Здесь можно настроить эмодзи для фруктов и всех разделов бота.\n\n"
-        "🍎 <b>Фрукты</b> — бот попросит эмодзи по порядку от Rocket до Dragon и сохранит каждое для Stock, рейдов, трейдов и других функций.\n"
-        "✨ <b>Разделы</b> — отдельные эмодзи для Stock, Рейдов, Трейдов, Триалов и т.д.",
+        "💎 <b>Центр Premium Emoji DuoSup</b>\n" + SEPARATOR + "\n"
+        "Выберите, что хотите настроить.\n\n"
+        "🍎 <b>Эмодзи фруктов</b> — 41 фрукт от Rocket до Dragon.\n"
+        "💬 <b>Эмодзи сообщений</b> — системные сообщения, разделы, модерация и заявки.\n"
+        "🧬 <b>Эмодзи рас триалов</b> — Хуман, Киборг, Ангел, Шарк, Гуль и Минк.\n"
+        "💾 Все эмодзи сохраняются в базе и используются в кнопках и сообщениях.",
         reply_markup=emoji_admin_keyboard(),
     )
 
@@ -1613,6 +1843,58 @@ async def emoji_fruits_reset_cb(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text("🗑 <b>Эмодзи всех фруктов сброшены.</b>", reply_markup=emoji_admin_keyboard())
 
 
+def race_emoji_setup_prompt(index: int) -> str:
+    key, name = TRIAL_RACES[index]
+    return (
+        "🧬 <b>Настройка Premium Emoji рас</b>\n" + SEPARATOR + "\n"
+        f"Эмодзи <b>{index + 1}/{len(TRIAL_RACES)}</b>\n"
+        f"Раса: <b>{esc(name)}</b>\n\n"
+        "Отправьте одним сообщением один Premium Emoji.\n"
+        "Он будет использоваться на inline-кнопке выбора этой расы и в сообщениях триалов.\n\n"
+        "Для отмены: /cancel"
+    )
+
+
+@dp.callback_query(F.data == "emoji_races_setup")
+async def emoji_races_setup_cb(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user or cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await state.update_data(emoji_race_index=0)
+    await state.set_state(EmojiState.waiting_race_emoji)
+    await cb.message.edit_text(race_emoji_setup_prompt(0))
+    await cb.answer()
+
+
+@dp.message(EmojiState.waiting_race_emoji)
+async def save_race_custom_emoji(msg: Message, state: FSMContext):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await state.clear()
+        return
+    emoji_id = extract_custom_emoji_id(msg)
+    if not emoji_id:
+        await msg.answer("⚠️ Я не вижу Premium Emoji. Отправьте именно один custom emoji.")
+        return
+    data = await state.get_data()
+    index = int(data.get("emoji_race_index", 0))
+    if index >= len(TRIAL_RACES):
+        await state.clear()
+        return
+    race_key, race_name = TRIAL_RACES[index]
+    await set_config(f"custom_emoji_race_{race_key}", emoji_id)
+    next_index = index + 1
+    if next_index >= len(TRIAL_RACES):
+        await state.clear()
+        await msg.answer(
+            "🎉 <b>Готово!</b>\n" + SEPARATOR + "\n"
+            f"Все {len(TRIAL_RACES)} Premium Emoji рас сохранены.\n\n"
+            "Они будут использоваться на inline-кнопках выбора рас и в сообщениях триалов."
+        )
+        return
+    await state.update_data(emoji_race_index=next_index)
+    await msg.answer(f"✅ {esc(race_name)} сохранён.\n\n{race_emoji_setup_prompt(next_index)}")
+
+
 @dp.callback_query(F.data == "emoji_list")
 async def emoji_list_cb(cb: CallbackQuery):
     if not cb.from_user or cb.from_user.id != CREATOR_ID:
@@ -1627,6 +1909,10 @@ async def emoji_list_cb(cb: CallbackQuery):
             emoji = await custom_emoji_html(f"fruit_{key}", "🍎")
             lines.append(f"{emoji} {esc(name)}")
     lines.append(f"\nУстановлено: <b>{installed}/{len(FRUIT_EMOJI_ORDER)}</b>")
+    lines.append("\n<b>🧬 Расы:</b>")
+    for race_key, race_name in TRIAL_RACES:
+        race_id = await get_config(f"custom_emoji_race_{race_key}")
+        lines.append(f"{'✅' if race_id else '▫️'} {esc(race_name)}")
     lines.append("\n<b>Разделы:</b>")
     for key, title in EMOJI_SLOTS.items():
         emoji_id = await get_config(f"custom_emoji_{key}")
@@ -1905,8 +2191,8 @@ async def warn_cmd(msg: Message):
     if not await require_group_chat(msg):
         return
     actor = msg.from_user
-    if not actor or not await check_permission(actor.id, 4):
-        await msg.answer("⛔ Выдавать варны могут только администраторы (ранг 4+).")
+    if not actor or not await check_permission(actor.id, 3):
+        await msg.answer("⛔ Выдавать варны могут только администраторы (ранг 3+).")
         return
     target_id, username, full_name, reason = await parse_target_and_reason(msg)
     if target_id is None:
@@ -1926,16 +2212,15 @@ async def warn_cmd(msg: Message):
         actor.id, target_id
     )
     if not allowed:
-        await log_forbidden_attempt(
-            "выдать варн",
-            actor,
-            target_id,
-            username,
-            mod_level,
-            target_level,
-            permission_error,
-        )
-        await msg.answer(permission_error)
+        await log_forbidden_attempt("выдать варн", actor, target_id, username, mod_level, target_level, permission_error)
+        if target_level > 0 and actor.id != CREATOR_ID:
+            await request_creator_admin_punishment(msg, target_id, "варн", reason)
+        else:
+            await msg.answer(permission_error)
+        return
+    current_warns = await get_user_warns(target_id)
+    if mod_level < 6 and current_warns >= 3:
+        await msg.answer("⚠️ Администратор вашего ранга может выдать максимум 3 варна одному пользователю.")
         return
 
     target_chat = await moderation_chat_id(msg.chat.id)
@@ -2026,16 +2311,11 @@ async def ban_cmd(msg: Message):
         actor.id, target_id
     )
     if not allowed:
-        await log_forbidden_attempt(
-            "выдать бан",
-            actor,
-            target_id,
-            username,
-            mod_level,
-            target_level,
-            permission_error,
-        )
-        await msg.answer(permission_error)
+        await log_forbidden_attempt("выдать бан", actor, target_id, username, mod_level, target_level, permission_error)
+        if target_level > 0 and actor.id != CREATOR_ID:
+            await request_creator_admin_punishment(msg, target_id, "бан", reason)
+        else:
+            await msg.answer(permission_error)
         return
     target_chat = await moderation_chat_id(msg.chat.id)
     source_id = (
@@ -2059,6 +2339,12 @@ async def ban_cmd(msg: Message):
         build_ban_msg(mention, reason, number), reply_markup=appeal_keyboard(number, "ban")
     )
     await notify_ban_in_dm(target_id, reason, number)
+    await add_simulator_data(actor.id, 10)
+    if target_level > 0 and actor.id == CREATOR_ID:
+        await apply_admin_life_loss(target_id)
+    await add_simulator_data(actor.id, 10)
+    if target_level > 0 and actor.id == CREATOR_ID:
+        await apply_admin_life_loss(target_id)
     await send_admin_log(
         "◆<b>ВЫДАН БАН ⚠️</b>◆\n"
         f"{SEPARATOR}\n"
@@ -2364,6 +2650,7 @@ async def report_cb(cb: CallbackQuery):
                 f"{user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
             )
+        await add_simulator_data(cb.from_user.id, 10)
         await cb.answer("Репорт закреплён за вами.")
         return
 
@@ -2542,7 +2829,7 @@ async def menu_raid_cb(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
         "⚔️ <b>Создание заявки на рейд</b>\n" + SEPARATOR + "\n"
         "Выберите фрукт для прокачки V2:",
-        reply_markup=raid_fruit_keyboard(),
+        reply_markup=await raid_fruit_keyboard_async(),
     )
     await cb.answer()
 
@@ -2570,7 +2857,7 @@ async def raid_fruit_cb(cb: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "raid_back_fruits")
 async def raid_back_fruits_cb(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.edit_text("⚔️ <b>Выберите фрукт для прокачки V2:</b>", reply_markup=raid_fruit_keyboard())
+    await cb.message.edit_text("⚔️ <b>Выберите фрукт для прокачки V2:</b>", reply_markup=await raid_fruit_keyboard_async())
     await cb.answer()
 
 
@@ -2602,8 +2889,8 @@ async def raid_next_cb(cb: CallbackQuery, state: FSMContext):
     fruit_key = (cb.data or "").removeprefix("raid_next_")
     data = await state.get_data()
     selected = set(data.get("raid_skills") or [])
-    if len(selected) < 4:
-        await cb.answer("⚠️ Выберите минимум 4 навыка.", show_alert=True)
+    if len(selected) < 1:
+        await cb.answer("⚠️ Выберите минимум 1 навык.", show_alert=True)
         return
     name, skills = RAID_FRUITS[fruit_key]
     if fruit_key == "phoenix":
@@ -2655,7 +2942,7 @@ async def raid_comment_msg(msg: Message, state: FSMContext):
     fruit_key = data.get("raid_fruit")
     selected = set(data.get("raid_skills") or [])
     balance = int(data.get("raid_balance") or 0)
-    if fruit_key not in RAID_FRUITS or len(selected) < 4:
+    if fruit_key not in RAID_FRUITS or not 1 <= len(selected) <= 5:
         await state.clear()
         await msg.answer("⚠️ Заявка устарела. Начните создание рейда заново.")
         return
@@ -2672,32 +2959,32 @@ async def raid_comment_msg(msg: Message, state: FSMContext):
         await state.clear()
         await msg.answer("❌ Основной чат HuBBlox ещё не подключён.")
         return
-    skill_lines = "\n".join(f"• {k} — {skills[k]:,}".replace(",", ".") for k in sorted(selected, key=lambda x: 'ZXCVF'.index(x)))
-    emoji = await custom_emoji_html("raid", "⚔️")
-    prow = await require_db().fetchrow("SELECT roblox_username FROM users WHERE user_id=$1", msg.from_user.id)
-    rb_name = esc(prow["roblox_username"] or "не указан") if prow else "не указан"
+    skill_order = {k: i for i, k in enumerate("ZXCVF")}
+    skill_lines = "\n".join(f"• {k} — {skills[k]:,}".replace(",", ".") for k in sorted(selected, key=lambda x: skill_order[x]))
+    fruit_emoji = await fruit_emoji_html(fruit_key, "🍎")
+    raid_emoji = await custom_emoji_html("raid", "⚔️")
+    rb = await require_db().fetchrow("SELECT roblox_username FROM users WHERE user_id=$1", msg.from_user.id)
+    rb_name = esc(rb["roblox_username"] or "не указан") if rb else "не указан"
     chip_line = "\n💳 Чип: <b>нужен</b>" if data.get("raid_chip") else ""
     text = (
-        f"{emoji} <b>ПОИСК УЧАСТНИКОВ НА РЕЙД</b>\n{SEPARATOR}\n"
-        f"🍎 Фрукт: <b>{esc(name)}</b>\n\n"
+        f"{raid_emoji} <b>ПОИСК УЧАСТНИКОВ НА РЕЙД</b>\n{SEPARATOR}\n"
+        f"{fruit_emoji} Фрукт: <b>{esc(name)}</b>\n\n"
         f"👤 Ник в РБ: <b>{rb_name}</b>\n"
         f"💬 Ник в TG: {user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)}\n\n"
         f"{skill_lines}\n"
         f"💰 Общая стоимость выбранных навыков: <b>{total:,}</b> фрагментов".replace(",", ".") + "\n"
         f"💎 Баланс: <b>{balance:,}</b> фрагментов".replace(",", ".") + chip_line + "\n\n"
         f"💬 Комментарий: {esc(comment) if comment else '—'}\n\n{SEPARATOR}\n"
-        "🟢 <b>Заявка активна</b>"
+        "🤝 <b>Нужна помощь участника</b>"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🤝 Помочь", callback_data="raid_help_disabled")]])
-    sent = await require_bot().send_message(int(hublox), text, message_thread_id=TOPICS["raids"], reply_markup=kb)
+    payload = {"fruit": fruit_key, "fruit_name": name, "skills": sorted(selected, key=lambda x: skill_order[x]), "balance": balance, "comment": comment, "chip": bool(data.get("raid_chip")), "roblox_name": rb_name}
+    aid = await publish_application("raid", msg, text, None, payload)
+    if aid:
+        hublox_id = await get_config("hublox_id")
+        app_row = await require_db().fetchrow("SELECT chat_message_id FROM applications WHERE id=$1", aid)
+        await require_bot().edit_message_reply_markup(int(hublox_id), int(app_row["chat_message_id"]), reply_markup=application_help_keyboard(aid))
     await state.clear()
     await msg.answer("✅ Заявка на рейд опубликована в теме «Рейды».")
-
-
-@dp.callback_query(F.data == "raid_help_disabled")
-async def raid_help_placeholder(cb: CallbackQuery):
-    await cb.answer("🤝 Система помощи будет привязана к конкретной заявке в следующем модуле.", show_alert=True)
-
 
 
 # ========================== HUВBLOX АКТИВНОСТИ: SEA / TRADE / TRIAL / PROFILE ==========================
@@ -2708,6 +2995,8 @@ SEA_EVENTS = [
     ("ship_raid", "Ship Raid"), ("other", "Другое"),
 ]
 TRIAL_RACES = [("human", "Хуман"), ("cyborg", "Киборг"), ("angel", "Ангел"), ("shark", "Шарк"), ("ghoul", "Гуль"), ("mink", "Минк")]
+TRIAL_RACE_EMOJI_SLOTS = {key: name for key, name in TRIAL_RACES}
+
 
 
 def private_only(cb: CallbackQuery) -> bool:
@@ -2728,14 +3017,28 @@ def count_keyboard(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def trial_race_keyboard(exclude: set[str] | None = None) -> InlineKeyboardMarkup:
+async def trial_race_keyboard(exclude: set[str] | None = None) -> InlineKeyboardMarkup:
     exclude = exclude or set()
     rows = []
     for key, name in TRIAL_RACES:
-        if key not in exclude:
-            rows.append([InlineKeyboardButton(text=name, callback_data=f"trial_race_{key}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back")])
+        if key in exclude:
+            continue
+        kwargs = {"text": name, "callback_data": f"trial_race_{key}"}
+        emoji_id = await get_config(f"custom_emoji_race_{key}")
+        if emoji_id:
+            kwargs["icon_custom_emoji_id"] = emoji_id
+        try:
+            button = InlineKeyboardButton(**kwargs)
+        except Exception:
+            kwargs.pop("icon_custom_emoji_id", None)
+            button = InlineKeyboardButton(**kwargs)
+        rows.append([button])
+    rows.append([_btn("⬅️ Назад", "menu_back", icon_key="back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def trial_race_emoji_html(race_key: str, fallback: str = "🧬") -> str:
+    return await custom_emoji_html(f"race_{race_key}", fallback)
 
 
 def trial_help_keyboard() -> InlineKeyboardMarkup:
@@ -2746,23 +3049,94 @@ def trial_help_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def active_application_keyboard(app_id: int, kind: str) -> InlineKeyboardMarkup:
+def application_help_keyboard(app_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Активна", callback_data=f"app_status_{app_id}")],
-        [InlineKeyboardButton(text="🗑 Завершить заявку", callback_data=f"app_close_{app_id}")],
+        [_btn("🤝 Помочь", f"app_help_{app_id}", icon_key="help")],
     ])
+
+
+def application_confirm_keyboard(app_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        _btn("✅ Подтвердить", f"app_help_confirm_{app_id}", icon_key="success"),
+        _btn("❌ Отмена", f"app_help_cancel_{app_id}", icon_key="close"),
+    ]])
+
+
+def application_topic_key(kind: str) -> str:
+    return {"sea": "sea_events", "trade": "trades", "trial": "trials", "raid": "raids"}[kind]
+
+
+def payload_dict(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            data = json.loads(value)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    return {}
 
 
 async def publish_application(kind: str, user, text: str, keyboard: InlineKeyboardMarkup | None = None, payload: dict | None = None):
     hublox = await get_config("hublox_id")
-    topic_key = {"sea": "sea_events", "trade": "trades", "trial": "trials", "raid": "raids"}[kind]
     if not hublox:
         return None
-    sent = await require_bot().send_message(int(hublox), text, message_thread_id=TOPICS[topic_key], reply_markup=keyboard)
+    sent = await require_bot().send_message(int(hublox), text, message_thread_id=TOPICS[application_topic_key(kind)], reply_markup=keyboard)
     row = await require_db().fetchrow(
         "INSERT INTO applications(user_id,kind,status,chat_message_id,payload,created_at) VALUES($1,$2,'active',$3,$4::jsonb,$5) RETURNING id",
         user.id, kind, sent.message_id, json.dumps(payload or {}, ensure_ascii=False), now_ts())
     return int(row["id"])
+
+
+async def application_row_text(row, helper_user=None) -> str:
+    payload = payload_dict(row["payload"])
+    author_id = int(row["user_id"])
+    known = await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1", author_id)
+    author = user_mention(author_id, known["username"] if known else None, known["full_name"] if known else None)
+    kind = str(row["kind"])
+    if kind == "raid":
+        text = f"⚔️ <b>ПОИСК УЧАСТНИКОВ НА РЕЙД</b>\n{SEPARATOR}\n{await fruit_emoji_html(str(payload.get('fruit','')), '🍎')} Фрукт: <b>{esc(payload.get('fruit_name','—'))}</b>\n"
+        rb = esc(payload.get("roblox_name") or "не указан")
+        text += f"👤 Ник в РБ: <b>{rb}</b>\n💬 Ник в TG: {author}\n"
+        skills = payload.get("skills") or []
+        text += f"⚔️ Навыки: <b>{', '.join(skills)}</b>\n💎 Баланс: <b>{int(payload.get('balance') or 0):,}</b> фрагментов".replace(",", ".")
+        if payload.get("chip"):
+            text += "\n💳 Чип: <b>нужен</b>"
+        text += f"\n💬 Комментарий: {esc(payload.get('comment') or '—')}"
+    elif kind == "sea":
+        text = f"🌊 <b>ПОИСК УЧАСТНИКОВ — {esc(payload.get('event','—'))}</b>\n{SEPARATOR}\n👤 Автор: {author}\n👥 Участников: <b>{payload.get('count','—')}/12</b>\n💬 Комментарий: {esc(payload.get('details') or '—')}"
+    elif kind == "trade":
+        text = f"💰 <b>НОВЫЙ ТРЕЙД</b>\n{SEPARATOR}\n👤 Автор: {author}\n🕒 {msk_time()} МСК\n\n{esc(payload.get('trade','—'))}"
+    else:
+        mode = "взаимно" if payload.get("help") == "mutual" else "оплата (договорная)"
+        race_key = str(payload.get("race") or "")
+        race_emoji = await trial_race_emoji_html(race_key, "🧬")
+        text = f"{race_emoji} <b>ТРИАЛ</b>\n{SEPARATOR}\n👤 От пользователя: {author}\n{race_emoji} Раса: <b>{esc(payload.get('race_name','—'))}</b>\n🤝 Помощь: <b>{mode}</b>\n💬 Комментарий: {esc(payload.get('details') or '—')}"
+        if payload.get("help") == "paid":
+            text += "\n⚠️ <b>Администрация HuBBlox и DuoSup не несут ответственности за оплату.</b>"
+    if helper_user:
+        helper_row = await require_db().fetchrow("SELECT roblox_username FROM users WHERE user_id=$1", helper_user.id)
+        helper_rb = esc(helper_row["roblox_username"] or "не указан") if helper_row else "не указан"
+        text += f"\n\n{SEPARATOR}\n🤝 <b>Помогает:</b> {user_mention(helper_user.id, helper_user.username, helper_user.full_name)}\n🎮 <i>{helper_rb}</i>"
+        if kind == "trial":
+            text += f"\n🧬 Раса: <b>{esc(payload.get('race_name','—'))}</b>"
+    return text + f"\n{SEPARATOR}"
+
+
+async def refresh_application_message(app_id: int, helper_user=None):
+    row = await require_db().fetchrow("SELECT id,user_id,kind,status,chat_message_id,payload FROM applications WHERE id=$1", app_id)
+    if not row:
+        return
+    hublox = await get_config("hublox_id")
+    if not hublox or not row["chat_message_id"]:
+        return
+    text = await application_row_text(row, helper_user if row["status"] == "claimed" else None)
+    markup = None if row["status"] == "claimed" else application_help_keyboard(app_id)
+    try:
+        await require_bot().edit_message_text(text, chat_id=int(hublox), message_id=int(row["chat_message_id"]), reply_markup=markup)
+    except Exception:
+        LOGGER.exception("Не удалось обновить заявку #%s", app_id)
 
 
 @dp.callback_query(F.data == "menu_back")
@@ -2786,24 +3160,27 @@ async def menu_sea_cb(cb: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("sea_event_"))
 async def sea_event_cb(cb: CallbackQuery, state: FSMContext):
     if not private_only(cb): return
-    key=(cb.data or "").removeprefix("sea_event_")
-    name=dict(SEA_EVENTS).get(key)
+    key = (cb.data or "").removeprefix("sea_event_")
+    name = dict(SEA_EVENTS).get(key)
     if not name: return
     await state.update_data(sea_event=key, sea_event_name=name)
     if key == "other":
         await state.set_state(SeaState.waiting_details)
-        await cb.message.edit_text("🌊 <b>Другое</b>\n\nНапишите одним сообщением количество участников (1–12) и подробности ивента.")
+        await cb.message.edit_text("🌊 <b>Другое</b>\n\nНапишите одним сообщением количество участников (2–12) и подробности ивента.")
     else:
         await state.set_state(SeaState.waiting_count)
-        await cb.message.edit_text(f"🌊 <b>{esc(name)}</b>\n\nВыберите количество участников. Максимум — 12.", reply_markup=count_keyboard("sea"))
+        await cb.message.edit_text(f"🌊 <b>{esc(name)}</b>\n\nВыберите количество участников. Минимум — 2, максимум — 12.", reply_markup=count_keyboard("sea"))
     await cb.answer()
 
 
 @dp.callback_query(F.data.startswith("sea_count_"))
 async def sea_count_cb(cb: CallbackQuery, state: FSMContext):
     if not private_only(cb): return
-    n=int((cb.data or "").rsplit("_",1)[1])
-    data=await state.get_data(); name=data.get("sea_event_name","Другое")
+    n = int((cb.data or "").rsplit("_", 1)[1])
+    if n < 2 or n > 12:
+        await cb.answer("Количество участников должно быть от 2 до 12.", show_alert=True); return
+    data = await state.get_data()
+    name = data.get("sea_event_name", "Другое")
     await state.update_data(sea_count=n)
     await state.set_state(SeaState.waiting_details)
     await cb.message.edit_text(f"🌊 <b>{esc(name)}</b>\nУчастников: <b>{n}/12</b>\n\nНапишите комментарий и детали. Если не нужны — отправьте <code>-</code>.")
@@ -2817,256 +3194,361 @@ async def sea_back_cb(cb: CallbackQuery, state: FSMContext):
 
 @dp.message(SeaState.waiting_details, F.text)
 async def sea_details_msg(msg: Message, state: FSMContext):
-    data=await state.get_data(); key=data.get("sea_event"); name=data.get("sea_event_name","Другое")
-    raw=(msg.text or "").strip()
+    data = await state.get_data()
+    key = data.get("sea_event")
+    name = data.get("sea_event_name", "Другое")
+    raw = (msg.text or "").strip()
     if key == "other":
-        m=re.match(r"^(?:участников\s*)?(\d{1,2})(?:\s+|$)(.*)$", raw, re.I|re.S)
-        if not m or not 1 <= int(m.group(1)) <= 12:
-            await msg.answer("⚠️ Для «Другое» первым числом укажите количество участников от 1 до 12.")
+        m = re.match(r"^(?:участников\s*)?(\d{1,2})(?:\s+|$)(.*)$", raw, re.I | re.S)
+        if not m or not 2 <= int(m.group(1)) <= 12:
+            await msg.answer("⚠️ Для «Другое» первым числом укажите количество участников от 2 до 12.")
             return
-        n=int(m.group(1)); details=m.group(2).strip() or "—"
+        n = int(m.group(1)); details = m.group(2).strip() or "—"
     else:
-        n=int(data.get("sea_count") or 0); details="—" if raw == "-" else raw
-    if len(details)>1000: await msg.answer("⚠️ Слишком длинный комментарий. Максимум 1000 символов."); return
-    emoji=await custom_emoji_html("sea_events","🌊")
-    text=(f"{emoji} <b>ПОИСК УЧАСТНИКОВ — {esc(name)}</b>\n{SEPARATOR}\n"
-          f"👤 Автор: {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\n"
-          f"👥 Участников: <b>{n}/12</b>\n💬 Комментарий: {esc(details)}\n{SEPARATOR}\n🟢 <b>Заявка активна</b>")
-    aid=await publish_application("sea",msg,text,InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🤝 Помочь",callback_data="app_help_sea")],[InlineKeyboardButton(text="🟢 Активна",callback_data="app_status_dummy")]]),{"event":name,"count":n,"details":details})
+        n = int(data.get("sea_count") or 0); details = "—" if raw == "-" else raw
+    if len(details) > 1000:
+        await msg.answer("⚠️ Слишком длинный комментарий. Максимум 1000 символов."); return
+    emoji = await custom_emoji_html("sea_events", "🌊")
+    text = (f"{emoji} <b>ПОИСК УЧАСТНИКОВ — {esc(name)}</b>\n{SEPARATOR}\n"
+            f"👤 Автор: {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\n"
+            f"👥 Участников: <b>{n}/12</b>\n💬 Комментарий: {esc(details)}\n{SEPARATOR}\n🤝 <b>Нужна помощь участника</b>")
+    aid = await publish_application("sea", msg, text, None, {"event": name, "count": n, "details": details})
+    if aid:
+        row = await require_db().fetchrow("SELECT chat_message_id FROM applications WHERE id=$1", aid)
+        await require_bot().edit_message_reply_markup(int(await get_config("hublox_id")), int(row["chat_message_id"]), reply_markup=application_help_keyboard(aid))
     await state.clear(); await msg.answer("✅ Заявка опубликована в теме «Морские ивенты».")
 
 
 @dp.callback_query(F.data == "menu_trade")
-async def menu_trade_cb(cb:CallbackQuery,state:FSMContext):
+async def menu_trade_cb(cb: CallbackQuery, state: FSMContext):
     if not private_only(cb): return
     await state.clear()
-    kb=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 Торговать",callback_data="trade_create")],
-        [InlineKeyboardButton(text="🔎 Найти фрукт",callback_data="trade_find")],
-        [InlineKeyboardButton(text="📋 Действующие трейды",callback_data="trade_active")],
-        [InlineKeyboardButton(text="⬅️ Назад",callback_data="menu_back")],
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("💰 Торговать", "trade_create", icon_key="trade")],
+        [_btn("🔎 Найти фрукт", "trade_find", icon_key="question")],
+        [_btn("📋 Действующие трейды", "trade_active", icon_key="applications")],
+        [_btn("⬅️ Назад", "menu_back", icon_key="back")],
     ])
-    await cb.message.edit_text("💰 <b>Трейды</b>\n"+SEPARATOR+"\nВыберите действие:",reply_markup=kb); await cb.answer()
+    await cb.message.edit_text("💰 <b>Трейды</b>\n" + SEPARATOR + "\nВыберите действие:", reply_markup=kb)
+    await cb.answer()
 
 
 @dp.callback_query(F.data == "trade_create")
-async def trade_create_cb(cb:CallbackQuery,state:FSMContext):
+async def trade_create_cb(cb: CallbackQuery, state: FSMContext):
     if not private_only(cb): return
     await state.set_state(TradeState.waiting_trade)
-    await cb.message.edit_text("💰 <b>Создание трейда</b>\n"+SEPARATOR+"\nНапишите, что отдаёте и что хотите получить.\nПример: <code>Китсуне на Дракон</code>")
+    await cb.message.edit_text("💰 <b>Создание трейда</b>\n" + SEPARATOR + "\nНапишите, что отдаёте и что хотите получить.\nПример: <code>Китсуне на Дракон</code>")
     await cb.answer()
 
 
 @dp.callback_query(F.data == "trade_find")
-async def trade_find_cb(cb:CallbackQuery):
+async def trade_find_cb(cb: CallbackQuery, state: FSMContext):
     if not private_only(cb): return
-    rows=await require_db().fetch("SELECT id,payload,created_at FROM applications WHERE kind='trade' AND status='active' ORDER BY created_at DESC LIMIT 20")
-    if not rows:
-        await cb.answer("Активных трейдов пока нет.",show_alert=True); return
-    lines=["🔎 <b>Активные трейды</b>",SEPARATOR]
-    for r in rows:
-        lines.append(f"#{r['id']} • {esc((r['payload'] or {}).get('trade','—'))}")
-    await cb.message.edit_text("\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад",callback_data="menu_trade")]])); await cb.answer()
+    await state.set_state(TradeState.waiting_fruit)
+    await cb.message.edit_text("🔎 <b>Поиск трейда</b>\n\nНазовите фрукт, который вы ищете.\nНапишите его без ошибок.\nПримеры: <code>тесто</code>, <code>алмаз</code>, <code>свет</code>, <code>дрожь</code> и т. д.\n\nДля отмены: /cancel")
+    await cb.answer()
+
+
+TRADE_FRUIT_ALIASES = {
+    "тесто": ["тесто", "dough"], "алмаз": ["алмаз", "diamond"], "свет": ["свет", "light"],
+    "дрожь": ["дрожь", "quake"], "магма": ["магма", "magma"], "лёд": ["лёд", "лед", "ice"],
+    "пламя": ["пламя", "flame"], "тьма": ["тьма", "dark"], "песок": ["песок", "sand"],
+    "будда": ["будда", "buddha"], "паук": ["паук", "spider"], "феникс": ["феникс", "phoenix"],
+    "любовь": ["любовь", "love"], "звук": ["звук", "sound"], "призрак": ["призрак", "ghost"],
+    "портал": ["портал", "portal"], "молния": ["молния", "lightning"], "близзард": ["близзард", "blizzard"],
+    "гравитация": ["гравитация", "gravity"], "мамонт": ["мамонт", "mammoth"], "тирекс": ["тирекс", "t-rex", "trex"],
+    "тень": ["тень", "shadow"], "веном": ["веном", "venom"], "газ": ["газ", "gas"], "спирит": ["спирит", "spirit"],
+    "тигр": ["тигр", "tiger"], "йети": ["йети", "yeti"], "китсуне": ["китсуне", "kitsune"], "контроль": ["контроль", "control"],
+    "дракон": ["дракон", "dragon"], "ракета": ["ракета", "rocket"], "вращение": ["вращение", "spin"], "клинок": ["клинок", "blade"],
+    "пружина": ["пружина", "spring"], "бомба": ["бомба", "bomb"], "дым": ["дым", "smoke"], "шип": ["шип", "spike"],
+    "резина": ["резина", "rubber"], "орёл": ["орел", "орёл", "eagle"], "творение": ["творение", "creation"],
+}
+
+
+def normalize_trade_search(text: str) -> str:
+    return re.sub(r"[^a-zа-яё0-9]+", " ", text.casefold()).strip()
+
+
+@dp.message(TradeState.waiting_fruit, F.text)
+async def trade_find_msg(msg: Message, state: FSMContext):
+    query = normalize_trade_search(msg.text or "")
+    aliases = TRADE_FRUIT_ALIASES.get(query, [query])
+    if len(query) < 2:
+        await msg.answer("⚠️ Название фрукта слишком короткое.")
+        return
+    rows = await require_db().fetch("SELECT id,user_id,payload,chat_message_id FROM applications WHERE kind='trade' AND status='active' ORDER BY created_at DESC LIMIT 100")
+    matches = []
+    hublox = await get_config("hublox_id")
+    for row in rows:
+        trade = normalize_trade_search(str(payload_dict(row["payload"]).get("trade") or ""))
+        if any(alias in trade for alias in aliases):
+            matches.append(row)
+    await state.clear()
+    if not matches:
+        await msg.answer(f"🔎 Трейдов с фруктом «{esc(msg.text.strip())}» не найдено.")
+        return
+    await msg.answer(f"🔎 <b>Найдено трейдов: {len(matches)}</b>\n{SEPARATOR}")
+    for row in matches:
+        known = await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1", int(row["user_id"]))
+        author = user_mention(int(row["user_id"]), known["username"] if known else None, known["full_name"] if known else None)
+        trade = esc(payload_dict(row["payload"]).get("trade") or "—")
+        url = message_url(int(hublox), int(row["chat_message_id"])) if hublox else None
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Перейти к сообщению", url=url)]]) if url else None
+        await msg.answer(f"💰 <b>Трейд #{row['id']}</b>\n{SEPARATOR}\n👤 Автор: {author}\n\n{trade}", reply_markup=markup)
 
 
 @dp.callback_query(F.data == "trade_active")
-async def trade_active_cb(cb:CallbackQuery):
+async def trade_active_cb(cb: CallbackQuery):
     if not private_only(cb): return
-    rows=await require_db().fetch("SELECT id,payload,created_at FROM applications WHERE kind='trade' AND status='active' ORDER BY created_at DESC LIMIT 30")
+    rows = await require_db().fetch("SELECT id,payload,created_at FROM applications WHERE kind='trade' AND status='active' ORDER BY created_at DESC LIMIT 30")
     if not rows:
-        await cb.message.edit_text("📋 <b>Действующие трейды</b>\n\nПока нет активных трейдов.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад",callback_data="menu_trade")]])); await cb.answer(); return
-    lines=["📋 <b>Действующие трейды</b>",SEPARATOR]
-    buttons=[]
+        await cb.message.edit_text("📋 <b>Действующие трейды</b>\n\nАктивных трейдов пока нет.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ Назад", "menu_trade", icon_key="back")]])); await cb.answer(); return
+    lines = ["📋 <b>Действующие трейды</b>", SEPARATOR]
     for r in rows:
-        lines.append(f"#{r['id']} • {esc((r['payload'] or {}).get('trade','—'))}")
-        if int(r['id']) in [int(x['id']) for x in rows if int(x['id'])]:
-            if False: buttons.append([])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад",callback_data="menu_trade")])
-    await cb.message.edit_text("\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await cb.answer()
+        lines.append(f"• <b>#{r['id']}</b> — {esc((r['payload'] or {}).get('trade','—'))}")
+    await cb.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ Назад", "menu_trade", icon_key="back")]])); await cb.answer()
 
 
-@dp.message(TradeState.waiting_trade,F.text)
-async def trade_create_msg(msg:Message,state:FSMContext):
-    trade=(msg.text or "").strip()
-    if len(trade)<2 or len(trade)>1000: await msg.answer("⚠️ Напишите нормальное описание трейда до 1000 символов."); return
-    emoji=await custom_emoji_html("trade","💰")
-    text=(f"{emoji} <b>НОВЫЙ ТРЕЙД</b>\n{SEPARATOR}\n"
-          f"👤 Автор: {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\n"
-          f"🕒 {msk_time()} МСК\n\n{esc(trade)}\n{SEPARATOR}\n🟢 <b>Заявка активна</b>")
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Перейти в ЛС",url=f"tg://user?id={msg.from_user.id}")]])
-    await publish_application("trade",msg,text,kb,{"trade":trade})
+@dp.message(TradeState.waiting_trade, F.text)
+async def trade_create_msg(msg: Message, state: FSMContext):
+    trade = (msg.text or "").strip()
+    if len(trade) < 2 or len(trade) > 1000:
+        await msg.answer("⚠️ Напишите нормальное описание трейда до 1000 символов."); return
+    emoji = await custom_emoji_html("trade", "💰")
+    text = (f"{emoji} <b>НОВЫЙ ТРЕЙД</b>\n{SEPARATOR}\n"
+            f"👤 Автор: {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\n"
+            f"🕒 {msk_time()} МСК\n\n{esc(trade)}\n{SEPARATOR}")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Перейти в ЛС", url=f"tg://user?id={msg.from_user.id}")]])
+    await publish_application("trade", msg, text, kb, {"trade": trade})
     await state.clear(); await msg.answer("✅ Трейд опубликован в теме «Трейды».")
 
 
 @dp.callback_query(F.data == "menu_trial")
-async def menu_trial_cb(cb:CallbackQuery,state:FSMContext):
+async def menu_trial_cb(cb: CallbackQuery, state: FSMContext):
     if not private_only(cb): return
-    await state.clear(); await cb.message.edit_text("🧬 <b>Создание Триала</b>\n"+SEPARATOR+"\nВыберите расу:",reply_markup=trial_race_keyboard()); await cb.answer()
+    await state.clear()
+    await cb.message.edit_text("🧬 <b>Создание Триала</b>\n" + SEPARATOR + "\nВыберите расу:", reply_markup=await trial_race_keyboard()); await cb.answer()
 
 
 @dp.callback_query(F.data.startswith("trial_race_"))
-async def trial_race_cb(cb:CallbackQuery,state:FSMContext):
+async def trial_race_cb(cb: CallbackQuery, state: FSMContext):
     if not private_only(cb): return
-    key=(cb.data or "").removeprefix("trial_race_"); name=dict(TRIAL_RACES).get(key)
-    if not name:return
-    busy=await require_db().fetchval("SELECT EXISTS(SELECT 1 FROM applications WHERE kind='trial' AND status='active' AND payload->>'race'=$1)",key)
-    if busy: await cb.answer("Эта раса уже занята в активной заявке.",show_alert=True); return
-    await state.update_data(trial_race=key,trial_race_name=name); await state.set_state(TrialState.waiting_help_type)
-    await cb.message.edit_text(f"🧬 <b>Триал — {esc(name)}</b>\n\nКакой формат помощи?",reply_markup=trial_help_keyboard()); await cb.answer()
+    key = (cb.data or "").removeprefix("trial_race_")
+    name = dict(TRIAL_RACES).get(key)
+    if not name: return
+    busy = await require_db().fetchval("SELECT EXISTS(SELECT 1 FROM applications WHERE kind='trial' AND status IN ('active','claimed') AND payload->>'race'=$1)", key)
+    if busy:
+        await cb.answer("Эта раса уже занята.", show_alert=True); return
+    await state.update_data(trial_race=key, trial_race_name=name)
+    await state.set_state(TrialState.waiting_help_type)
+    race_emoji = await trial_race_emoji_html(key, "🧬")
+    await cb.message.edit_text(f"{race_emoji} <b>Триал — {esc(name)}</b>\n\nКакой формат помощи?", reply_markup=trial_help_keyboard()); await cb.answer()
 
 
 @dp.callback_query(F.data.startswith("trial_help_"))
-async def trial_help_cb(cb:CallbackQuery,state:FSMContext):
-    if not private_only(cb):return
-    mode=(cb.data or "").removeprefix("trial_help_")
-    if mode not in {"mutual","paid"}:return
+async def trial_help_cb(cb: CallbackQuery, state: FSMContext):
+    if not private_only(cb): return
+    mode = (cb.data or "").removeprefix("trial_help_")
+    if mode not in {"mutual", "paid"}: return
     await state.update_data(trial_help=mode); await state.set_state(TrialState.waiting_comment)
-    warning="\n\n⚠️ <b>Важно:</b> администрация HuBBlox и DuoSup не несут ответственности за оплату." if mode=="paid" else ""
-    await cb.message.edit_text(f"🧬 <b>Триал</b>\nПомощь: <b>{'взаимно' if mode=='mutual' else 'оплата (договорная)'}</b>{warning}\n\nНапишите комментарий или отправьте <code>-</code>.")
-    await cb.answer()
+    warning = "\n\n⚠️ <b>Важно:</b> администрация HuBBlox и DuoSup не несут ответственности за оплату." if mode == "paid" else ""
+    await cb.message.edit_text(f"🧬 <b>Триал</b>\nПомощь: <b>{'взаимно' if mode=='mutual' else 'оплата (договорная)'}</b>{warning}\n\nНапишите комментарий или отправьте <code>-</code>."); await cb.answer()
 
 
-@dp.message(TrialState.waiting_comment,F.text)
-async def trial_comment_msg(msg:Message,state:FSMContext):
-    data=await state.get_data(); key=data.get("trial_race"); name=data.get("trial_race_name"); mode=data.get("trial_help")
-    if not key or not name or mode not in {"mutual","paid"}: await state.clear(); return
-    details=(msg.text or "").strip(); details="—" if details=="-" else details
-    payload={"race":key,"race_name":name,"help":mode,"details":details}
-    emoji=await custom_emoji_html("trial","🧬")
-    text=(f"{emoji} <b>ТРИАЛ</b>\n{SEPARATOR}\n👤 От пользователя: {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\n"
-          f"🧬 Раса: <b>{esc(name)}</b>\n🤝 Помощь: <b>{'взаимно' if mode=='mutual' else 'оплата (договорная)'}</b>\n"
-          f"💬 Комментарий: {esc(details)}\n{SEPARATOR}\n🟢 <b>Заявка активна</b>")
-    if mode=="paid": text += "\n⚠️ <b>Администрация HuBBlox и DuoSup не несут ответственности за оплату.</b>"
-    # Кнопки оставшихся рас, но claimed race сама исчезает после публикации.
-    rows=[]
-    for rkey,rname in TRIAL_RACES:
-        if rkey!=key:
-            busy=await require_db().fetchval("SELECT EXISTS(SELECT 1 FROM applications WHERE kind='trial' AND status='active' AND payload->>'race'=$1)",rkey)
-            if not busy: rows.append([InlineKeyboardButton(text=f"Выбрать {rname}",callback_data=f"trial_claim_{rkey}")])
-    rows.append([InlineKeyboardButton(text="🟢 Активна",callback_data="app_status_dummy")])
-    await publish_application("trial",msg,text,InlineKeyboardMarkup(inline_keyboard=rows),payload)
+@dp.message(TrialState.waiting_comment, F.text)
+async def trial_comment_msg(msg: Message, state: FSMContext):
+    data = await state.get_data(); key = data.get("trial_race"); name = data.get("trial_race_name"); mode = data.get("trial_help")
+    if not key or not name or mode not in {"mutual", "paid"}: await state.clear(); return
+    details = (msg.text or "").strip(); details = "—" if details == "-" else details
+    if len(details) > 1000:
+        await msg.answer("⚠️ Слишком длинный комментарий. Максимум 1000 символов."); return
+    # Повторная проверка прямо перед публикацией, включая claimed.
+    busy = await require_db().fetchval("SELECT EXISTS(SELECT 1 FROM applications WHERE kind='trial' AND status IN ('active','claimed') AND payload->>'race'=$1)", key)
+    if busy:
+        await state.clear(); await msg.answer("⚠️ Эта раса уже занята."); return
+    payload = {"race": key, "race_name": name, "help": mode, "details": details}
+    emoji = await custom_emoji_html("trial", "🧬")
+    race_emoji = await trial_race_emoji_html(key, "🧬")
+    text = (f"{emoji} <b>ТРИАЛ</b>\n{SEPARATOR}\n👤 От пользователя: {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\n"
+            f"{race_emoji} Раса: <b>{esc(name)}</b>\n🤝 Помощь: <b>{'взаимно' if mode=='mutual' else 'оплата (договорная)'}</b>\n"
+            f"💬 Комментарий: {esc(details)}\n{SEPARATOR}\n🤝 <b>Нужна помощь участника</b>")
+    if mode == "paid": text += "\n⚠️ <b>Администрация HuBBlox и DuoSup не несут ответственности за оплату.</b>"
+    aid = await publish_application("trial", msg, text, None, payload)
+    if aid:
+        row = await require_db().fetchrow("SELECT chat_message_id FROM applications WHERE id=$1", aid)
+        await require_bot().edit_message_reply_markup(int(await get_config("hublox_id")), int(row["chat_message_id"]), reply_markup=application_help_keyboard(aid))
     await state.clear(); await msg.answer("✅ Заявка на триал опубликована.")
 
 
-@dp.callback_query(F.data.startswith("trial_claim_"))
-async def trial_claim_cb(cb:CallbackQuery):
-    if not cb.message or cb.message.chat.type!="supergroup": return
-    race=(cb.data or "").removeprefix("trial_claim_")
-    row=await require_db().fetchrow("SELECT id,user_id,payload,chat_message_id FROM applications WHERE kind='trial' AND status='active' AND payload->>'race'=$1 ORDER BY created_at LIMIT 1",race)
-    if not row: await cb.answer("Эта раса уже занята.",show_alert=True); return
-    if int(row["user_id"])==cb.from_user.id: await cb.answer("Нельзя выбрать свою заявку.",show_alert=True); return
-    payload=row["payload"]
-    await require_db().execute("UPDATE applications SET status='claimed',claimed_by=$2,claimed_at=$3 WHERE id=$1 AND status='active'",int(row["id"]),cb.from_user.id,now_ts())
-    try:
-        await require_bot().edit_message_reply_markup(cb.message.chat.id,int(row["chat_message_id"]),reply_markup=None)
-    except Exception: pass
-    author=int(row["user_id"])
-    await require_bot().send_message(author,f"🧬 <b>Пользователь найден для вашего триала!</b>\n{SEPARATOR}\n👤 Ник в TG: {user_mention(cb.from_user.id,cb.from_user.username,cb.from_user.full_name)}\n🎮 Ник в РБ: <b>не указан</b>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Перейти в ЛС",url=f"tg://user?id={cb.from_user.id}")]]))
-    await cb.answer("✅ Вы выбрали эту расу. Автор заявки уведомлён.")
-
-
 @dp.callback_query(F.data.startswith("app_close_"))
-async def app_close_cb(cb:CallbackQuery):
-    try: aid=int((cb.data or "").rsplit("_",1)[1])
-    except ValueError:return
-    row=await require_db().fetchrow("SELECT user_id,chat_message_id,kind,status FROM applications WHERE id=$1",aid)
-    if not row:return
-    if int(row["user_id"])!=cb.from_user.id and not await check_permission(cb.from_user.id,6): await cb.answer("⛔ Закрыть заявку может только её автор или главный администратор.",show_alert=True); return
-    await require_db().execute("UPDATE applications SET status='closed' WHERE id=$1 AND status='active'",aid)
-    hublox=await get_config("hublox_id")
+async def app_close_cb(cb: CallbackQuery):
+    try: aid = int((cb.data or "").rsplit("_", 1)[1])
+    except ValueError: return
+    row = await require_db().fetchrow("SELECT user_id,chat_message_id,kind,status FROM applications WHERE id=$1", aid)
+    if not row: await cb.answer("Заявка не найдена.", show_alert=True); return
+    if int(row["user_id"]) != cb.from_user.id and not await check_permission(cb.from_user.id, 6):
+        await cb.answer("⛔ Закрыть заявку может только её автор или главный администратор.", show_alert=True); return
+    updated = await require_db().fetchrow("UPDATE applications SET status='closed' WHERE id=$1 AND status IN ('active','claimed') RETURNING id", aid)
+    if not updated:
+        await cb.answer("Заявка уже закрыта.", show_alert=True); return
+    hublox = await get_config("hublox_id")
     if hublox and row["chat_message_id"]:
         try:
-            await require_bot().edit_message_reply_markup(int(hublox),int(row["chat_message_id"]),reply_markup=None)
-            await require_bot().send_message(int(hublox),f"🔴 <b>Заявка #{aid} завершена.</b>",message_thread_id=TOPICS[{"sea":"sea_events","trade":"trades","trial":"trials","raid":"raids"}[row["kind"]]])
-        except Exception: pass
+            await require_bot().delete_message(int(hublox), int(row["chat_message_id"]))
+        except Exception:
+            LOGGER.exception("Не удалось удалить сообщение заявки #%s", aid)
     await cb.answer("Заявка завершена.")
 
 
+@dp.callback_query(F.data.regexp(r"^app_help_\d+$"))
+async def application_help_cb(cb: CallbackQuery):
+    try: aid = int((cb.data or "").removeprefix("app_help_"))
+    except ValueError: return
+    row = await require_db().fetchrow("SELECT id,user_id,kind,status FROM applications WHERE id=$1", aid)
+    if not row or row["status"] != "active":
+        await cb.answer("Эта заявка уже занята или завершена.", show_alert=True); return
+    if int(row["user_id"]) == cb.from_user.id:
+        await cb.answer("Нельзя помочь по собственной заявке.", show_alert=True); return
+    await cb.message.answer(f"🤝 <b>Помочь по заявке #{aid}?</b>\n\nПодтвердите, что вы готовы помочь.", reply_markup=application_confirm_keyboard(aid))
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("app_help_cancel_"))
+async def application_help_cancel_cb(cb: CallbackQuery):
+    try: aid = int((cb.data or "").removeprefix("app_help_cancel_"))
+    except ValueError: return
+    try: await cb.message.delete()
+    except Exception: pass
+    await cb.answer("Отменено.")
+
+
+@dp.callback_query(F.data.startswith("app_help_confirm_"))
+async def application_help_confirm_cb(cb: CallbackQuery):
+    try: aid = int((cb.data or "").removeprefix("app_help_confirm_"))
+    except ValueError: return
+    row = await require_db().fetchrow("SELECT id,user_id,kind,status,payload FROM applications WHERE id=$1", aid)
+    if not row or row["status"] != "active":
+        try: await cb.message.delete()
+        except Exception: pass
+        await cb.answer("Эта заявка уже занята или завершена.", show_alert=True); return
+    if int(row["user_id"]) == cb.from_user.id:
+        await cb.answer("Нельзя помочь по собственной заявке.", show_alert=True); return
+    claimed = await require_db().fetchrow("UPDATE applications SET status='claimed',claimed_by=$2,claimed_at=$3 WHERE id=$1 AND status='active' RETURNING id,user_id,kind,payload", aid, cb.from_user.id, now_ts())
+    if not claimed:
+        try: await cb.message.delete()
+        except Exception: pass
+        await cb.answer("Эта заявка уже занята.", show_alert=True); return
+    try: await cb.message.delete()
+    except Exception: pass
+    await refresh_application_message(aid, helper_user=cb.from_user)
+    author = int(claimed["user_id"])
+    helper_rb_row = await require_db().fetchrow("SELECT roblox_username FROM users WHERE user_id=$1", cb.from_user.id)
+    helper_rb = helper_rb_row["roblox_username"] if helper_rb_row else None
+    payload = payload_dict(claimed["payload"])
+    kind = str(claimed["kind"])
+    kind_label = {"sea":"морскому ивенту", "raid":"рейду", "trial":"триалу"}.get(kind, "заявке")
+    text = (f"🤝 <b>Пользователь подтвердил помощь по вашему {kind_label} #{aid}.</b>\n{SEPARATOR}\n"
+            f"👤 Ник в TG: {user_mention(cb.from_user.id,cb.from_user.username,cb.from_user.full_name)}\n"
+            f"🎮 Ник в РБ: <i>{esc(helper_rb or 'не указан')}</i>\n")
+    if kind == "trial":
+        text += f"🧬 Раса: <b>{esc(payload.get('race_name','—'))}</b>\n"
+    text += "\nСвязаться можно по кнопке ниже."
+    try:
+        await require_bot().send_message(author, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Перейти в ЛС", url=f"tg://user?id={cb.from_user.id}")]]))
+    except Exception:
+        LOGGER.exception("Не удалось уведомить автора заявки #%s", aid)
+    await cb.answer("✅ Помощь подтверждена.")
+
+
 @dp.callback_query(F.data == "menu_applications")
-async def menu_applications_cb(cb:CallbackQuery):
-    if not private_only(cb):return
-    rows=await require_db().fetch("SELECT id,kind,payload,created_at,status FROM applications WHERE user_id=$1 AND status IN ('active','claimed') ORDER BY created_at DESC LIMIT 20",cb.from_user.id)
+async def menu_applications_cb(cb: CallbackQuery):
+    if not private_only(cb): return
+    rows = await require_db().fetch("SELECT id,kind,payload,created_at,status FROM applications WHERE user_id=$1 AND status IN ('active','claimed') ORDER BY created_at DESC LIMIT 30", cb.from_user.id)
     if not rows:
-        await cb.message.edit_text("📋 <b>Мои заявки</b>\n\nУ вас нет активных заявок.",reply_markup=main_menu_keyboard()); await cb.answer(); return
-    lines=["📋 <b>Мои заявки</b>",SEPARATOR]
-    kname={"sea":"🌊 Морской ивент","trade":"💰 Трейд","trial":"🧬 Триал","raid":"⚔️ Рейд"}
-    buttons=[]
+        await cb.message.edit_text("📋 <b>Мои заявки</b>\n\nУ вас нет активных заявок.", reply_markup=main_menu_keyboard()); await cb.answer(); return
+    lines = ["📋 <b>Мои заявки</b>", SEPARATOR]
+    kname = {"sea":"🌊 Морской ивент", "trade":"💰 Трейд", "trial":"🧬 Триал", "raid":"⚔️ Рейд"}
+    buttons = []
     for r in rows:
-        lines.append(f"• <b>#{r['id']}</b> — {kname.get(r['kind'],r['kind'])} — {'🟢 активна' if r['status']=='active' else '🟡 занята'}")
-        buttons.append([InlineKeyboardButton(text=f"🗑 Завершить #{r['id']}",callback_data=f"app_close_{r['id']}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад",callback_data="menu_back")])
-    await cb.message.edit_text("\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await cb.answer()
+        label = kname.get(r["kind"], str(r["kind"]))
+        lines.append(f"• <b>#{r['id']}</b> — {label}")
+        buttons.append([InlineKeyboardButton(text=f"🗑 Завершить #{r['id']}", callback_data=f"app_close_{r['id']}")])
+    buttons.append([_btn("⬅️ Назад", "menu_back", icon_key="back")])
+    await cb.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await cb.answer()
 
 
-async def profile_text(user_id:int):
-    row=await require_db().fetchrow("SELECT messages_count,joined_at,profile_tag,profile_comment,roblox_username,verified FROM users WHERE user_id=$1",user_id)
-    known=await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1",user_id)
-    username=known["username"] if known else None
-    full_name=known["full_name"] if known else None
-    warns=await get_user_warns(user_id); banned=await is_banned(user_id)
-    joined="—" if not row or not row["joined_at"] else datetime.fromtimestamp(int(row["joined_at"]),MSK).strftime("%d.%m.%Y %H:%M:%S")+" МСК"
-    tag=esc(row["profile_tag"] or "не указан") if row else "не указан"
-    comment=esc(row["profile_comment"] or "не указан") if row else "не указан"
-    rb=esc(row["roblox_username"] or "не указан") if row else "не указан"
-    return (f"👤 <b>ПРОФИЛЬ</b>\n{SEPARATOR}\n👤 Telegram: {user_mention(user_id,username,full_name)}\n🎮 Roblox: <b>{rb}</b>\n🏷 Тег: <b>{tag}</b>\n💬 Комментарий: {comment}\n💬 Сообщений: <b>{int(row['messages_count']) if row else 0}</b>\n⚠️ Варны: <b>{warns}/4</b>\n🔨 Статус: <b>{'Вечный мут' if banned else 'Активен'}</b>\n📅 В сообществе: <b>{joined}</b>\n{SEPARATOR}")
+async def profile_text(user_id: int):
+    row = await require_db().fetchrow("SELECT messages_count,joined_at,profile_tag,profile_comment,roblox_username,verified FROM users WHERE user_id=$1", user_id)
+    known = await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1", user_id)
+    username = known["username"] if known else None; full_name = known["full_name"] if known else None
+    warns = await get_user_warns(user_id); banned = await is_banned(user_id)
+    joined = "—" if not row or not row["joined_at"] else datetime.fromtimestamp(int(row["joined_at"]), MSK).strftime("%d.%m.%Y %H:%M:%S") + " МСК"
+    tag = esc(row["profile_tag"] or "не указан") if row else "не указан"
+    comment = esc(row["profile_comment"] or "не указан") if row else "не указан"
+    rb = esc(row["roblox_username"] or "не указан") if row else "не указан"
+    achievements = await require_db().fetch("SELECT name FROM achievements WHERE user_id=$1 ORDER BY created_at DESC", user_id)
+    achievement_emoji = await custom_emoji_html("achievements", "🏆")
+    achievements_text = "\n".join(f"{achievement_emoji} <b>{esc(a['name'])}</b>" for a in achievements) if achievements else "—"
+    return (f"👤 <b>ПРОФИЛЬ</b>\n{SEPARATOR}\n👤 Telegram: {user_mention(user_id,username,full_name)}\n"
+            f"🎮 Roblox: <b>{rb}</b>\n🏷 Тег: <b>{tag}</b>\n💬 Комментарий: {comment}\n"
+            f"💬 Сообщений: <b>{int(row['messages_count']) if row else 0}</b>\n⚠️ Варны: <b>{warns}/4</b>\n"
+            f"🔨 Статус: <b>{'Вечный мут' if banned else 'Активен'}</b>\n📅 В сообществе: <b>{joined}</b>\n"
+            f"{SEPARATOR}\n🏆 <b>Достижения</b>\n{achievements_text}\n{SEPARATOR}")
 
 
-def profile_keyboard(owner_id:int, viewer_id:int):
-    rows=[]
-    if owner_id==viewer_id:
-        rows.append([InlineKeyboardButton(text="✏️ Редактировать профиль",callback_data="profile_edit")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад",callback_data="menu_back")])
+def profile_keyboard(owner_id: int, viewer_id: int):
+    rows = []
+    if owner_id == viewer_id:
+        rows.append([InlineKeyboardButton(text="✏️ Редактировать профиль", callback_data="profile_edit")])
+    rows.append([_btn("⬅️ Назад", "menu_back", icon_key="back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @dp.callback_query(F.data == "menu_profile")
-async def menu_profile_cb(cb:CallbackQuery):
-    if not private_only(cb):return
-    await cb.message.edit_text(await profile_text(cb.from_user.id),reply_markup=profile_keyboard(cb.from_user.id,cb.from_user.id)); await cb.answer()
+async def menu_profile_cb(cb: CallbackQuery):
+    if not private_only(cb): return
+    await cb.message.edit_text(await profile_text(cb.from_user.id), reply_markup=profile_keyboard(cb.from_user.id, cb.from_user.id)); await cb.answer()
 
 
 @dp.callback_query(F.data == "profile_edit")
-async def profile_edit_cb(cb:CallbackQuery,state:FSMContext):
-    if not private_only(cb):return
+async def profile_edit_cb(cb: CallbackQuery, state: FSMContext):
+    if not private_only(cb): return
     await state.set_state(ProfileState.waiting_tag)
-    await cb.message.edit_text("✏️ <b>Редактирование профиля</b>\n\nВыберите/напишите тег: <code>трейжусь</code>, <code>помогаю</code>, <code>ищу помощь</code>, <code>новичок</code> или свой вариант.")
-    await cb.answer()
+    await cb.message.edit_text("✏️ <b>Редактирование профиля</b>\n\nВыберите/напишите тег: <code>трейжусь</code>, <code>помогаю</code>, <code>ищу помощь</code>, <code>новичок</code> или свой вариант."); await cb.answer()
 
 
-@dp.message(ProfileState.waiting_tag,F.text)
-async def profile_tag_msg(msg:Message,state:FSMContext):
-    tag=(msg.text or "").strip()
-    if len(tag)>60: await msg.answer("⚠️ Тег слишком длинный. Максимум 60 символов.");return
-    await require_db().execute("INSERT INTO users(user_id,profile_tag) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET profile_tag=$2",msg.from_user.id,tag)
-    await state.set_state(ProfileState.waiting_comment); await msg.answer("💬 Теперь напишите комментарий к профилю. <b>Ссылки запрещены.</b> Если не нужен — отправьте <code>-</code>.")
+@dp.message(ProfileState.waiting_tag, F.text)
+async def profile_tag_msg(msg: Message, state: FSMContext):
+    tag = (msg.text or "").strip()
+    if len(tag) > 60: await msg.answer("⚠️ Тег слишком длинный. Максимум 60 символов."); return
+    await require_db().execute("INSERT INTO users(user_id,profile_tag) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET profile_tag=$2", msg.from_user.id, tag)
+    await state.set_state(ProfileState.waiting_comment); await msg.answer("💬 Теперь напишите комментарий к профилю. Ссылки запрещены. Если не нужен — отправьте <code>-</code>.")
 
 
-@dp.message(ProfileState.waiting_comment,F.text)
-async def profile_comment_msg(msg:Message,state:FSMContext):
-    text=(msg.text or "").strip()
-    if text=="-": text=""
-    if extract_link_values(msg):
-        await msg.answer("⛔ Ссылки в профиле запрещены."); return
-    if len(text)>500: await msg.answer("⚠️ Комментарий максимум 500 символов.");return
-    await require_db().execute("INSERT INTO users(user_id,profile_comment) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET profile_comment=$2",msg.from_user.id,text)
+@dp.message(ProfileState.waiting_comment, F.text)
+async def profile_comment_msg(msg: Message, state: FSMContext):
+    text = (msg.text or "").strip(); text = "" if text == "-" else text
+    if extract_link_values(msg): await msg.answer("⛔ Ссылки в профиле запрещены."); return
+    if len(text) > 500: await msg.answer("⚠️ Комментарий максимум 500 символов."); return
+    await require_db().execute("INSERT INTO users(user_id,profile_comment) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET profile_comment=$2", msg.from_user.id, text)
     await state.set_state(ProfileState.waiting_roblox); await msg.answer("🎮 Укажите ник в Roblox или отправьте <code>-</code>.")
 
 
-@dp.message(ProfileState.waiting_roblox,F.text)
-async def profile_roblox_msg(msg:Message,state:FSMContext):
-    text=(msg.text or "").strip(); text="" if text=="-" else text
-    if len(text)>50: await msg.answer("⚠️ Ник Roblox максимум 50 символов.");return
-    await require_db().execute("INSERT INTO users(user_id,roblox_username) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET roblox_username=$2",msg.from_user.id,text)
-    await state.clear(); await msg.answer("✅ Профиль обновлён.\n\n"+await profile_text(msg.from_user.id),reply_markup=profile_keyboard(msg.from_user.id,msg.from_user.id))
+@dp.message(ProfileState.waiting_roblox, F.text)
+async def profile_roblox_msg(msg: Message, state: FSMContext):
+    text = (msg.text or "").strip(); text = "" if text == "-" else text
+    if len(text) > 50: await msg.answer("⚠️ Ник Roblox максимум 50 символов."); return
+    await require_db().execute("INSERT INTO users(user_id,roblox_username,roblox_prompt_pending) VALUES($1,$2,FALSE) ON CONFLICT(user_id) DO UPDATE SET roblox_username=$2,roblox_prompt_pending=FALSE", msg.from_user.id, text)
+    await state.clear(); await msg.answer("✅ Профиль обновлён.\n\n" + await profile_text(msg.from_user.id), reply_markup=profile_keyboard(msg.from_user.id,msg.from_user.id))
 
 
 @dp.message(Command("profile"))
-async def profile_cmd(msg:Message):
-    target=msg.reply_to_message.from_user if msg.reply_to_message and msg.reply_to_message.from_user else msg.from_user
-    if not target:return
-    if target.is_bot: await msg.answer("🤖 У ботов нет профиля участника.");return
+async def profile_cmd(msg: Message):
+    target = msg.reply_to_message.from_user if msg.reply_to_message and msg.reply_to_message.from_user else msg.from_user
+    if not target: return
+    if target.is_bot: await msg.answer("🤖 У ботов нет профиля участника."); return
     await remember_user(target)
-    await msg.answer(await profile_text(target.id),reply_markup=profile_keyboard(target.id,msg.from_user.id))
+    await msg.answer(await profile_text(target.id), reply_markup=profile_keyboard(target.id, msg.from_user.id))
 
 
 @dp.callback_query(F.data == "menu_navigation")
@@ -3076,106 +3558,51 @@ async def menu_navigation_cb(cb:CallbackQuery):
     await cb.message.edit_text("🧭 <b>НАВИГАЦИЯ DUOSUP</b>\n"+SEPARATOR+"\n🌊 Морские ивенты\n⚔️ Рейды\n💰 Трейды\n🧬 Триалы\n👤 Профиль\n💬 Вопрос | ответ\n🚨 Репорты — через ответ на сообщение и команду /report\n\n📜 <b>Правила</b>\nНезнание правил не освобождает от ответственности.\n\n"+esc(rules)[:2500],reply_markup=main_menu_keyboard()); await cb.answer()
 
 
-@dp.callback_query(F.data == "app_help_sea")
-async def sea_help_cb(cb:CallbackQuery):
-    await cb.answer("Функция помощи для морских ивентов будет привязана к конкретной заявке в следующем шаге.",show_alert=True)
-
-
-@dp.callback_query(F.data == "app_status_dummy")
-async def app_status_dummy_cb(cb:CallbackQuery):
-    await cb.answer("🟢 Заявка активна.")
-
-
-@dp.message(Command("mystats"))
-async def mystats_cmd(msg: Message):
-    if not msg.from_user:
-        return
-    hublox = await get_config("hublox_id")
-    if not hublox or msg.chat.id != int(hublox) or msg.message_thread_id not in {TOPICS["chat"], TOPICS["trades"], TOPICS["raids"]}:
-        await msg.answer("⛔ /mystats доступна только в темах «Чат», «Трейды» и «Рейды».")
-        return
-    pool = require_db()
-    row = await pool.fetchrow("SELECT messages_count, joined_at FROM users WHERE user_id=$1", msg.from_user.id)
-    warns = await get_user_warns(msg.from_user.id)
-    banned = await is_banned(msg.from_user.id)
-    joined = "неизвестно" if not row or not row["joined_at"] else datetime.fromtimestamp(int(row["joined_at"]), MSK).strftime("%d.%m.%Y %H:%M:%S") + " МСК"
-    await msg.answer(
-        "📊 <b>Ваша статистика</b>\n" + SEPARATOR + "\n"
-        f"👤 Пользователь: {user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)}\n"
-        f"💬 Сообщений: <b>{int(row['messages_count']) if row else 0}</b>\n"
-        f"⚠️ Варны: <b>{warns}/4</b>\n"
-        f"🔨 Статус: <b>{'Вечный мут' if banned else 'Активен'}</b>\n"
-        f"📅 Присоединился: <b>{joined}</b>\n" + SEPARATOR
-    )
-
-
-@dp.message(Command("youstats"))
-async def youstats_cmd(msg: Message):
-    """Показывает статистику пользователя, на сообщение которого ответили."""
-    if not msg.from_user:
-        return
-    if not msg.reply_to_message or not msg.reply_to_message.from_user:
-        await msg.answer("↩️ Используйте команду ответом на сообщение пользователя.")
-        return
-
-    target = msg.reply_to_message.from_user
-    if target.is_bot:
-        await msg.answer("🤖 У ботов нет пользовательской статистики.")
-        return
-
-    await remember_user(target, count_message=False)
-    pool = require_db()
-    row = await pool.fetchrow(
-        "SELECT messages_count, joined_at FROM users WHERE user_id=$1",
-        target.id,
-    )
-    warns = await get_user_warns(target.id)
-    banned = await is_banned(target.id)
-    joined = (
-        "неизвестно"
-        if not row or not row["joined_at"]
-        else datetime.fromtimestamp(int(row["joined_at"]), MSK).strftime("%d.%m.%Y %H:%M:%S") + " МСК"
-    )
-
-    await msg.answer(
-        "📊 <b>Статистика пользователя</b>\n" + SEPARATOR + "\n"
-        f"👤 Пользователь: {user_mention(target.id, target.username, target.full_name)}\n"
-        f"💬 Сообщений: <b>{int(row['messages_count']) if row else 0}</b>\n"
-        f"⚠️ Варны: <b>{warns}/4</b>\n"
-        f"🔨 Статус: <b>{'Вечный мут' if banned else 'Активен'}</b>\n"
-        f"📅 Присоединился: <b>{joined}</b>\n" + SEPARATOR
-    )
-
-
-@dp.message(Command("stats"))
-async def stats_cmd(msg: Message):
-    if not msg.from_user or not await require_group_chat(msg):
-        return
-    if not await check_permission(msg.from_user.id, 1):
-        await msg.answer("⛔ Команда доступна только администрации (ранг 1+).")
-        return
-    pool = require_db()
-    (
-        warns,
-        bans,
-        unbans,
-        unwarns,
-        pending_reports,
-        pending_appeals,
-    ) = await asyncio.gather(
-        pool.fetchval("SELECT COUNT(*) FROM warn_logs WHERE is_active=TRUE"),
-        pool.fetchval("SELECT COUNT(*) FROM ban_logs"),
-        pool.fetchval("SELECT COUNT(*) FROM unban_logs"),
-        pool.fetchval("SELECT COUNT(*) FROM unwarn_logs"),
-        pool.fetchval("SELECT COUNT(*) FROM reports WHERE status='pending'"),
-        pool.fetchval("SELECT COUNT(*) FROM appeals WHERE status='pending'"),
-    )
-    await msg.answer(
-        "📊 <b>Статистика</b>\n"
-        f"Активных варнов: {warns}\nВсего банов: {bans}\n"
-        f"Всего разбанов: {unbans}\nВсего снятий варнов: {unwarns}\n"
-        f"Ожидают репорты: {pending_reports}\nОжидают апелляции: {pending_appeals}"
-    )
+@dp.callback_query(F.data.startswith("adminreq_"))
+async def admin_request_cb(cb: CallbackQuery):
+    m = re.fullmatch(r"adminreq_(approve|reject)_(\d+)", cb.data or "")
+    if not m: return
+    if cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель может решать административные запросы.", show_alert=True); return
+    action, raw_id = m.groups(); req_id = int(raw_id)
+    row = await require_db().fetchrow("SELECT * FROM admin_punishment_requests WHERE id=$1 AND status='pending'", req_id)
+    if not row:
+        await cb.answer("Запрос уже обработан.", show_alert=True); return
+    if action == "reject":
+        await require_db().execute("UPDATE admin_punishment_requests SET status='rejected',decided_by=$2 WHERE id=$1", req_id, cb.from_user.id)
+        try: await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception: pass
+        try: await require_bot().send_message(int(row["requester_id"]), "❌ Создатель отклонил запрос на административное наказание.")
+        except Exception: pass
+        await cb.answer("Запрос отклонён."); return
+    await require_db().execute("UPDATE admin_punishment_requests SET status='approved',decided_by=$2 WHERE id=$1", req_id, cb.from_user.id)
+    target_id = int(row["target_id"]); reason = str(row["reason"]); chat_id = int(row["chat_id"])
+    try:
+        if str(row["action"]) == "варн":
+            issued = await issue_warning(chat_id, target_id, reason, CREATOR_ID, row["source_message_id"])
+            if not issued[0]: raise RuntimeError("не удалось выдать варн")
+            _, count, number, action_error, ban_number = issued
+            known = await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1", target_id)
+            mention = user_mention(target_id, known["username"] if known else None, known["full_name"] if known else None)
+            await require_bot().send_message(chat_id, build_warn_msg(mention, count, reason, number), reply_to_message_id=row["source_message_id"] if row["source_message_id"] else None)
+            if ban_number:
+                await require_bot().send_message(chat_id, build_ban_msg(mention, "Достигнут лимит варнов (4/4)", ban_number))
+        else:
+            ok, ban_number = await apply_ban(chat_id, target_id, reason, CREATOR_ID, row["source_message_id"])
+            if not ok: raise RuntimeError("пользователь уже забанен")
+            known = await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1", target_id)
+            mention = user_mention(target_id, known["username"] if known else None, known["full_name"] if known else None)
+            await require_bot().send_message(chat_id, build_ban_msg(mention, reason, ban_number), reply_to_message_id=row["source_message_id"] if row["source_message_id"] else None)
+        await apply_admin_life_loss(target_id)
+        try: await require_bot().send_message(int(row["requester_id"]), "✅ Создатель принял запрос и наказание применено к нарушителю.")
+        except Exception: pass
+        await cb.answer("Наказание применено.")
+        try: await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception: pass
+    except Exception as exc:
+        await require_db().execute("UPDATE admin_punishment_requests SET status='pending',decided_by=NULL WHERE id=$1", req_id)
+        LOGGER.exception("Не удалось выполнить административный запрос")
+        await cb.answer(f"Ошибка: {exc}", show_alert=True)
 
 
 # ========================== АПЕЛЛЯЦИИ ==========================
@@ -3699,6 +4126,7 @@ async def appeal_cb(cb: CallbackQuery):
             f"{user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}"
             f"{extra}"
         )
+    await add_simulator_data(cb.from_user.id, 10)
     await cb.answer("Готово.")
 
 
@@ -3790,6 +4218,30 @@ async def handle_forbidden_links(msg: Message):
 
 
 @dp.message(F.text, ~F.text.startswith("/"))
+async def roblox_onboarding_msg(msg: Message):
+    if msg.chat.type != "private" or not msg.from_user:
+        return
+    row = await require_db().fetchrow("SELECT verified,roblox_prompt_pending,roblox_username FROM users WHERE user_id=$1", msg.from_user.id)
+    if not row or not bool(row["verified"]):
+        return
+    if not bool(row["roblox_prompt_pending"]):
+        return
+    value = (msg.text or "").strip()
+    if value == "-":
+        await require_db().execute("UPDATE users SET roblox_prompt_pending=FALSE WHERE user_id=$1", msg.from_user.id)
+        await msg.answer("🎮 Ник Roblox пока не указан. Его можно добавить позже в профиле.")
+        return
+    if len(value) > 50:
+        await msg.answer("⚠️ Ник Roblox максимум 50 символов.")
+        return
+    if extract_link_values(msg):
+        await msg.answer("⛔ Ссылки в нике Roblox запрещены.")
+        return
+    await require_db().execute("UPDATE users SET roblox_username=$2, roblox_prompt_pending=FALSE WHERE user_id=$1", msg.from_user.id, value)
+    await msg.answer("✅ Ник Roblox сохранён. Теперь он будет автоматически подставляться в профиль и заявки.")
+
+
+@dp.message(F.text, ~F.text.startswith("/"))
 async def bot_word_handler(msg: Message):
     if not msg.from_user or msg.chat.type not in ("group", "supergroup"):
         return
@@ -3798,6 +4250,27 @@ async def bot_word_handler(msg: Message):
         return
     if re.search(r"(?i)(?<!\w)бот(?!\w)", msg.text or ""):
         await msg.reply("🤖 Я здесь! Если нужна помощь — откройте ЛС DuoSup и выберите нужный раздел.")
+
+
+@dp.my_chat_member()
+async def bot_added_to_chat(event):
+    new_status = str(getattr(event.new_chat_member, "status", ""))
+    if new_status not in {"member", "administrator"}:
+        return
+    chat = event.chat
+    if chat.type not in ("group", "supergroup"):
+        return
+    try:
+        hublox = await get_config("hublox_id")
+        hubsup = await get_config("hubsup_id")
+        if not hublox:
+            await require_bot().send_message(CREATOR_ID, f"🤖 DuoSup добавлен в чат «{esc(chat.title or chat.id)}». Если это HuBBlox, выполните /link_hublox в этом чате.")
+        elif not hubsup:
+            await require_bot().send_message(CREATOR_ID, "🛡 Админ-чат ещё не подключён. Добавьте DuoSup в отдельную административную группу и выполните там /link_hubsup <код>, который выдаст /link_hublox.")
+        else:
+            await require_bot().send_message(CREATOR_ID, f"🤖 DuoSup добавлен в «{esc(chat.title or chat.id)}».\nПолученные права Telegram: <code>{esc(new_status)}</code>.")
+    except Exception:
+        LOGGER.exception("Не удалось обработать добавление бота в чат")
 
 
 @dp.message(F.new_chat_members)
@@ -3813,7 +4286,7 @@ async def welcome(msg: Message):
         # Это НЕ CAPTCHA: новый участник ничего не теряет и не получает ограничений.
         # Кнопка только подтверждает профиль и после нажатия исчезает.
         await require_db().execute(
-            "INSERT INTO users (user_id, verified, joined_at) VALUES ($1, FALSE, $2) "
+            "INSERT INTO users (user_id, verified, joined_at, roblox_prompt_pending) VALUES ($1, FALSE, $2, FALSE) "
             "ON CONFLICT (user_id) DO UPDATE SET verified=FALSE, joined_at=COALESCE(users.joined_at, EXCLUDED.joined_at)",
             member.id, joined,
         )
@@ -3851,8 +4324,8 @@ async def verify_user_cb(cb: CallbackQuery):
         await cb.answer("⛔ Эта кнопка предназначена для другого участника.", show_alert=True)
         return
     await require_db().execute(
-        "INSERT INTO users (user_id, verified) VALUES ($1, TRUE) "
-        "ON CONFLICT (user_id) DO UPDATE SET verified=TRUE",
+        "INSERT INTO users (user_id, verified, roblox_prompt_pending) VALUES ($1, TRUE, TRUE) "
+        "ON CONFLICT (user_id) DO UPDATE SET verified=TRUE, roblox_prompt_pending=CASE WHEN COALESCE(users.roblox_username,'')='' THEN TRUE ELSE users.roblox_prompt_pending END",
         target_id,
     )
     try:
@@ -3873,29 +4346,59 @@ async def verify_user_cb(cb: CallbackQuery):
 
 
 async def announce_bot_version() -> None:
-    """Один раз сообщает в теме «Оповещения» о новой версии бота."""
     hublox = await get_config("hublox_id")
     if not hublox:
         return
-
     announced_version = await get_config("bot_version_announced")
     if announced_version == BOT_VERSION:
         return
-
+    u = await custom_emoji_html("update", "🤖")
+    ok = await custom_emoji_html("success", "✨")
+    settings = await custom_emoji_html("stats", "⚙️")
+    raid = await custom_emoji_html("raid", "⚔️")
+    sea = await custom_emoji_html("sea_events", "🌊")
+    trade = await custom_emoji_html("trade", "💰")
+    trial = await custom_emoji_html("trial", "🧬")
+    profile = await custom_emoji_html("profile", "👤")
+    apps = await custom_emoji_html("applications", "📋")
+    premium = await custom_emoji_html("premium", "💎")
+    ach = await custom_emoji_html("question", "🏆")
+    date_text = datetime.now(MSK).strftime("%d.%m.%Y")
     text = (
-        f"🤖 <b>Бот обновлен до v{BOT_VERSION}</b>\n\n"
-        "✨ Обновление успешно установлено и бот готов к работе.\n"
-        "📅 Версия: 26.09.09"
+        f"{u} <b>Бот обновлен до v{BOT_VERSION}</b>\n\n"
+        f"{ok} Обновление успешно установлено и бот готов к работе.\n"
+        f"📅 Дата обновления: <b>{date_text}</b>\n\n"
+        f"{settings} <b>Изменения:</b>\n"
+        f"{raid} Рейды: минимум 1 и максимум 5 способностей; добавлен рейд Теста (Dough V2).\n"
+        f"{sea} Морские ивенты: заявки привязаны к конкретному ID и появилась подтверждаемая помощь.\n"
+        f"{trial} Триалы: исправлена кнопка помощи, раса блокируется и после выбора кнопка исчезает.\n"
+        f"{trade} Трейды: новый поиск по названию фрукта и кнопка «Перейти к сообщению».\n"
+        f"{apps} Мои заявки: рейды, трейды, триалы и морские ивенты в одном разделе; удаление заявки удаляет её сообщение.\n"
+        f"{profile} Профиль: статистика перенесена в профиль, добавлены Roblox и достижения.\n"
+        f"{ach} Достижения: выдача через «Наградить <название>» ответом на сообщение.\n"
+        f"{premium} Premium Emoji: добавлена настройка фруктов, сообщений и отдельных эмодзи для всех рас триалов.\n"
+        f"📜 После верификации участнику показываются правила и запрашивается Roblox-ник.\n"
+        f"🛡 Апелляции могут одобрять только создатель и главный администратор.\n"
+        f"👑 Для администрации добавлены 3 жизни, Simulator Data и ежемесячная проверка нормы 50.\n\n"
+        f"{premium} Версия: <b>26.09.09</b>"
     )
     try:
-        await require_bot().send_message(
-            int(hublox),
-            text,
-            message_thread_id=TOPICS["announcements"],
-        )
+        await require_bot().send_message(int(hublox), text, message_thread_id=TOPICS["announcements"])
         await set_config("bot_version_announced", BOT_VERSION)
     except Exception:
         LOGGER.exception("Не удалось отправить сообщение об обновлении бота")
+
+
+async def validate_custom_emoji_ids() -> None:
+    """Premium Emoji не имеют хардкод-списка: все значения задаются через /addemoji."""
+    return
+
+
+async def seed_custom_emoji_defaults() -> None:
+    """Не записывает никакие старые/чужие ID. Сохраняет только версию схемы."""
+    version = await get_config("premium_emoji_seed_version")
+    if version != BOT_VERSION:
+        await set_config("premium_emoji_seed_version", BOT_VERSION)
 
 
 async def set_bot_commands() -> None:
@@ -3908,10 +4411,8 @@ async def set_bot_commands() -> None:
         BotCommand(command="unban", description="Снять бан и ограничения"),
         BotCommand(command="report", description="Пожаловаться на сообщение"),
         BotCommand(command="appeal", description="Подать апелляцию на нарушение"),
-        BotCommand(command="mystats", description="Показать свою статистику"),
         BotCommand(command="profile", description="Открыть свой профиль или профиль по ответу"),
         BotCommand(command="addemoji", description="Настроить Premium Emoji"),
-        BotCommand(command="stats", description="Показать общую статистику"),
         BotCommand(command="cancel", description="Отменить текущее действие"),
         BotCommand(command="upmod", description="Повысить ранг администратора"),
         BotCommand(command="downmod", description="Понизить ранг администратора"),
@@ -3944,6 +4445,7 @@ def validate_environment() -> None:
 
 async def main() -> None:
     global bot, BOT_USERNAME
+    monthly_task = None
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -3955,6 +4457,8 @@ async def main() -> None:
     )
     try:
         await init_db()
+        await seed_custom_emoji_defaults()
+        await validate_custom_emoji_ids()
         me = await bot.get_me()
         BOT_USERNAME = me.username or BOT_USERNAME
         try:
@@ -3966,9 +4470,14 @@ async def main() -> None:
         except Exception:
             LOGGER.exception("Стартовое уведомление о версии не удалось")
         try:
+            await monthly_admin_maintenance()
+        except Exception:
+            LOGGER.exception("Стартовая проверка Simulator Data не удалась")
+        try:
             await update_admin_list()
         except Exception:
             LOGGER.exception("Стартовое обновление списка администраторов не удалось")
+        monthly_task = asyncio.create_task(monthly_admin_loop())
         await bot.delete_webhook(drop_pending_updates=False)
         LOGGER.info("Duosup @%s запущен", BOT_USERNAME)
         await dp.start_polling(
@@ -3978,6 +4487,12 @@ async def main() -> None:
             close_bot_session=False,
         )
     finally:
+        try:
+            if monthly_task is not None:
+                monthly_task.cancel()
+                await monthly_task
+        except (Exception, asyncio.CancelledError):
+            pass
         if db is not None:
             await db.close()
         if bot is not None:
