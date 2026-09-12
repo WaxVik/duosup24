@@ -46,7 +46,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.11.2"
+BOT_VERSION = "2.11.3"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -124,6 +124,29 @@ def user_mention(
 def command_payload(message: Message) -> str:
     text = message.text or ""
     return text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) == 2 else ""
+
+
+def extract_custom_emoji_id(msg: Message) -> str | None:
+    """Извлекает custom_emoji_id из одного Premium Emoji сообщения.
+
+    Premium Emoji в Telegram приходят не как обычный emoji-текст, а как
+    MessageEntity типа custom_emoji. Поэтому проверять только msg.text
+    недостаточно: у такого сообщения текст может выглядеть как обычный символ,
+    а сам ID находится в entity.custom_emoji_id.
+    """
+    entities = list(msg.entities or []) + list(msg.caption_entities or [])
+    ids: list[str] = []
+    for entity in entities:
+        entity_type = getattr(entity, "type", None)
+        if hasattr(entity_type, "value"):
+            entity_type = entity_type.value
+        if str(entity_type).lower() == "custom_emoji":
+            emoji_id = getattr(entity, "custom_emoji_id", None)
+            if emoji_id:
+                ids.append(str(emoji_id))
+    # Для настройки принимаем ровно один Premium Emoji.
+    unique = list(dict.fromkeys(ids))
+    return unique[0] if len(unique) == 1 else None
 
 
 def validate_reason(reason: str) -> str | None:
@@ -3014,10 +3037,6 @@ async def raid_comment_msg(msg: Message, state: FSMContext):
     )
     payload = {"fruit": fruit_key, "fruit_name": name, "skills": sorted(selected, key=lambda x: skill_order[x]), "balance": balance, "comment": comment, "chip": bool(data.get("raid_chip")), "roblox_name": rb_name}
     aid = await publish_application("raid", msg, text, None, payload)
-    if aid:
-        hublox_id = await get_config("hublox_id")
-        app_row = await require_db().fetchrow("SELECT chat_message_id FROM applications WHERE id=$1", aid)
-        await require_bot().edit_message_reply_markup(int(hublox_id), int(app_row["chat_message_id"]), reply_markup=application_help_keyboard(aid))
     await state.clear()
     await msg.answer("✅ Заявка на рейд опубликована в теме «Рейды».")
 
@@ -3129,20 +3148,36 @@ async def publish_application(kind: str, user, text: str, keyboard: InlineKeyboa
     )
     aid = int(row["id"])
     if kind in {"raid", "sea", "trial"}:
+        help_markup = application_help_keyboard(aid)
+        attached = False
         try:
             await require_bot().edit_message_reply_markup(
-                int(hublox), int(sent.message_id), reply_markup=application_help_keyboard(aid)
+                int(hublox), int(sent.message_id), reply_markup=help_markup
             )
+            attached = True
         except Exception:
-            LOGGER.exception("Не удалось добавить кнопку помощи к заявке #%s", aid)
-            # Второй способ: редактируем сообщение целиком, сохраняя текст и добавляя кнопку.
+            LOGGER.exception("Не удалось добавить кнопку помощи к заявке #%s через edit_message_reply_markup", aid)
+        if not attached:
             try:
                 await require_bot().edit_message_text(
-                    text, chat_id=int(hublox), message_id=int(sent.message_id),
-                    reply_markup=application_help_keyboard(aid)
+                    text,
+                    chat_id=int(hublox),
+                    message_id=int(sent.message_id),
+                    reply_markup=help_markup,
                 )
+                attached = True
             except Exception:
-                LOGGER.exception("Не удалось восстановить кнопку помощи у заявки #%s", aid)
+                LOGGER.exception("Не удалось добавить кнопку помощи к заявке #%s через edit_message_text", aid)
+        if not attached:
+            # Не оставляем заявку в БД как нормально опубликованную, если пользователь
+            # не сможет нажать «Помочь». Само сообщение удаляем, чтобы не было заявки
+            # без рабочего механизма помощи.
+            try:
+                await require_bot().delete_message(int(hublox), int(sent.message_id))
+            except Exception:
+                LOGGER.exception("Не удалось удалить заявку #%s после ошибки кнопки помощи", aid)
+            await require_db().execute("UPDATE applications SET status='closed' WHERE id=$1", aid)
+            return None
     return aid
 
 
@@ -3460,8 +3495,18 @@ async def application_help_cb(cb: CallbackQuery):
         await cb.answer("Эта заявка уже занята или завершена.", show_alert=True); return
     if int(row["user_id"]) == cb.from_user.id:
         await cb.answer("Нельзя помочь по собственной заявке.", show_alert=True); return
-    await cb.message.answer(f"🤝 <b>Помочь по заявке #{aid}?</b>\n\nПодтвердите, что вы готовы помочь.", reply_markup=application_confirm_keyboard(aid))
-    await cb.answer()
+    if not cb.message:
+        await cb.answer("Не удалось открыть подтверждение.", show_alert=True)
+        return
+    try:
+        await cb.message.answer(
+            f"🤝 <b>Помочь по заявке #{aid}?</b>\n\nПодтвердите, что вы готовы помочь.",
+            reply_markup=application_confirm_keyboard(aid),
+        )
+        await cb.answer("Подтвердите помощь кнопкой ниже.")
+    except Exception:
+        LOGGER.exception("Не удалось показать подтверждение помощи по заявке #%s", aid)
+        await cb.answer("Не удалось открыть подтверждение. Попробуйте ещё раз.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("app_help_cancel_"))
