@@ -210,6 +210,10 @@ USER_CUSTOM_EMOJI_IDS = [
     5440660757194744323,
 ]
 
+# Единственный источник истины для runtime: USER_CUSTOM_EMOJI_IDS.
+# Старое имя CUSTOM_EMOJI_IDS оставляем только для обратной совместимости.
+CUSTOM_EMOJI_IDS = USER_CUSTOM_EMOJI_IDS
+
 def user_custom_emoji_id(number: int) -> str | None:
     if 1 <= number <= len(USER_CUSTOM_EMOJI_IDS):
         return str(USER_CUSTOM_EMOJI_IDS[number - 1])
@@ -233,7 +237,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.13.0"
+BOT_VERSION = "2.13.1"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -469,6 +473,27 @@ async def _premium_edit_message_text(self, chat_id, message_id, text, *args, **k
 
 Bot.send_message = _premium_send_message
 Bot.edit_message_text = _premium_edit_message_text
+
+# То же самое для сообщений с медиа: Telegram хранит emoji в caption отдельно.
+def _premiumize_kwargs(kwargs):
+    for key in ("caption",):
+        if isinstance(kwargs.get(key), str):
+            kwargs[key] = premiumize_text(kwargs[key])
+    return kwargs
+
+def _wrap_media_method(name):
+    original = getattr(Bot, name, None)
+    if original is None:
+        return
+    async def wrapped(self, *args, **kwargs):
+        return await original(self, *args, **_premiumize_kwargs(kwargs))
+    setattr(Bot, name, wrapped)
+
+for _media_method in (
+    "send_photo", "send_video", "send_animation", "send_document",
+    "send_audio", "send_voice", "send_video_note",
+):
+    _wrap_media_method(_media_method)
 
 
 def custom_emoji_sequence(spec: str, fallback_map: dict[int, str] | None = None) -> str:
@@ -2524,17 +2549,17 @@ async def warn_cmd(msg: Message):
         return
     actor = msg.from_user
     if not actor or not await check_permission(actor.id, 3):
-        await msg.answer("⛔ Выдавать варны могут только администраторы (ранг 3+).")
+        await msg.answer(f"{custom_emoji_position(2, '⛔')} Выдавать варны могут только администраторы (ранг 3+).")
         return
     target_id, username, full_name, reason = await parse_target_and_reason(msg)
     if target_id is None:
         await msg.answer(
-            "⚠️ Не удалось найти пользователя по @username. Бот может использовать только "
+            f"{custom_emoji_position(7, '⚠️')} Не удалось найти пользователя по @username. Бот может использовать только "
             "username, который уже видел и сохранил, Telegram ID или пользователя из ответа."
         )
         return
     if target_id == actor.id:
-        await msg.answer("❌ Нельзя выдать варн самому себе.")
+        await msg.answer(f"{custom_emoji_position(12, '❌')} Нельзя выдать варн самому себе.")
         return
     error = validate_reason(reason)
     if error:
@@ -2576,7 +2601,7 @@ async def warn_cmd(msg: Message):
         )
         return
     if not issued:
-        await msg.answer("⚠️ Пользователь уже забанен или имеет 4/4 варна.")
+        await msg.answer(f"{custom_emoji_position(7, '⚠️')} Пользователь уже забанен или имеет 4/4 варна.")
         return
     mention = user_mention(target_id, username, full_name)
     try:
@@ -2588,7 +2613,7 @@ async def warn_cmd(msg: Message):
         LOGGER.exception("Не удалось отправить сообщение о варне")
         # Сам варн уже записан в БД; пробуем отправить понятное сообщение без HTML.
         try:
-            await msg.answer(f"⚠️ Варн выдан ({count}/4). Номер: {esc(number)}. Ошибка отображения: {esc(exc)}")
+            await msg.answer(f"{custom_emoji_position(7, '⚠️')} Варн выдан ({count}/4). Номер: {esc(number)}. Ошибка отображения: {esc(exc)}")
         except Exception:
             pass
     if ban_number:
@@ -4776,11 +4801,19 @@ async def announce_bot_version() -> None:
 
 
 async def validate_custom_emoji_ids() -> None:
-    """Проверяет целостность фиксированного списка Premium Emoji 1..80."""
-    if len(PREMIUM_EMOJI_ID_LIST) != 80 or len(set(PREMIUM_EMOJI_ID_LIST)) != 79:
-        # В присланном списке один ID повторяется намеренно; порядок сохраняем.
-        if len(PREMIUM_EMOJI_ID_LIST) != 80:
-            raise RuntimeError("Premium Emoji list must contain exactly 80 IDs")
+    """Проверяет единственный фиксированный список Premium Emoji 1..83.
+
+    В списке владельца ровно 83 позиции и один намеренный дубликат: #26 == #82.
+    Дубликаты не считаются ошибкой, потому что нумерация позиций важнее уникальности ID.
+    """
+    if len(PREMIUM_EMOJI_ID_LIST) != 83:
+        raise RuntimeError(f"Premium Emoji list must contain exactly 83 IDs, got {len(PREMIUM_EMOJI_ID_LIST)}")
+    if PREMIUM_EMOJI_ID_LIST[4] != "5463258057607760727":
+        raise RuntimeError("Premium Emoji position #5 is incorrect")
+    if PREMIUM_EMOJI_ID_LIST[78] != "5206607081334906820":
+        raise RuntimeError("Premium Emoji position #79 is incorrect")
+    if PREMIUM_EMOJI_ID_LIST[25] != PREMIUM_EMOJI_ID_LIST[81]:
+        raise RuntimeError("Premium Emoji positions #26 and #82 must contain the same ID")
 
 
 async def seed_custom_emoji_defaults() -> None:
