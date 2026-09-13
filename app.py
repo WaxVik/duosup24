@@ -129,7 +129,7 @@ USER_CUSTOM_EMOJI_IDS = [
     5260293700088511294,
     6071317996704370355,
     5334544901428229844,
-    5206607081334906820,
+    5463258057607760727,
     5420323339723881652,
     5447644880824181073,
     5962779315526439283,
@@ -203,7 +203,7 @@ USER_CUSTOM_EMOJI_IDS = [
     5438496463044752972,
     5276367078322902718,
     5368540868951161541,
-    5463258057607760727,
+    5206607081334906820,
     5375107603363829951,
     5377782964262307848,
     5377618883626702636,
@@ -233,7 +233,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.12.0"
+BOT_VERSION = "2.13.0"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -379,23 +379,23 @@ def _btn(text: str, callback_data: str, *, icon_key: str | None = None, url: str
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🌊 Морские ивенты", callback_data="menu_sea")],
-            [InlineKeyboardButton(text="⚔️ Создать Рейд", callback_data="menu_raid")],
-            [InlineKeyboardButton(text="💰 Создать Трейд", callback_data="menu_trade")],
-            [InlineKeyboardButton(text="🧬 Создать Триал", callback_data="menu_trial")],
-            [InlineKeyboardButton(text="👤 Профиль", callback_data="menu_profile")],
-            [InlineKeyboardButton(text="📋 Мои заявки", callback_data="menu_applications")],
-            [InlineKeyboardButton(text="🔴 Активные нарушения", callback_data="menu_active")],
-            [InlineKeyboardButton(text="📝 Подать апелляцию", callback_data="menu_appeal")],
-            [InlineKeyboardButton(text="💬 Вопрос | ответ", callback_data="menu_question")],
-            [InlineKeyboardButton(text="🧭 Навигация и правила", callback_data="menu_navigation")],
+            [InlineKeyboardButton(text="Морские ивенты", callback_data="menu_sea", icon_custom_emoji_id=user_custom_emoji_id(41))],
+            [InlineKeyboardButton(text="Создать Рейд", callback_data="menu_raid", icon_custom_emoji_id=user_custom_emoji_id(38))],
+            [InlineKeyboardButton(text="Создать Трейд", callback_data="menu_trade", icon_custom_emoji_id=user_custom_emoji_id(51))],
+            [InlineKeyboardButton(text="Создать Триал", callback_data="menu_trial", icon_custom_emoji_id=user_custom_emoji_id(53))],
+            [InlineKeyboardButton(text="Профиль", callback_data="menu_profile", icon_custom_emoji_id=user_custom_emoji_id(10))],
+            [InlineKeyboardButton(text="Мои заявки", callback_data="menu_applications", icon_custom_emoji_id=user_custom_emoji_id(52))],
+            [InlineKeyboardButton(text="Активные нарушения", callback_data="menu_active", icon_custom_emoji_id=user_custom_emoji_id(61))],
+            [InlineKeyboardButton(text="Подать апелляцию", callback_data="menu_appeal", icon_custom_emoji_id=user_custom_emoji_id(34))],
+            [InlineKeyboardButton(text="Вопрос | ответ", callback_data="menu_question", icon_custom_emoji_id=user_custom_emoji_id(37))],
+            [InlineKeyboardButton(text="Навигация и правила", callback_data="menu_navigation", icon_custom_emoji_id=user_custom_emoji_id(32))],
         ]
     )
 
 
 async def custom_emoji_html(slot: str, fallback: str = "✨") -> str:
     # Сначала используем явно настроенный ID из БД, затем точный ID из
-    # переданного владельцем списка 1..80. Никаких старых ID здесь нет.
+    # переданного владельцем списка 1..83. Никаких старых ID здесь нет.
     emoji_id = await get_config(f"custom_emoji_{slot}")
     emoji_id = emoji_id or PREMIUM_EMOJI_IDS.get(slot)
     if emoji_id:
@@ -435,6 +435,13 @@ def premiumize_text(text: str | None) -> str | None:
     parts = re.split(r'(<tg-emoji\b[^>]*>.*?</tg-emoji>)', text, flags=re.IGNORECASE | re.DOTALL)
     for i in range(0, len(parts), 2):
         value = parts[i]
+        # Если в тексте остались шаблоны вида (N), N всегда означает
+        # именно N-ю позицию пользовательского списка Custom Emoji.
+        value = re.sub(
+            r"\((\d{1,2})\)",
+            lambda m: custom_emoji_position(int(m.group(1)), m.group(0)),
+            value,
+        )
         for emoji, position in sorted(VISIBLE_EMOJI_POSITION.items(), key=lambda x: len(x[0]), reverse=True):
             if not position:
                 continue
@@ -613,6 +620,15 @@ class RememberUserMiddleware(BaseMiddleware):
 dp.message.outer_middleware(RememberUserMiddleware())
 dp.callback_query.outer_middleware(RememberUserMiddleware())
 
+
+# ========================== ПРОВЕРКА EMOJI ==========================
+def validate_custom_emoji_order() -> None:
+    assert len(USER_CUSTOM_EMOJI_IDS) == 83, "Ожидалось ровно 83 Custom Emoji ID"
+    assert str(USER_CUSTOM_EMOJI_IDS[4]) == "5463258057607760727", "Позиция 5 повреждена"
+    assert str(USER_CUSTOM_EMOJI_IDS[78]) == "5206607081334906820", "Позиция 79 повреждена"
+    assert str(USER_CUSTOM_EMOJI_IDS[25]) == str(USER_CUSTOM_EMOJI_IDS[81]), "Дубликат позиции 26/82 должен сохраняться"
+
+validate_custom_emoji_order()
 
 # ========================== ИНИЦИАЛИЗАЦИЯ БД ==========================
 async def init_db() -> None:
@@ -1726,31 +1742,10 @@ EMOJI_SLOTS = {
 }
 
 # ========================== FIXED PREMIUM EMOJI SET ==========================
-# ВАЖНО: порядок 1..80 соответствует списку, который прислал владелец бота.
+# ВАЖНО: порядок 1..83 соответствует списку, который прислал владелец бота.
 # Эти ID используются напрямую во всех пользовательских сообщениях, где для
 # соответствующего элемента есть заданный номер. Старый список/порядок не используется.
-PREMIUM_EMOJI_ID_LIST = [
-    "5472055112702629499", "5260293700088511294", "6071317996704370355", "5334544901428229844",
-    "5206607081334906820", "5420323339723881652", "5447644880824181073", "5962779315526439283",
-    "5965427313188278744", "5947401408461411640", "5395695537687123235", "5210952531676504517",
-    "5424818078833715060", "5416081784641168838", "5377738412566548230", "5377844588453073647",
-    "5377304659524357459", "5377459712138720552", "5377373271626909593", "5377641419320102438",
-    "5377524755123439542", "5375173844644433295", "5377503327531601899", "5377752727692544013",
-    "5375490808935910925", "5377618883626702636", "5965205611271427829", "5963018287506789163",
-    "5965301762704283074", "5965566835200891425", "5001636926843782163", "5210956306952758910",
-    "5274099962655816924", "5334882760735598374", "5352896944496728039", "5443038326535759644",
-    "5408935401442267103", "5391167929192586082", "5406745015365943482", "5273980249032405225",
-    "5393544605180403926", "5316812085269647504", "5199694859752980150", "5272003571938794249",
-    "5271495318393889259", "5332637016825805678", "5249326032946752374", "6005612719426770074",
-    "5271604874419647061", "5271984412089690485", "5271660086224270191", "5467583879948803288",
-    "5962787669237830729", "5467538555158943525", "5413879192267805083", "5395444784611480792",
-    "5172522439917175584", "5416117059207572332", "5264919878082509254", "5231200819986047254",
-    "5458603043203327669", "5296369303661067030", "5447410659077661506", "5309921815265555296",
-    "5325547803936572038", "5341715473882955310", "5253742260054409879", "5461151367559141950",
-    "5445267414562389170", "5282843764451195532", "5217822164362739968", "5372926953978341366",
-    "5438496463044752972", "5276367078322902718", "5368540868951161541", "5463258057607760727",
-    "5375107603363829951", "5377782964262307848", "5377618883626702636", "5440660757194744323",
-]
+PREMIUM_EMOJI_ID_LIST = [str(x) for x in USER_CUSTOM_EMOJI_IDS]
 SCREEN_CUSTOM_EMOJI_IDS = {i + 1: value for i, value in enumerate(PREMIUM_EMOJI_ID_LIST)}
 
 # Точные позиции из разметки сообщений владельца.
@@ -2566,21 +2561,36 @@ async def warn_cmd(msg: Message):
         if msg.reply_to_message and msg.chat.id == target_chat
         else None
     )
-    issued, count, number, action_error, ban_number = await issue_warning(
-        target_chat,
-        target_id,
-        reason,
-        actor.id,
-        source_id,
-    )
+    try:
+        issued, count, number, action_error, ban_number = await issue_warning(
+            target_chat,
+            target_id,
+            reason,
+            actor.id,
+            source_id,
+        )
+    except Exception as exc:
+        LOGGER.exception("Ошибка при выдаче варна")
+        await msg.answer(
+            f"⚠️ Не удалось выдать варн: {esc(exc)}"
+        )
+        return
     if not issued:
         await msg.answer("⚠️ Пользователь уже забанен или имеет 4/4 варна.")
         return
     mention = user_mention(target_id, username, full_name)
-    await msg.reply(
-        build_warn_msg(mention, count, reason, number),
-        reply_markup=None if ban_number else appeal_keyboard(number, "warn"),
-    )
+    try:
+        await msg.reply(
+            build_warn_msg(mention, count, reason, number),
+            reply_markup=None if ban_number else appeal_keyboard(number, "warn"),
+        )
+    except Exception as exc:
+        LOGGER.exception("Не удалось отправить сообщение о варне")
+        # Сам варн уже записан в БД; пробуем отправить понятное сообщение без HTML.
+        try:
+            await msg.answer(f"⚠️ Варн выдан ({count}/4). Номер: {esc(number)}. Ошибка отображения: {esc(exc)}")
+        except Exception:
+            pass
     if ban_number:
         auto_ban_reason = "Достигнут лимит варнов (4/4)"
         await msg.reply(
