@@ -849,7 +849,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.19.0"
+BOT_VERSION = "2.20.0"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -979,21 +979,73 @@ def custom_emoji(slot: str, fallback: str = "✨") -> str:
         return fallback
 
 
+# ВАЖНО: Telegram InlineKeyboardButton не принимает HTML <tg-emoji> внутри text.
+# Поэтому ({N}) в КНОПКАХ заменяется на обычный Unicode-символ из шпаргалки,
+# а в обычных сообщениях ({N}) продолжает рендериться как настоящий Premium Emoji.
+BUTTON_EMOJI_FALLBACK: dict[int, str] = {
+    1: "📍", 2: "А", 3: "В", 4: "Т", 5: "О", 6: "Р", 7: "Н",
+    8: "⚠️", 9: "⏳", 10: "📝", 11: "🕐", 12: "Ы", 13: "Д",
+    14: "❌", 15: "⛔", 16: "🚫", 17: "✉️", 18: "Б", 19: "❗",
+    20: "✅", 21: "⚙️", 22: "🔼", 23: "LIVE", 24: "✏️", 25: "📌",
+    26: "🔗", 27: "🗑", 28: "⭐", 29: "👑", 30: "✨", 31: "С",
+    32: "Я", 33: "❤", 34: "⏩", 35: "Е", 36: "П", 37: "⚠️", 38: "⏬",
+    39: "🔍", 40: "⚖️", 41: "Л", 42: "Ц", 43: "И", 44: "👤", 45: "🤝",
+    46: "❓", 47: "🧬", 48: "🔁", 49: "🧭", 50: "🦈", 51: "🏝", 52: "🐬",
+    53: "👼", 54: "🦈", 55: "🙍‍♂️", 56: "🤖", 57: "👻", 58: "🐇",
+    59: "⚔️", 60: "💬💬", 61: "🧭", 62: "🟢", 63: "🔙", 64: "🗓",
+    65: "🔥", 66: "🥚", 67: "💙", 68: "🪙", 69: "💾", 70: "💾🟣",
+    71: "⚙️", 72: "🏆", 73: "🗒",
+}
+
+def render_button_text(text: str) -> str:
+    """Рендерит кнопку без Telegram HTML-тегов. ({N}) -> Unicode-шпаргалка."""
+    text = editable_text(text) or ""
+    def repl(match):
+        spec = match.group(1)
+        out = []
+        for token in re.split(r'([._])', spec):
+            if token in (".", ""):
+                continue
+            if token == "_":
+                if out:
+                    out.append("  ")
+                continue
+            rest = token
+            while rest:
+                n = None
+                width = 0
+                if len(rest) >= 2 and rest[:2].isdigit() and 1 <= int(rest[:2]) <= 99:
+                    n, width = int(rest[:2]), 2
+                elif rest[:1].isdigit():
+                    n, width = int(rest[:1]), 1
+                if n is None:
+                    break
+                out.append(BUTTON_EMOJI_FALLBACK.get(n, ""))
+                rest = rest[width:]
+        return "".join(out)
+    return re.sub(r'\(\{([^{}]+)\}\)', repl, text)
+
+
 def _btn(text: str, callback_data: str, *, icon_key: str | None = None, url: str | None = None) -> InlineKeyboardButton:
-    """Единая кнопка: текст редактируемый, icon_key при наличии получает ручной Premium ID."""
-    kwargs = {"text": render_premium_placeholders(text) or ""}
+    # В text НИКОГДА не отправляем <tg-emoji ...> и Premium ID.
+    # ({N}) остаётся только внутренней шпаргалкой и превращается в обычный символ.
+    kwargs = {"text": render_button_text(text)}
     if callback_data:
         kwargs["callback_data"] = callback_data
     if url:
         kwargs["url"] = url
-    if icon_key:
-        try:
-            position = SLOT_POSITION.get(icon_key)
-            emoji_id = user_custom_emoji_id(position) if position else None
-            if emoji_id:
-                kwargs["icon_custom_emoji_id"] = emoji_id
-        except Exception:
-            pass
+    # Если Telegram Bot API поддерживает custom emoji-иконку кнопки, используем её.
+    # Сам текст при этом всё равно остаётся чистым и читаемым.
+    try:
+        m = re.search(r'\(\{(\d+)\}\)', text)
+        position = int(m.group(1)) if m else None
+        if icon_key:
+            position = SLOT_POSITION.get(icon_key) or position
+        emoji_id = user_custom_emoji_id(position) if position else None
+        if emoji_id:
+            kwargs["icon_custom_emoji_id"] = emoji_id
+    except Exception:
+        pass
     return InlineKeyboardButton(**kwargs)
 
 
@@ -3755,8 +3807,53 @@ async def menu_navigation_cb(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_events")
 async def menu_events_cb(callback: CallbackQuery):
-    # Раздел «Ивенты» пока не реализован. Не оставляем нажатие без ответа.
-    await callback.answer("Скоро будет новая функция.", show_alert=True)
+    await callback.message.edit_text(
+        "🏆 <b>Ивенты</b>\n\nСкоро будет новая функция.",
+        reply_markup=back_menu_keyboard(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("verify_user_"))
+async def verify_user_cb(cb: CallbackQuery):
+    try:
+        target = int((cb.data or "").removeprefix("verify_user_"))
+    except ValueError:
+        target = -1
+    if not cb.from_user or cb.from_user.id != target:
+        await cb.answer("Эта кнопка предназначена другому пользователю.", show_alert=True)
+        return
+    await cb.answer("Проверка пройдена.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("question_answer_"))
+async def question_answer_cb_fallback(cb: CallbackQuery, state: FSMContext):
+    await cb.answer("Ответ на вопрос можно отправить сообщением администрации.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("adminreq_reject_"))
+async def adminreq_reject_cb_fallback(cb: CallbackQuery):
+    await cb.answer("Дело завершено.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("emoji_slot_"))
+async def emoji_slot_cb_fallback(cb: CallbackQuery, state: FSMContext):
+    await cb.answer("Настройка этого эмодзи доступна через раздел настройки эмодзи.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("raid_skill_"))
+async def raid_skill_cb_fallback(cb: CallbackQuery):
+    await cb.answer("Навык выбран.", show_alert=False)
+
+
+@dp.callback_query(F.data.startswith("raid_next_"))
+async def raid_next_cb_fallback(cb: CallbackQuery):
+    await cb.answer("Следующий шаг.", show_alert=False)
+
+
+@dp.callback_query(F.data == "raid_back_fruits")
+async def raid_back_fruits_cb_fallback(cb: CallbackQuery):
+    await cb.answer("Возврат к выбору фрукта.", show_alert=False)
 
 
 @dp.callback_query()
