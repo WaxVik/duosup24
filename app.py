@@ -849,7 +849,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.18.0"
+BOT_VERSION = "2.19.0"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -1186,8 +1186,10 @@ for _media_method in (
 
 
 def custom_emoji_sequence(spec: str, fallback_map: dict[int, str] | None = None) -> str:
-    """Рендерит последовательность вида 7_26.80.81. '.' = без пробела, '_' = два пробела.
-    Если номер ещё не существует в переданном наборе, используется fallback и сам номер не выводится.
+    """Превращает ({8}) / ({1.3.12_7}) в Telegram custom emoji.
+
+    Номер — это только локальный ключ из PREMIUM_EMOJI. Сам номер никогда
+    не отправляется пользователю. '.' = без пробела, '_' = два пробела.
     """
     fallback_map = fallback_map or {}
     out = []
@@ -3641,10 +3643,127 @@ async def profile_text(user_id: int):
 
 
 
+# ========================== ГЛАВНОЕ МЕНЮ: ВСЕ CALLBACK ==========================
+def back_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("({63}) Назад", "menu_back")],
+    ])
+
+
+@dp.message(Command("profile"))
+async def profile_cmd(msg: Message):
+    """Показывает профиль автора команды. Команда работает в ЛС и группах."""
+    if not msg.from_user:
+        return
+    try:
+        text = await profile_text(msg.from_user.id)
+        await msg.answer(render_premium_placeholders(text), reply_markup=back_menu_keyboard())
+    except Exception:
+        LOGGER.exception("/profile failed for user %s", msg.from_user.id)
+        await msg.answer("({14})Не удалось открыть профиль. Попробуйте ещё раз.")
+
+
+@dp.callback_query(F.data == "menu_back")
+async def menu_back_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text(
+        "👋 <b>Добро пожаловать в DuoSup</b> ❤️\n\nВыберите нужный раздел:",
+        reply_markup=main_menu_keyboard(),
+    )
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "menu_profile")
+async def menu_profile_cb(cb: CallbackQuery):
+    if not cb.from_user:
+        await cb.answer("Пользователь не найден.", show_alert=True)
+        return
+    try:
+        text = await profile_text(cb.from_user.id)
+        await cb.message.edit_text(render_premium_placeholders(text), reply_markup=back_menu_keyboard())
+        await cb.answer()
+    except Exception:
+        LOGGER.exception("menu_profile failed for user %s", cb.from_user.id)
+        await cb.answer("Не удалось открыть профиль.", show_alert=True)
+
+
+async def _simple_menu_cb(cb: CallbackQuery, title: str, body: str):
+    await cb.message.edit_text(f"<b>{esc(title)}</b>\n\n{body}", reply_markup=back_menu_keyboard())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "menu_sea")
+async def menu_sea_cb(cb: CallbackQuery):
+    await _simple_menu_cb(cb, "Морские ивенты", "Раздел подготовки морских ивентов. Скоро будет новая функция.")
+
+
+@dp.callback_query(F.data == "menu_raid")
+async def menu_raid_cb(cb: CallbackQuery):
+    await _simple_menu_cb(cb, "Создать рейд", "Создание заявки на рейд будет доступно после завершения этого раздела.")
+
+
+@dp.callback_query(F.data == "menu_trade")
+async def menu_trade_cb(cb: CallbackQuery):
+    await _simple_menu_cb(cb, "Создать трейд", "Создание заявки на трейд будет доступно после завершения этого раздела.")
+
+
+@dp.callback_query(F.data == "menu_trial")
+async def menu_trial_cb(cb: CallbackQuery):
+    await _simple_menu_cb(cb, "Создать триал", "Создание заявки на триал будет доступно после завершения этого раздела.")
+
+
+@dp.callback_query(F.data == "menu_apps")
+async def menu_apps_cb(cb: CallbackQuery):
+    await _simple_menu_cb(cb, "Мои заявки", "Сейчас у вас нет доступного списка заявок в этом разделе.")
+
+
+@dp.callback_query(F.data == "menu_active")
+async def menu_active_cb(cb: CallbackQuery):
+    if not cb.from_user:
+        await cb.answer("Пользователь не найден.", show_alert=True)
+        return
+    try:
+        warns = await get_user_warns(cb.from_user.id)
+        banned = await is_banned(cb.from_user.id)
+        status = "🔨 Заблокирован" if banned else "✅ Не заблокирован"
+        await _simple_menu_cb(cb, "Активные нарушения", f"Варны: <b>{warns}/4</b>\nСтатус: <b>{status}</b>")
+    except Exception:
+        LOGGER.exception("menu_active failed for user %s", cb.from_user.id)
+        await cb.answer("Не удалось получить нарушения.", show_alert=True)
+
+
+@dp.callback_query(F.data == "menu_appeal")
+async def menu_appeal_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text(
+        "📝 <b>Подача апелляции</b>\n\n"
+        "Используйте кнопку «Подать апелляцию» в сообщении наказания или команду /appeal в личных сообщениях.",
+        reply_markup=back_menu_keyboard(),
+    )
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "menu_question")
+async def menu_question_cb(cb: CallbackQuery):
+    await _simple_menu_cb(cb, "Вопрос | ответ", "Раздел вопросов и ответов пока находится в разработке.")
+
+
+@dp.callback_query(F.data == "menu_navigation")
+async def menu_navigation_cb(cb: CallbackQuery):
+    await _simple_menu_cb(cb, "Навигация и правила", "Раздел навигации и правил будет подключён отдельно.")
+
+
 @dp.callback_query(F.data == "menu_events")
 async def menu_events_cb(callback: CallbackQuery):
     # Раздел «Ивенты» пока не реализован. Не оставляем нажатие без ответа.
     await callback.answer("Скоро будет новая функция.", show_alert=True)
+
+
+@dp.callback_query()
+async def unknown_callback_cb(cb: CallbackQuery):
+    """Последний предохранитель: Telegram никогда не оставляет кнопку во "вечном" состоянии загрузки."""
+    LOGGER.warning("Unhandled callback_data=%r from user=%s", cb.data, cb.from_user.id if cb.from_user else None)
+    await cb.answer("⚠️ Эта кнопка ещё не подключена.", show_alert=True)
 
 
 async def main() -> None:
