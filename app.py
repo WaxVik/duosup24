@@ -849,7 +849,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.15.0"
+BOT_VERSION = "2.18.0"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -3639,3 +3639,44 @@ async def profile_text(user_id: int):
         f'🏆 Достижения:\n{ach}"'
     )
 
+
+
+@dp.callback_query(F.data == "menu_events")
+async def menu_events_cb(callback: CallbackQuery):
+    # Раздел «Ивенты» пока не реализован. Не оставляем нажатие без ответа.
+    await callback.answer("Скоро будет новая функция.", show_alert=True)
+
+
+async def main() -> None:
+    global bot
+
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN не задан в Railway Variables")
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL не задан в Railway Variables")
+
+    validate_premium_emoji_config()
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+
+    try:
+        await init_db()
+        me = await bot.get_me()
+        global BOT_USERNAME
+        BOT_USERNAME = me.username or BOT_USERNAME
+        LOGGER.info("DuoSup %s запущен как @%s (id=%s)", BOT_VERSION, BOT_USERNAME, me.id)
+        await dp.start_polling(bot)
+    finally:
+        if db is not None:
+            await db.close()
+        await bot.session.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+    asyncio.run(main())
