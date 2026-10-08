@@ -18,6 +18,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     CallbackQuery,
+    ChatMemberUpdated,
     ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -849,7 +850,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.21.0"
+BOT_VERSION = "2.22.0"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -1076,65 +1077,59 @@ def editable_text(text: str | None) -> str | None:
 
 
 def format_user_markup(text: str) -> str:
-    """DuoSup text syntax -> Telegram HTML. Formatting is applied only to text nodes."""
+    """DuoSup syntax -> Telegram HTML.
+
+    **bold**, /italic/, _underline_, "quote" and ∆label(url)∆ are supported.
+    Quotes may span multiple lines and formatting inside quotes is preserved.
+    """
     if not isinstance(text, str):
         return text
-    text = re.sub(r'\(\{\(\{([^{}]+)\}\)\}', r'({\1})', text)
 
-    # Convert custom links first.
-    text = re.sub(
-        r'∆([^∆]+?)\((https?://[^)\s]+)\)∆',
-        lambda m: f'<a href="{esc(m.group(2))}">{m.group(1)}</a>',
-        text,
-    )
-
-    def nodes(value: str, fn):
-        parts = re.split(r'(<[^>]+>)', value)
-        for i in range(0, len(parts), 2):
-            parts[i] = fn(parts[i])
-        return ''.join(parts)
-
+    # Protect nothing permanently here: quote/link parsing happens before
+    # HTML tags are introduced, so quotes can safely contain Premium Emoji placeholders.
     def inline(value: str) -> str:
         value = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', value, flags=re.S)
         value = re.sub(r'(?<!/)/([^/\n]+?)/(?!/)', r'<i>\1</i>', value)
         value = re.sub(r'(?<!_)_(.+?)_(?!_)', r'<u>\1</u>', value, flags=re.S)
         return value
 
-    # Quotes become Telegram blockquotes; styles inside them are supported.
-    def quote_nodes(value: str) -> str:
-        return re.sub(
-            r'"([^"\n]+)"',
-            lambda m: '<blockquote>' + inline(m.group(1)) + '</blockquote>',
-            value,
-        )
+    # First convert quotes, including multiline quotes. A quote is everything
+    # between a pair of literal double quotes.
+    text = re.sub(r'"(.*?)"', lambda m: '<blockquote>' + m.group(1) + '</blockquote>', text, flags=re.S)
 
-    text = nodes(text, quote_nodes)
-    text = nodes(text, inline)
-    return text
+    # Then links. This also works inside blockquotes.
+    text = re.sub(
+        r'∆([^∆]+?)\((https?://[^)\s]+)\)∆',
+        lambda m: f'<a href="{esc(m.group(2))}">{m.group(1)}</a>',
+        text,
+    )
+
+    # Apply inline formatting only outside already-created HTML tags.
+    parts = re.split(r'(<[^>]+>)', text)
+    for i in range(0, len(parts), 2):
+        parts[i] = inline(parts[i])
+    return ''.join(parts)
 
 
 def render_premium_placeholders(text: str | None) -> str | None:
     if text is None or not isinstance(text, str):
         return text
-    # Сначала редактируемый текст, затем служебные Premium Emoji-плейсхолдеры.
     text = editable_text(text)
-    parts = re.split(r'(<tg-emoji\b[^>]*>.*?</tg-emoji>)', text, flags=re.IGNORECASE | re.DOTALL)
+    text = format_user_markup(text)
+    parts = re.split(r'(<[^>]+>)', text)
     for i in range(0, len(parts), 2):
         value = parts[i]
-        def repl(match):
-            spec = match.group(1)
-            return custom_emoji_sequence(spec)
-        value = re.sub(r'\(\{([^{}]+)\}\)', repl, value)
-        parts[i] = value
-    rendered = ''.join(parts)
-    return format_user_markup(rendered)
+        parts[i] = re.sub(r'\(\{([^{}]+)\}\)', lambda m: custom_emoji_sequence(m.group(1)), value)
+    return ''.join(parts)
 
 
 premiumize_text = render_premium_placeholders
 
 
 def _transform_markup(markup):
-    """Копирует клавиатуру и делает редактируемым текст каждой кнопки."""
+    """Кнопки: служебный ({N}) становится одной Premium Emoji-иконкой.
+    В text кнопки никогда не попадает <tg-emoji> или сам ID.
+    """
     if markup is None:
         return None
     try:
@@ -1144,10 +1139,18 @@ def _transform_markup(markup):
     try:
         for row in copied.inline_keyboard:
             for button in row:
-                if getattr(button, 'text', None):
-                    button.text = render_premium_placeholders(button.text) or ''
+                if not getattr(button, 'text', None):
+                    continue
+                raw = button.text
+                m = re.search(r'\(\{(\d+)\}\)', raw)
+                if m:
+                    try:
+                        button.icon_custom_emoji_id = user_custom_emoji_id(int(m.group(1)))
+                    except Exception:
+                        pass
+                button.text = render_button_text(raw)
     except Exception:
-        pass
+        LOGGER.exception('Не удалось обработать Premium Emoji в inline-кнопке')
     return copied
 
 
@@ -1814,7 +1817,7 @@ async def request_creator_admin_punishment(msg: Message, target_id: int, action:
     target=user_mention(target_id,target_known["username"] if target_known else None,target_known["full_name"] if target_known else None)
     keyboard=InlineKeyboardMarkup(inline_keyboard=[
         [ _btn("({34})Перейти к сообщению", "", url=message_url(msg.chat.id,msg.reply_to_message.message_id) if msg.reply_to_message and message_url(msg.chat.id,msg.reply_to_message.message_id) else "https://t.me/duosup_bot") ],
-        [_btn("Завершить дело ({20})", callback_data=f"adminreq_reject_{row['id']}")]
+        [_btn("Завершить дело ({{20}})", callback_data=f"adminreq_reject_{row['id']}")]
     ])
     text=(
         '**Админ пытается наказать равного/старшего**\n'
@@ -2248,7 +2251,7 @@ async def clear_restrictions(chat_id: int, user_id: int) -> None:
 
 
 # ========================== СООБЩЕНИЯ И ЛОГИ ==========================
-SEPARATOR = "— • — • — • — • — • — • —"
+SEPARATOR = "•—-—-—-—-—-<⁠✧>-—-—-—-—-—•"
 
 
 def build_warn_msg(mention: str, warn_count: int, reason: str, warn_number: str) -> str:
@@ -2279,7 +2282,7 @@ def build_ban_msg(mention: str, reason: str, ban_number: str) -> str:
         f"\"<b>причина</b>: {esc(reason)}\n"
         f"<b>ID_BAN</b> • /#{esc(ban_number)}/\n"
         f"({{11}})Время выдачи: {msk_time()} МСК\"\n"
-        f"Вы можете подать апелляцию в любое время. ({11})"
+        f"Вы можете подать апелляцию в любое время. ({{11}})"
     )
 
 def build_ban_dm_msg(reason: str, ban_number: str) -> str:
@@ -2540,7 +2543,7 @@ RAID_FRUITS = {
     "buddha": ("Будда", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
     "spider": ("Паук", {"Z": 800, "X": 3500, "C": 4500, "V": 6000, "F": 2500}),
     "phoenix": ("Феникс", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
-    "dough": ("Тесто", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
+    "dough": ("Тесто", {"Z": 500, "X": 3000, "C": 4000, "M1": 0, "V": 5000, "F": 2000}),
 }
 
 
@@ -2672,8 +2675,9 @@ def raid_skill_keyboard(fruit_key: str, selected: set[str]) -> InlineKeyboardMar
     rows = []
     for key, price in skills.items():
         mark = "✅ " if key in selected else ""
-        rows.append([InlineKeyboardButton(text=f"{mark}{key} • {price:,}".replace(",", "."), callback_data=f"raid_skill_{fruit_key}_{key}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="raid_back_fruits"), InlineKeyboardButton(text="➡️ Далее", callback_data=f"raid_next_{fruit_key}")])
+        price_text = f" • {price:,}".replace(",", ".") if price else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{key}{price_text}", callback_data=f"raid_skill_{fruit_key}_{key}")])
+    rows.append([_btn("({{63}}) Назад", "raid_back_fruits"), InlineKeyboardButton(text="➡️ Далее", callback_data=f"raid_next_{fruit_key}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2693,7 +2697,9 @@ class EmojiState(StatesGroup):
 
 
 class RaidState(StatesGroup):
+    waiting_skills = State()
     waiting_balance = State()
+    waiting_chip = State()
     waiting_comment = State()
 
 
@@ -2708,7 +2714,7 @@ class TradeState(StatesGroup):
 
 
 class TrialState(StatesGroup):
-    waiting_help_type = State()
+    waiting_race = State()
     waiting_comment = State()
 
 
@@ -2716,6 +2722,14 @@ class ProfileState(StatesGroup):
     waiting_tag = State()
     waiting_comment = State()
     waiting_roblox = State()
+
+
+class QuestionState(StatesGroup):
+    waiting_question = State()
+
+
+class AdminQuestionState(StatesGroup):
+    waiting_answer = State()
 
 
 # ========================== БАЗОВЫЕ КОМАНДЫ ==========================
@@ -3245,7 +3259,7 @@ async def change_mod_level(msg: Message, delta: int) -> None:
                 LOGGER.info("Не удалось отправить одноразовую ссылку новому админу", exc_info=True)
     action = "повышен" if delta > 0 else "понижен"
     mention = user_mention(target_id, username, full_name)
-    response = f"✅ {mention} {action} до уровня {new_level} ({esc(get_role_name(new_level))})."
+    response = f"✅ {mention} {action} до уровня {new_level} ({{esc(get_role_name(new_level))}})."
     if failures:
         response += "\n⚠️ Telegram-права синхронизированы не везде:\n" + "\n".join(
             esc(x) for x in failures
@@ -3284,10 +3298,11 @@ PREMMOD_RIGHTS = {
 def premmod_keyboard(rights: dict[str,bool]) -> InlineKeyboardMarkup:
     rows=[]
     for key,label in PREMMOD_RIGHTS.items():
-        mark = "✅ " if rights.get(key) else ""
-        rows.append([InlineKeyboardButton(text=mark+label, callback_data=f"premright_{key}")])
+        base = re.sub(r'\(\{\d+\}\)', '', label).strip()
+        rows.append([_btn(("({24})" if rights.get(key) else "") + base, f"premright_{key}")])
     rows.append([_btn("({20})Готово", "premright_done")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 @dp.message(Command("premmod"))
 async def premmod_cmd(msg: Message, state: FSMContext):
@@ -3523,7 +3538,7 @@ async def warn_cmd(msg: Message):
             if final_count == 2:
                 await require_bot().restrict_chat_member(target_chat,target_id,permissions=ChatPermissions(can_send_messages=False),until_date=datetime.now(timezone.utc)+timedelta(minutes=5))
             elif final_count == 3:
-                await require_bot().restrict_chat_member(target_chat,target_id,permissions=ChatPermissions(can_send_messages=False),until_date=datetime.now(timezone.utc)+timedelta(minutes=24*60))
+                await require_bot().restrict_chat_member(target_chat,target_id,permissions=ChatPermissions(can_send_messages=False),until_date=datetime.now(timezone.utc)+timedelta(minutes=30))
             elif final_count >= 4:
                 await require_bot().restrict_chat_member(target_chat,target_id,permissions=ChatPermissions(can_send_messages=False))
                 async with require_db().acquire() as conn:
@@ -3642,14 +3657,13 @@ async def unwarn_cmd(msg: Message):
     try: await clear_restrictions(target_chat,target_id)
     except Exception: pass
     mention=user_mention(target_id,username,full_name)
-    reason_line = f'Причина снятия: «{esc(unwarn_reason)}»\n' if unwarn_reason else ''
+    reason_line = f'\nПричина: «{esc(unwarn_reason)}»' if unwarn_reason else ''
     await msg.reply(
         '({1.31.7.32.4_3.2.6.7.1})\nС пользователя {mention}\n'
         f'"Количество снятых варнов: {n}\nОсталось варнов: {max(0,current-n)} /4\n'
-        f'{reason_line}'
         f'<b>ID</b> • /#{esc(number)}/\n'
-        f'•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n'
-        f'Пожалуйста ознакомтесь с правилами сообщества HuBBlox. ({33}) "'
+        f'{SEPARATOR}\n'
+        f'Пожалуйста ознакомтесь с правилами сообщества HuBBlox. ({{33}}){reason_line} "'
     )
 
 
@@ -3685,7 +3699,7 @@ async def unban_cmd(msg: Message):
         '({1.31.7.32.4_18.2.7.1})\nС пользователя {mention}\n'
         f'"<b>ID</b> • /#{esc(number)}/\n'
         f'•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n'
-        f'Пожалуйста ознакомтесь с правилами сообщества HuBBlox. ({33}) "'
+        f'Пожалуйста ознакомтесь с правилами сообщества HuBBlox. ({{33}}) "'
     )
 async def profile_text(user_id: int):
     """Безопасный профиль: обязательные поля всегда показываются, необязательные — «не указано»."""
@@ -3777,13 +3791,14 @@ async def _profile_target_from_command(msg: Message):
     return None
 
 
-async def _show_profile(target_id: int, message: Message, *, edit: bool = False):
+async def _show_profile(target_id: int, message: Message, *, edit: bool = False, owner: bool = False):
     text = await profile_text(target_id)
     rendered = render_premium_placeholders(text)
+    markup = profile_keyboard(owner)
     if edit:
-        await message.edit_text(rendered, reply_markup=back_menu_keyboard())
+        await message.edit_text(rendered, reply_markup=markup)
     else:
-        await message.answer(rendered, reply_markup=back_menu_keyboard())
+        await message.answer(rendered, reply_markup=markup)
 
 
 @dp.message(Command("profile"))
@@ -3795,7 +3810,7 @@ async def profile_cmd(msg: Message):
         if target_id is None:
             await msg.answer('({46})Не удалось найти пользователя. Укажите @username, ID или ответьте на его сообщение.')
             return
-        await _show_profile(target_id, msg)
+        await _show_profile(target_id, msg, owner=(target_id == msg.from_user.id))
     except Exception:
         LOGGER.exception("/profile failed")
         await msg.answer('({14})Не удалось открыть профиль. Попробуйте ещё раз.')
@@ -3818,7 +3833,7 @@ async def menu_profile_cb(cb: CallbackQuery):
         return
     try:
         await remember_user(cb.from_user)
-        await _show_profile(cb.from_user.id, cb.message, edit=True)
+        await _show_profile(cb.from_user.id, cb.message, edit=True, owner=True)
         await cb.answer()
     except Exception:
         LOGGER.exception("menu_profile failed for user %s", cb.from_user.id)
@@ -3838,6 +3853,500 @@ async def menu_events_cb(callback: CallbackQuery):
     )
     await callback.answer()
 
+
+
+
+# ========================== РЕПОРТЫ И АПЕЛЛЯЦИИ ==========================
+async def appeal_choices_markup(user_id: int) -> InlineKeyboardMarkup:
+    rows=[]
+    warns=await require_db().fetch("SELECT warn_number FROM warn_logs WHERE user_id=$1 AND is_active=TRUE ORDER BY id DESC",user_id)
+    for r in warns:
+        n=str(r['warn_number']).replace('#','')
+        rows.append([InlineKeyboardButton(text=f"⚠️Варн #{r['warn_number']}",callback_data=f"appeal_select_warn_{n}")])
+    ban=await require_db().fetchrow("SELECT ban_number FROM ban_logs WHERE user_id=$1 ORDER BY id DESC LIMIT 1",user_id)
+    if await is_banned(user_id) and ban:
+        n=str(ban['ban_number']).replace('#','')
+        rows.append([InlineKeyboardButton(text=f"⚠️Бан #{ban['ban_number']}",callback_data=f"appeal_select_ban_{n}")])
+    rows.append([_btn("({63}) Назад","menu_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+async def appeal_start(msg: Message, state: FSMContext, expected_violation: str|None=None, expected_type: str|None=None):
+    if msg.chat.type != 'private':
+        await msg.answer('⛔ Апелляция доступна в ЛС бота.')
+        return
+    await state.clear()
+    if expected_violation and expected_type:
+        n=expected_violation.replace('#','')
+        if expected_type=='warn':
+            row=await require_db().fetchrow("SELECT warn_number FROM warn_logs WHERE user_id=$1 AND warn_number=$2 AND is_active=TRUE",msg.from_user.id,expected_violation)
+        else:
+            row=await require_db().fetchrow("SELECT ban_number FROM ban_logs WHERE user_id=$1 AND ban_number=$2",msg.from_user.id,expected_violation)
+        if not row:
+            await msg.answer('({14})Это наказание не найдено или оно принадлежит другому пользователю.')
+            return
+        await state.update_data(appeal_violation=expected_violation,appeal_type=expected_type)
+        await state.set_state(AppealState.waiting_text)
+        await msg.answer('({10})Напишите причину, по которой вы считаете наказание несправедливым.')
+        return
+    markup=await appeal_choices_markup(msg.from_user.id)
+    rows=markup.inline_keyboard
+    if len(rows)<=1:
+        await msg.answer('({20})У вас нет наказаний, доступных для обжалования.')
+        return
+    await msg.answer('({10})Выберите наказание, которое хотите обжаловать.',reply_markup=markup)
+
+@dp.message(Command('appeal'))
+async def appeal_cmd_new(msg:Message,state:FSMContext):
+    await appeal_start(msg,state)
+
+@dp.callback_query(F.data.startswith('appeal_select_'))
+async def appeal_select_cb(cb:CallbackQuery,state:FSMContext):
+    parts=(cb.data or '').split('_'); kind=parts[2] if len(parts)>2 else ''; num=parts[3] if len(parts)>3 else ''
+    violation=f'#{num}'
+    if kind=='warn':
+        row=await require_db().fetchrow("SELECT 1 FROM warn_logs WHERE user_id=$1 AND warn_number=$2 AND is_active=TRUE",cb.from_user.id,violation)
+    elif kind=='ban':
+        row=await require_db().fetchrow("SELECT 1 FROM ban_logs WHERE user_id=$1 AND ban_number=$2",cb.from_user.id,violation)
+    else: row=None
+    if not row: await cb.answer('Это наказание недоступно для вашего профиля.',show_alert=True); return
+    await state.update_data(appeal_violation=violation,appeal_type=kind); await state.set_state(AppealState.waiting_text)
+    await cb.message.edit_text('({10})Напишите причину, по которой вы считаете наказание несправедливым.')
+    await cb.answer()
+
+@dp.message(AppealState.waiting_text,F.text)
+async def appeal_text_msg_new(msg:Message,state:FSMContext):
+    data=await state.get_data(); reason=(msg.text or '').strip()
+    if not reason: await msg.answer('({8})Напишите причину апелляции.'); return
+    async with require_db().acquire() as conn:
+        number=format_number(await next_number(conn,'appeal_counter'))
+        await conn.execute("INSERT INTO appeals(appeal_number,user_id,username,violation_number,violation_type,appeal_text,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)",number,msg.from_user.id,msg.from_user.username,data['appeal_violation'],data['appeal_type'],reason,now_ts())
+    hubsup=await get_config('hubsup_id')
+    if hubsup:
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='({{20}})Одобрить',callback_data=f'appeal_decide_{number}_approve'),InlineKeyboardButton(text='({{14}})Отклонить',callback_data=f'appeal_decide_{number}_reject')]])
+        penalty_title = 'Варн' if data['appeal_type'] == 'warn' else 'Бан'
+        appeal_admin_text = (
+            '({40.2.36.35.41.32.42.43.32.40})\n'
+            f'({{44}})Пользователь {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\n'
+            f'{SEPARATOR}\n'
+            f'({{10}})Наказание: {penalty_title} #{esc(data["appeal_violation"].replace("#", ""))}\n'
+            f'({{11}}) время выдачи наказания {msk_time()} МСК\n'
+            f'ID {msg.from_user.id}\n{SEPARATOR}\n'
+            f'({{25}})Коментарий\n\"«{esc(reason)}»\"'
+        )
+        await require_bot().send_message(int(hubsup), appeal_admin_text, message_thread_id=TOPICS['appeals'], reply_markup=kb)
+    await state.clear(); await msg.answer(f'({{17}})Апелляция #{esc(number)} отправлена администрации.\n({{9}})Ожидайте решения.')
+
+@dp.callback_query(F.data.startswith('appeal_decide_'))
+async def appeal_decide_cb(cb:CallbackQuery):
+    if not await check_permission(cb.from_user.id,2): await cb.answer('Недостаточно прав.',show_alert=True); return
+    _,_,number,decision=(cb.data or '').split('_',3)
+    row=await require_db().fetchrow("SELECT * FROM appeals WHERE appeal_number=$1 AND status='pending'",number)
+    if not row: await cb.answer('Апелляция уже рассмотрена.',show_alert=True); return
+    status='approved' if decision=='approve' else 'rejected'
+    await require_db().execute("UPDATE appeals SET status=$2 WHERE appeal_number=$1",number,status)
+    if status=='approved':
+        if row['violation_type']=='warn':
+            await require_db().execute("UPDATE warn_logs SET is_active=FALSE WHERE user_id=$1 AND warn_number=$2",row['user_id'],row['violation_number'])
+            current=await get_user_warns(row['user_id']); await require_db().execute("UPDATE users SET warns=$2 WHERE user_id=$1",row['user_id'],current)
+        else:
+            await require_db().execute("UPDATE users SET banned=FALSE,ban_until=NULL WHERE user_id=$1",row['user_id'])
+    try:
+        await require_bot().send_message(int(row['user_id']),f'({{20 if status=="approved" else 14}})Апелляция #{esc(number)} {"одобрена" if status=="approved" else "отклонена"}.')
+    except Exception: pass
+    await cb.message.edit_reply_markup(reply_markup=None); await cb.answer('Решение сохранено.')
+
+@dp.message(Command('report'))
+async def report_cmd(msg:Message):
+    if not await require_group_chat(msg): return
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        await msg.answer('({8})Репорт можно отправить только ответом на сообщение.')
+        return
+    if msg.reply_to_message.from_user.id==msg.from_user.id:
+        await msg.answer('({14})Нельзя отправить репорт на себя.')
+        return
+    row=await require_db().fetchrow("SELECT report_number FROM reports WHERE chat_id=$1 AND message_id=$2",msg.chat.id,msg.reply_to_message.message_id)
+    if row:
+        await msg.answer('"Это сообщение уже отправлено на рассмотрение"'); return
+    reason=(command_payload(msg) or 'Нарушение правил').strip()
+    async with require_db().acquire() as conn:
+        number=format_number(await next_number(conn,'report_counter'))
+        await conn.execute("INSERT INTO reports(report_number,reporter_id,violator_id,chat_id,message_id,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)",number,msg.from_user.id,msg.reply_to_message.from_user.id,msg.chat.id,msg.reply_to_message.message_id,reason,now_ts())
+    hubsup=await get_config('hubsup_id')
+    if hubsup:
+        url=message_url(msg.chat.id,msg.reply_to_message.message_id)
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='({34})Перейти к сообщению',url=url)]] if url else [])
+        await require_bot().send_message(int(hubsup),f'({{1.6.35.36.5.6.4.1}})\n<b>Репорт #{esc(number)}</b>\nОтправил: {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\nПричина: {esc(reason)}',message_thread_id=TOPICS['reports'],reply_markup=kb)
+    await msg.reply('({17})Репорт отправлен администрации.\n"Команда администраторов рассмотрит сообщение в ближайшее время.\nПосле расмотрения репорта будут применены меры наказания если есть нарушений правил. "\nСтатус: в очереди')
+
+@dp.callback_query(F.data.startswith('report_review_'))
+async def report_review_cb(cb:CallbackQuery):
+    if not await check_permission(cb.from_user.id,1): await cb.answer('Недостаточно прав.',show_alert=True); return
+    number=(cb.data or '').removeprefix('report_review_')
+    await require_db().execute("UPDATE reports SET status='reviewed',reviewed_by=$2 WHERE report_number=$1",number,cb.from_user.id)
+    await cb.answer('Репорт отмечен как рассмотренный.')
+
+# ========================== ЛС РАЗДЕЛЫ ==========================
+def menu_back_keyboard():
+    return back_menu_keyboard()
+
+
+def sea_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("({67})Левиафан", "sea_event_leviathan")],
+        [_btn("({66})Вулканический остров", "sea_event_volcano")],
+        [_btn("({65})Остров Китсуне", "sea_event_kitsune")],
+        [_btn("({52})Морской зверь", "sea_event_beast")],
+        [_btn("({51})Остров Мираж", "sea_event_mirage")],
+        [_btn("({50})Терроршарк", "sea_event_terror")],
+        [_btn("({68})Рейд на корабль", "sea_event_ship")],
+        [InlineKeyboardButton(text="••• Другое", callback_data="sea_event_other")],
+        [_btn("({63})Назад", "menu_back")],
+    ])
+
+
+def trade_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("({48}) Создать трейд", "trade_create")],
+        [_btn("({39}) Найти трейд", "trade_find")],
+        [_btn("({62}) Активные трейды", "trade_active")],
+        [_btn("({63}) Назад", "menu_back")],
+    ])
+
+
+def trial_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Хуман", callback_data="trial_race_human")],
+        [InlineKeyboardButton(text="Киборг", callback_data="trial_race_cyborg")],
+        [InlineKeyboardButton(text="Ангел", callback_data="trial_race_angel")],
+        [InlineKeyboardButton(text="Шарк", callback_data="trial_race_shark")],
+        [InlineKeyboardButton(text="Гуль", callback_data="trial_race_ghoul")],
+        [InlineKeyboardButton(text="Минк", callback_data="trial_race_mink")],
+        [_btn("({63}) Назад", "menu_back")],
+    ])
+
+
+def profile_keyboard(owner: bool = True) -> InlineKeyboardMarkup:
+    rows=[]
+    if owner:
+        rows.append([_btn("({24})Редактировать профиль", "profile_edit")])
+    rows.append([_btn("({61})Навигация", "menu_navigation")])
+    rows.append([_btn("({63})Назад", "menu_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def application_help_keyboard(app_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_btn("({{45}})Помочь", f"app_help_{app_id}")]])
+
+
+def as_payload(value):
+    if isinstance(value, dict): return value
+    if isinstance(value, str):
+        try: return json.loads(value)
+        except Exception: return {}
+    return {}
+
+
+async def application_message(kind: str, app_id: int, user_id: int, payload: dict) -> str:
+    known = await require_db().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", user_id)
+    mention = user_mention(user_id, known["username"] if known else None, known["full_name"] if known else None)
+    if kind == "raid":
+        fruit = payload.get("fruit_name", "не указано")
+        skills = ", ".join(payload.get("skills", [])) or "не указано"
+        balance = payload.get("balance", "не указано")
+        chip = payload.get("chip")
+        comment = payload.get("comment", "-")
+        chip_line = f"\nЧип: {'нужен' if chip else 'не нужен'}" if chip is not None else ""
+        return (f"({{69}})<b>Заявка на рейд #{app_id:05d}</b>\n"
+                f"({{44}})Автор: {mention}\n"
+                f"({{69}})Фрукт: <b>{esc(fruit)}</b>\n"
+                f"Навыки: <b>{esc(skills)}</b>\n"
+                f"({{39}})Баланс фрагментов: <b>{esc(str(balance))}</b>{chip_line}\n"
+                f"({{56}})Комментарий: {esc(comment)}")
+    if kind == "sea":
+        return (f"({{49}})<b>{esc(payload.get('event_name','Морской ивент'))}</b> #{app_id:05d}\n"
+                f"({{44}})Автор: {mention}\n"
+                f"Участников: <b>{payload.get('count', 2)}</b>\n"
+                f"({{56}})Комментарий: {esc(payload.get('comment','-'))}")
+    if kind == "trial":
+        return (f"({{71}})<b>Триал #{app_id:05d}</b>\n"
+                f"({{44}})Автор: {mention}\n"
+                f"Раса: <b>{esc(payload.get('race','не указано'))}</b>\n"
+                f"({{56}})Комментарий: {esc(payload.get('comment','-'))}")
+    return (f"({{48}})<b>Трейд #{app_id:05d}</b>\n"
+            f"({{44}})Автор: {mention}\n"
+            f"{esc(payload.get('text',''))}")
+
+
+async def create_application(kind: str, user_id: int, payload: dict, *, topic_key: str, callback_button: bool=True):
+    pool=require_db()
+    async with pool.acquire() as conn:
+        row=await conn.fetchrow("INSERT INTO applications(user_id,kind,status,payload,created_at) VALUES($1,$2,'active',$3::jsonb,$4) RETURNING id", user_id, kind, json.dumps(payload, ensure_ascii=False), now_ts())
+    app_id=int(row["id"])
+    hublox=await get_config("hublox_id")
+    if not hublox:
+        return app_id, None
+    text=await application_message(kind,app_id,user_id,payload)
+    markup=application_help_keyboard(app_id) if callback_button else None
+    sent=await require_bot().send_message(int(hublox),text,message_thread_id=TOPICS[topic_key],reply_markup=markup)
+    await require_db().execute("UPDATE applications SET chat_message_id=$2 WHERE id=$1",app_id,sent.message_id)
+    return app_id,sent
+
+
+@dp.callback_query(F.data == "menu_sea")
+async def menu_sea_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("({49})<b>Морские ивенты</b>\n\nНа какой ивент собираемся?", reply_markup=sea_keyboard())
+    await cb.answer()
+
+@dp.callback_query(F.data == "menu_raid")
+async def menu_raid_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("({69})<b>Создание рейда</b>\n\nДальше выбор фруктов.", reply_markup=await raid_fruit_keyboard_async())
+    await cb.answer()
+
+@dp.callback_query(F.data == "menu_trade")
+async def menu_trade_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("({48})<b>Трейды</b>\n\nВыберите действие:", reply_markup=trade_keyboard())
+    await cb.answer()
+
+@dp.callback_query(F.data == "menu_trial")
+async def menu_trial_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("({71})<b>Создание Триала</b>\n\nВыберите расу:", reply_markup=trial_keyboard())
+    await cb.answer()
+
+@dp.callback_query(F.data == "menu_apps")
+async def menu_applications_cb(cb: CallbackQuery):
+    rows=await require_db().fetch("SELECT id,kind,status,claimed_by FROM applications WHERE user_id=$1 AND status='active' ORDER BY id DESC",cb.from_user.id)
+    if not rows:
+        await cb.message.edit_text("({14})У вас нет активных заявок.",reply_markup=back_menu_keyboard()); await cb.answer(); return
+    lines=[]; buttons=[]
+    names={"raid":"({69})Рейд","sea":"({49})Морской ивент","trial":"({71})Триал","trade":"({48})Трейд"}
+    for r in rows:
+        state_text="заявка взята" if r["claimed_by"] else "активна"
+        lines.append(f'"{names.get(r["kind"],r["kind"])} #{r["id"]} — {state_text}"')
+        buttons.append([InlineKeyboardButton(text=f"Завершить заявку #{r['id']}",callback_data=f"app_finish_{r['id']}")])
+    buttons.append([_btn("({63}) Назад","menu_back")])
+    await cb.message.edit_text("({73})<b>Ваши активные заявки</b>\n\n"+"\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await cb.answer()
+
+@dp.callback_query(F.data == "menu_active")
+async def menu_active_cb(cb: CallbackQuery):
+    rows=await require_db().fetch("SELECT warn_number,reason,chat_id,message_id FROM warn_logs WHERE user_id=$1 AND is_active=TRUE ORDER BY id DESC",cb.from_user.id)
+    banned=await is_banned(cb.from_user.id)
+    if not rows and not banned:
+        await cb.message.edit_text("({20})У вас нет активных нарушений.",reply_markup=back_menu_keyboard()); await cb.answer(); return
+    text="({62})<b>Ваши активные нарушения</b>"
+    buttons=[]
+    for r in rows:
+        text+=f'\n\nВарн #{esc(r["warn_number"])} — 1/4\n"{esc(r["reason"])}"'
+        if r["message_id"]:
+            url=message_url(int(r["chat_id"]),int(r["message_id"]))
+            if url: buttons.append([InlineKeyboardButton(text="({26}) Перейти к сообщению",url=url)])
+    if banned: text+='\n\n({15})<b>Бан — активен</b>'
+    buttons.append([_btn("({63}) Назад","menu_back")])
+    await cb.message.edit_text(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await cb.answer()
+
+@dp.callback_query(F.data == "menu_appeal")
+async def menu_appeal_cb_new(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    warns=await require_db().fetch("SELECT warn_number FROM warn_logs WHERE user_id=$1 AND is_active=TRUE ORDER BY id DESC",cb.from_user.id)
+    banned=await is_banned(cb.from_user.id)
+    rows=[]
+    for r in warns: rows.append([InlineKeyboardButton(text=f"⚠️Варн #{r['warn_number']}",url=f"https://t.me/{BOT_USERNAME}?start=appeal_warn_{r['warn_number'].replace('#','')}")])
+    if banned:
+        br=await require_db().fetchrow("SELECT ban_number FROM ban_logs WHERE user_id=$1 ORDER BY id DESC LIMIT 1",cb.from_user.id)
+        if br: rows.append([InlineKeyboardButton(text=f"⚠️Бан #{br['ban_number']}",url=f"https://t.me/{BOT_USERNAME}?start=appeal_ban_{br['ban_number'].replace('#','')}")])
+    if not rows:
+        await cb.message.edit_text("({20})У вас нет наказаний, доступных для обжалования.",reply_markup=back_menu_keyboard())
+    else:
+        rows.append([_btn("({63}) Назад","menu_back")])
+        await cb.message.edit_text("({10})Выберите наказание, которое хотите обжаловать.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await cb.answer()
+
+@dp.callback_query(F.data == "menu_question")
+async def menu_question_cb_new(cb: CallbackQuery,state:FSMContext):
+    await state.set_state(QuestionState.waiting_question)
+    await cb.message.edit_text("({60})<b>Вопрос | ответ</b>\n\nНапишите ваш вопрос одним сообщением.",reply_markup=back_menu_keyboard()); await cb.answer()
+
+@dp.message(QuestionState.waiting_question,F.text)
+async def question_msg_new(msg:Message,state:FSMContext):
+    q=(msg.text or '').strip()
+    if not q: return
+    async with require_db().acquire() as conn:
+        number=format_number(await next_number(conn,'question_counter'))
+        row=await conn.fetchrow("INSERT INTO questions(question_number,user_id,username,question_text,created_at) VALUES($1,$2,$3,$4,$5) RETURNING id",number,msg.from_user.id,msg.from_user.username,q,now_ts())
+    hubsup=await get_config('hubsup_id')
+    if hubsup:
+        await require_bot().send_message(int(hubsup),f"({{60}})<b>Новый вопрос #{esc(number)}</b>\n({{44}}) @{esc(msg.from_user.username or msg.from_user.full_name)}\n({{46}}) Вопрос:\n\"«{esc(q)}»\"",message_thread_id=TOPICS['questions'],reply_markup=question_answer_keyboard(int(row['id'])))
+    await state.clear(); await msg.answer("({17})Вопрос отправлен администрации.\nОжидайте ответа в личных сообщениях бота.")
+
+@dp.callback_query(F.data == "menu_navigation")
+async def menu_navigation_cb_new(cb:CallbackQuery):
+    await cb.message.edit_text("({61})<b>Навигация и правила</b>\n\nОзнакомьтесь с правилами сообщества HuBBlox и используйте разделы меню для рейдов, морских ивентов, трейдов, триалов, профиля, заявок и апелляций.",reply_markup=back_menu_keyboard()); await cb.answer()
+
+@dp.callback_query(F.data.startswith("sea_event_"))
+async def sea_event_cb(cb:CallbackQuery,state:FSMContext):
+    key=cb.data.removeprefix('sea_event_')
+    names={'leviathan':'Левиафан','volcano':'Вулканический остров','kitsune':'Остров Китсуне','beast':'Морской зверь','mirage':'Остров Мираж','terror':'Терроршарк','ship':'Рейд на корабль','other':'Другое'}
+    await state.update_data(sea_event=names.get(key,'Другое')); await state.set_state(SeaState.waiting_count)
+    await cb.message.edit_text(f"({{49}})<b>{esc(names.get(key,'Другое'))}</b>\n\n/Выберите количество участников./\nМинимум — 2, максимум — 12."); await cb.answer()
+
+@dp.message(SeaState.waiting_count,F.text)
+async def sea_count_msg(msg:Message,state:FSMContext):
+    try:n=int((msg.text or '').strip())
+    except ValueError:n=0
+    if n<2 or n>12: await msg.answer('({8})Укажите число от 2 до 12.'); return
+    await state.update_data(sea_count=n); await state.set_state(SeaState.waiting_details); await msg.answer('({10})Напишите комментарий и детали.\nЕсли не нужны — отправьте -.')
+
+@dp.message(SeaState.waiting_details,F.text)
+async def sea_details_msg(msg:Message,state:FSMContext):
+    d=await state.get_data(); comment='-' if (msg.text or '').strip()=='-' else (msg.text or '').strip(); d['comment']=comment
+    app_id,_=await create_application('sea',msg.from_user.id,d,topic_key='sea_events')
+    await state.clear(); await msg.answer(f'({{20}})Заявка опубликована в теме «∆Морские ивенты(https://t.me/hubblox/1232)∆».')
+
+@dp.callback_query(F.data.startswith("raid_fruit_"))
+async def raid_fruit_cb(cb:CallbackQuery,state:FSMContext):
+    key=cb.data.removeprefix('raid_fruit_')
+    if key not in RAID_FRUITS: await cb.answer('Фрукт не найден.',show_alert=True); return
+    name,skills=RAID_FRUITS[key]
+    await state.update_data(raid_fruit=key,selected_skills=[]); await state.set_state(RaidState.waiting_skills)
+    fruit_id=await get_config(f'custom_emoji_fruit_{key}')
+    icon=f'<tg-emoji emoji-id="{esc(fruit_id)}">🍎</tg-emoji>' if fruit_id else ''
+    await cb.message.edit_text(f'{icon}Выберите навыки для пробуждения.\n"Можно выбрать от 1 до {len(skills)} навыков."',reply_markup=raid_skill_keyboard(key,set())); await cb.answer()
+
+@dp.callback_query(F.data.startswith("raid_skill_"))
+async def raid_skill_cb(cb:CallbackQuery,state:FSMContext):
+    parts=(cb.data or '').split('_'); key=parts[2] if len(parts)>=3 else ''; skill='_'.join(parts[3:]) if len(parts)>=4 else ''
+    data=await state.get_data(); fruit=data.get('raid_fruit')
+    if fruit!=key or key not in RAID_FRUITS or skill not in RAID_FRUITS[key][1]: await cb.answer('Сессия рейда истекла.',show_alert=True); return
+    selected=set(data.get('selected_skills') or [])
+    maxn=len(RAID_FRUITS[key][1])
+    if skill in selected: selected.remove(skill)
+    elif len(selected)>=maxn: await cb.answer(f'Максимум {maxn} навыков.',show_alert=True); return
+    else: selected.add(skill)
+    await state.update_data(selected_skills=list(selected)); await cb.message.edit_reply_markup(reply_markup=raid_skill_keyboard(key,selected)); await cb.answer()
+
+@dp.callback_query(F.data == 'raid_back_fruits')
+async def raid_back_fruits_cb(cb:CallbackQuery,state:FSMContext):
+    await state.clear(); await cb.message.edit_text('({69})<b>Создание рейда</b>\n\nДальше выбор фруктов.',reply_markup=await raid_fruit_keyboard_async()); await cb.answer()
+
+@dp.callback_query(F.data.startswith('raid_next_'))
+async def raid_next_cb(cb:CallbackQuery,state:FSMContext):
+    data=await state.get_data(); key=data.get('raid_fruit'); selected=data.get('selected_skills') or []
+    if key not in RAID_FRUITS or not selected: await cb.answer('Выберите хотя бы 1 навык.',show_alert=True); return
+    await state.set_state(RaidState.waiting_balance)
+    await cb.message.edit_text('({24})Укажите ваш баланс фрагментов.\n"Баланс будет округлён вниз до 1000-ых.\nОтправьте только число."'); await cb.answer()
+
+@dp.message(RaidState.waiting_balance,F.text)
+async def raid_balance_msg(msg:Message,state:FSMContext):
+    raw=(msg.text or '').strip().replace(' ','')
+    try: val=int(raw)
+    except ValueError: await msg.answer('({8})Отправьте только число.'); return
+    if val<0: await msg.answer('({8})Баланс не может быть отрицательным.'); return
+    val=(val//1000)*1000
+    data=await state.get_data(); key=data['raid_fruit']; name=RAID_FRUITS[key][0]; data['balance']=val
+    if key in ('phoenix','dough'):
+        await state.update_data(**data); await state.set_state(RaidState.waiting_chip)
+        fruit_id=await get_config(f'custom_emoji_fruit_{key}'); icon=f'<tg-emoji emoji-id="{esc(fruit_id)}">🍎</tg-emoji>' if fruit_id else ''
+        await msg.answer(f'{icon}{name}\nВы можете купить специальный чип?\nХотите купить чип?',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[ _btn('({{20}}) Да','raid_chip_yes') , _btn('({{14}})Нет','raid_chip_no') ]]))
+    else:
+        await state.update_data(**data); await state.set_state(RaidState.waiting_comment); await msg.answer('({24})Напишите комментарий к рейду.\nЕсли комментарий не нужен — отправьте > - <.')
+
+@dp.callback_query(F.data.startswith('raid_chip_'))
+async def raid_chip_cb(cb:CallbackQuery,state:FSMContext):
+    data=await state.get_data(); data['chip']=cb.data.endswith('_yes'); await state.update_data(**data); await state.set_state(RaidState.waiting_comment); await cb.message.edit_text('({24})Напишите комментарий к рейду.\nЕсли комментарий не нужен — отправьте > - <.'); await cb.answer()
+
+@dp.message(RaidState.waiting_comment,F.text)
+async def raid_comment_msg_new(msg:Message,state:FSMContext):
+    data=await state.get_data(); data['comment']='-' if (msg.text or '').strip() in ('-','> - <') else (msg.text or '').strip(); data['fruit_name']=RAID_FRUITS[data['raid_fruit']][0]
+    app_id,_=await create_application('raid',msg.from_user.id,data,topic_key='raids')
+    await state.clear(); await msg.answer('({20})Заявка на рейд опубликована в теме «∆Рейды(https://t.me/hubblox/17)∆».')
+
+@dp.callback_query(F.data == 'trade_create')
+async def trade_create_cb(cb:CallbackQuery,state:FSMContext):
+    await state.set_state(TradeState.waiting_trade); await cb.message.edit_text('({48})<b>Создание трейда</b>\n\nНапишите, что отдаёте и что хотите получить.\nНапример: «Китсуне на Дракон».',reply_markup=back_menu_keyboard()); await cb.answer()
+
+@dp.message(TradeState.waiting_trade,F.text)
+async def trade_create_msg(msg:Message,state:FSMContext):
+    payload={'text':msg.text.strip()}; app_id,_=await create_application('trade',msg.from_user.id,payload,topic_key='trades'); await state.clear(); await msg.answer('({20})Трейд опубликован в теме ∆«Трейды»(https://t.me/hubblox/8)∆.')
+
+@dp.callback_query(F.data == 'trade_find')
+async def trade_find_cb_new(cb:CallbackQuery,state:FSMContext):
+    await state.set_state(TradeState.waiting_fruit); await cb.message.edit_text('({39}) <b>Поиск трейда</b>\n\n"Назовите фрукт/геймпасс/скин, который вы ищете.\nНапример: тесто, алмаз, свет, дрожь."',reply_markup=back_menu_keyboard()); await cb.answer()
+
+@dp.message(TradeState.waiting_fruit,F.text)
+async def trade_find_msg(msg:Message,state:FSMContext):
+    q=(msg.text or '').strip().lower(); rows=await require_db().fetch("SELECT id,user_id,payload,chat_message_id FROM applications WHERE kind='trade' AND status='active' AND payload::text ILIKE $1 ORDER BY id DESC LIMIT 20",f'%{q}%')
+    if not rows: await msg.answer('({39})Найдено трейдов: 0'); await state.clear(); return
+    text='({39})<b>Найдено трейдов:</b>\n'+SEPARATOR+'\n'; buttons=[]
+    for r in rows:
+        payload=as_payload(r['payload']); text+=f'({{48}})Трейд #{r["id"]}\n({{44}})Автор: {r["user_id"]}\n{esc(payload.get("text",""))}\n\n';
+        if r['chat_message_id']:
+            url=message_url(int(await get_config('hublox_id')),int(r['chat_message_id'])) if await get_config('hublox_id') else None
+            if url: buttons.append([InlineKeyboardButton(text='({26})Перейти к сообщению',url=url)])
+    buttons.append([_btn('({63}) Назад','menu_back')]); await msg.answer(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await state.clear()
+
+@dp.callback_query(F.data == 'trade_active')
+async def trade_active_cb(cb:CallbackQuery):
+    rows=await require_db().fetch("SELECT id,payload FROM applications WHERE kind='trade' AND status='active' AND user_id=$1 ORDER BY id DESC",cb.from_user.id)
+    text='({{62}})<b>Активные трейды</b>\n\n'+('Нет активных трейдов.' if not rows else '\n'.join(f'({{48}})Трейд #{r["id"]}\n{esc(as_payload(r["payload"]).get("text",""))}' for r in rows))
+    await cb.message.edit_text(text,reply_markup=back_menu_keyboard()); await cb.answer()
+
+@dp.callback_query(F.data.startswith('trial_race_'))
+async def trial_race_cb(cb:CallbackQuery,state:FSMContext):
+    races={'human':'Хуман','cyborg':'Киборг','angel':'Ангел','shark':'Шарк','ghoul':'Гуль','mink':'Минк'}; key=cb.data.removeprefix('trial_race_'); race=races.get(key)
+    if not race: await cb.answer(); return
+    await state.update_data(race=race); await state.set_state(TrialState.waiting_comment); await cb.message.edit_text(f'({{71}})<b>Создание Триала</b>\n\nВыбрана раса: <b>{race}</b>\n\n({{24}})Напишите комментарий к заявке. Если не нужен — отправьте -.'); await cb.answer()
+
+@dp.message(TrialState.waiting_comment,F.text)
+async def trial_comment_msg(msg:Message,state:FSMContext):
+    data=await state.get_data(); data['comment']='-' if (msg.text or '').strip()=='-' else (msg.text or '').strip(); app_id,_=await create_application('trial',msg.from_user.id,data,topic_key='trials'); await state.clear(); await msg.answer(f'({{20}})Заявка на триал #{app_id:05d} опубликована.')
+
+@dp.callback_query(F.data.startswith('app_help_'))
+async def app_help_cb(cb:CallbackQuery,state:FSMContext):
+    app_id=int(cb.data.removeprefix('app_help_')); row=await require_db().fetchrow("SELECT user_id,status,kind FROM applications WHERE id=$1",app_id)
+    if not row or row['status']!='active': await cb.answer('Заявка уже закрыта.',show_alert=True); return
+    if row['user_id']==cb.from_user.id: await cb.answer('Нельзя помочь со своей заявкой.',show_alert=True); return
+    await state.update_data(help_app=app_id); await cb.message.answer('Вы уверены, что хотите помочь с этой заявкой({{46}})',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[_btn('({{20}}) Подтвердить',f'app_help_confirm_{app_id}'),_btn('({{14}})Отмена','app_help_cancel')]])); await cb.answer()
+
+@dp.callback_query(F.data.startswith('app_help_confirm_'))
+async def app_help_confirm_cb(cb:CallbackQuery):
+    app_id=int(cb.data.removeprefix('app_help_confirm_')); row=await require_db().fetchrow("SELECT user_id,status,kind FROM applications WHERE id=$1",app_id)
+    if not row or row['status']!='active': await cb.answer('Заявка уже занята.',show_alert=True); return
+    await require_db().execute("UPDATE applications SET claimed_by=$2,claimed_at=$3 WHERE id=$1 AND status='active'",app_id,cb.from_user.id,now_ts())
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer(f'Заявка #{app_id:05d} взята.')
+    await require_db().execute("UPDATE applications SET status='active' WHERE id=$1",app_id)
+    try:
+        await require_bot().send_message(int(row['user_id']),f'({{19}})На вашу заявку #{app_id:05d} откликнулся @{esc(cb.from_user.username or cb.from_user.full_name)}.\nRoblox: RobloxName\n"Роль/ивент: {esc(row["kind"])}"')
+    except Exception: pass
+
+@dp.callback_query(F.data == 'app_help_cancel')
+async def app_help_cancel_cb(cb:CallbackQuery): await cb.answer('Отменено.')
+
+@dp.callback_query(F.data.startswith('app_finish_'))
+async def app_finish_cb(cb:CallbackQuery):
+    app_id=int(cb.data.removeprefix('app_finish_')); await require_db().execute("UPDATE applications SET status='finished' WHERE id=$1 AND user_id=$2",app_id,cb.from_user.id); await cb.answer('Заявка завершена.'); await menu_applications_cb(cb)
+
+@dp.callback_query(F.data == 'profile_edit')
+async def profile_edit_cb(cb:CallbackQuery,state:FSMContext):
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🏷 Тег',callback_data='profile_set_tag')],[InlineKeyboardButton(text='💬 Комментарий',callback_data='profile_set_comment')],[InlineKeyboardButton(text='🎮 Roblox',callback_data='profile_set_roblox')],[_btn('({63}) Назад','menu_profile')]])
+    await cb.message.edit_text('({24})<b>Редактировать профиль</b>\nВыберите поле:',reply_markup=kb); await cb.answer()
+
+@dp.callback_query(F.data.startswith('profile_set_'))
+async def profile_set_cb(cb:CallbackQuery,state:FSMContext):
+    what=cb.data.removeprefix('profile_set_'); states={'tag':ProfileState.waiting_tag,'comment':ProfileState.waiting_comment,'roblox':ProfileState.waiting_roblox}
+    st=states.get(what)
+    if not st: return
+    await state.set_state(st); await cb.message.edit_text('Отправьте новое значение одним сообщением.\n/cancel — отмена'); await cb.answer()
+
+@dp.message(ProfileState.waiting_tag,F.text)
+async def profile_tag_msg(msg:Message,state:FSMContext): await require_db().execute('UPDATE users SET profile_tag=$2 WHERE user_id=$1',msg.from_user.id,msg.text.strip()); await state.clear(); await msg.answer('({20})Тег профиля обновлён.')
+@dp.message(ProfileState.waiting_comment,F.text)
+async def profile_comment_msg(msg:Message,state:FSMContext): await require_db().execute('UPDATE users SET profile_comment=$2 WHERE user_id=$1',msg.from_user.id,msg.text.strip()); await state.clear(); await msg.answer('({20})Комментарий профиля обновлён.')
+@dp.message(ProfileState.waiting_roblox,F.text)
+async def profile_roblox_msg(msg:Message,state:FSMContext): await require_db().execute('UPDATE users SET roblox_username=$2 WHERE user_id=$1',msg.from_user.id,msg.text.strip()); await state.clear(); await msg.answer('({20})Ник Roblox обновлён.')
 
 @dp.callback_query(F.data.startswith("verify_user_"))
 async def verify_user_cb(cb: CallbackQuery):
@@ -3886,6 +4395,30 @@ async def unknown_callback_cb(cb: CallbackQuery):
     """Последний предохранитель: Telegram никогда не оставляет кнопку во "вечном" состоянии загрузки."""
     LOGGER.warning("Unhandled callback_data=%r from user=%s", cb.data, cb.from_user.id if cb.from_user else None)
     await cb.answer("⚠️ Эта кнопка ещё не подключена.", show_alert=True)
+
+
+@dp.chat_member()
+async def admin_promotion_watch(update: ChatMemberUpdated):
+    """Синхронизирует повышение в Telegram: новый админ получает роль 1, список обновляется, ссылка в админ-чат отправляется один раз."""
+    chat_id=update.chat.id
+    linked=await get_config('hublox_id')
+    linked_admin=await get_config('hubsup_id')
+    if str(chat_id) not in {str(linked or ''),str(linked_admin or '')}: return
+    member=update.new_chat_member
+    if member.status not in ('administrator','creator'): return
+    uid=member.user.id
+    if uid==CREATOR_ID: return
+    existing=await get_moderator_level(uid)
+    if existing==0:
+        await set_moderator_level(uid,1,member.user.username)
+        await update_admin_list()
+        admin_chat=await get_config('hubsup_id')
+        if admin_chat:
+            try:
+                link=await require_bot().create_chat_invite_link(int(admin_chat),member_limit=1)
+                await require_bot().send_message(uid,f'Вас обнаружили как нового администратора HuBBlox.\nВступите в чат администрации по одноразовой ссылке:\n{esc(link.invite_link)}')
+            except Exception:
+                LOGGER.info('Не удалось отправить ссылку новому админу',exc_info=True)
 
 
 async def main() -> None:
