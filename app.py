@@ -849,7 +849,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.20.0"
+BOT_VERSION = "2.21.0"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -998,32 +998,12 @@ BUTTON_EMOJI_FALLBACK: dict[int, str] = {
 }
 
 def render_button_text(text: str) -> str:
-    """Рендерит кнопку без Telegram HTML-тегов. ({N}) -> Unicode-шпаргалка."""
+    """Очищает служебный ({N}) из текста кнопки. Сам Premium Emoji ставится как icon_custom_emoji_id."""
     text = editable_text(text) or ""
-    def repl(match):
-        spec = match.group(1)
-        out = []
-        for token in re.split(r'([._])', spec):
-            if token in (".", ""):
-                continue
-            if token == "_":
-                if out:
-                    out.append("  ")
-                continue
-            rest = token
-            while rest:
-                n = None
-                width = 0
-                if len(rest) >= 2 and rest[:2].isdigit() and 1 <= int(rest[:2]) <= 99:
-                    n, width = int(rest[:2]), 2
-                elif rest[:1].isdigit():
-                    n, width = int(rest[:1]), 1
-                if n is None:
-                    break
-                out.append(BUTTON_EMOJI_FALLBACK.get(n, ""))
-                rest = rest[width:]
-        return "".join(out)
-    return re.sub(r'\(\{([^{}]+)\}\)', repl, text)
+    # В тексте кнопки служебный placeholder не дублируем: Premium Emoji
+    # передаётся Telegram отдельным icon_custom_emoji_id. Поэтому на кнопке
+    # всегда остаётся ровно один эмодзи, а ({N}) никогда не показывается.
+    return re.sub(r'\(\{[^{}]+\}\)', '', text).strip()
 
 
 def _btn(text: str, callback_data: str, *, icon_key: str | None = None, url: str | None = None) -> InlineKeyboardButton:
@@ -1833,8 +1813,8 @@ async def request_creator_admin_punishment(msg: Message, target_id: int, action:
     target_known=await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1",target_id)
     target=user_mention(target_id,target_known["username"] if target_known else None,target_known["full_name"] if target_known else None)
     keyboard=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="({34})Перейти к сообщению",url=message_url(msg.chat.id,msg.reply_to_message.message_id) if msg.reply_to_message and message_url(msg.chat.id,msg.reply_to_message.message_id) else "https://t.me/duosup_bot")],
-        [InlineKeyboardButton(text="Завершить дело ({20})",callback_data=f"adminreq_reject_{row['id']}")]
+        [ _btn("({34})Перейти к сообщению", "", url=message_url(msg.chat.id,msg.reply_to_message.message_id) if msg.reply_to_message and message_url(msg.chat.id,msg.reply_to_message.message_id) else "https://t.me/duosup_bot") ],
+        [_btn("Завершить дело ({20})", callback_data=f"adminreq_reject_{row['id']}")]
     ])
     text=(
         '**Админ пытается наказать равного/старшего**\n'
@@ -3306,7 +3286,7 @@ def premmod_keyboard(rights: dict[str,bool]) -> InlineKeyboardMarkup:
     for key,label in PREMMOD_RIGHTS.items():
         mark = "✅ " if rights.get(key) else ""
         rows.append([InlineKeyboardButton(text=mark+label, callback_data=f"premright_{key}")])
-    rows.append([InlineKeyboardButton(text="({20})Готово", callback_data="premright_done")])
+    rows.append([_btn("({20})Готово", "premright_done")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 @dp.message(Command("premmod"))
@@ -3386,31 +3366,76 @@ async def premmod_right_cb(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 # ========================== НАКАЗАНИЯ ==========================
+async def _parse_count_token(token: str | None) -> int | None:
+    if not token:
+        return None
+    m = re.fullmatch(r"\(?([0-9]+)\)?", token.strip())
+    return int(m.group(1)) if m else None
+
+
 async def parse_target_and_reason(msg: Message):
+    """Разбирает наказания в удобных формах.
+
+    /warn (2) причина                 — ответом на сообщение цели
+    /warn @username (2) причина       — без ответа
+    /warn (2) @username причина       — совместимость
+    /unwarn (2) причина               — ответом на сообщение цели
+    /unwarn @username (2) причина     — без ответа
+    /unwarn (2) @username причина     — совместимость
+    """
     payload = command_payload(msg).strip()
     command = (msg.text or "").split()[0].split("@")[0].lower() if msg.text else ""
+    parts = payload.split()
 
     if command == "/warn":
-        parts = payload.split(maxsplit=2)
         if msg.reply_to_message:
-            count_token = parts[0] if parts else ""
-            reason = parts[1] if len(parts) >= 2 else ""
+            count = await _parse_count_token(parts[0] if parts else None)
+            reason = " ".join(parts[1:]).strip() if count is not None else ""
             target = await resolve_user(msg)
-            return (*target, reason.strip(), count_token)
-        if len(parts) < 3:
-            return None, None, None, "", None
-        target = await resolve_user(msg, parts[1])
-        return (*target, parts[2].strip(), parts[0])
+            return (*target, reason, str(count) if count is not None else "")
+
+        if len(parts) < 2:
+            return None, None, None, "", ""
+        # Основной формат: @username (2) причина
+        target_token = parts[0]
+        count = await _parse_count_token(parts[1])
+        reason_start = 2
+        # Совместимый формат: (2) @username причина
+        if count is None:
+            count = await _parse_count_token(parts[0])
+            if count is not None and len(parts) >= 3:
+                target_token = parts[1]
+                reason_start = 2
+        if count is None or not target_token:
+            return None, None, None, "", ""
+        target = await resolve_user(msg, target_token)
+        reason = " ".join(parts[reason_start:]).strip()
+        return (*target, reason, str(count))
 
     if command == "/unwarn":
-        parts = payload.split(maxsplit=1)
         if msg.reply_to_message:
+            count = await _parse_count_token(parts[0] if parts else None)
+            reason = " ".join(parts[1:]).strip() if count is not None else ""
             target = await resolve_user(msg)
-            return (*target, parts[0] if parts else "")
+            return (*target, reason, str(count) if count is not None else "")
+
         if len(parts) < 2:
-            return None, None, None, ""
-        target = await resolve_user(msg, parts[1])
-        return (*target, parts[0])
+            return None, None, None, "", ""
+        # Основной формат: @username (2) [причина]
+        target_token = parts[0]
+        count = await _parse_count_token(parts[1])
+        reason_start = 2
+        # Совместимый формат: (2) @username [причина]
+        if count is None:
+            count = await _parse_count_token(parts[0])
+            if count is not None and len(parts) >= 2:
+                target_token = parts[1]
+                reason_start = 2
+        if count is None:
+            return None, None, None, "", ""
+        target = await resolve_user(msg, target_token)
+        reason = " ".join(parts[reason_start:]).strip()
+        return (*target, reason, str(count))
 
     # /ban and /unban: reply => reason; no reply => target + reason.
     if msg.reply_to_message:
@@ -3448,7 +3473,7 @@ async def warn_cmd(msg: Message):
             '• С ответом на сообщение:\n'
             '    //warn (n) <причина>/\n'
             '• Без ответа:\n'
-            '    //warn (n) @username <причина>/"\n'
+            '    //warn @username (n) <причина>/"\n'
             '({19})Если нашли ошибки в команде свяжитесь с нами.\n'
             '∆Contact Us(https://t.me/duosup_bot)∆'
         )
@@ -3579,7 +3604,7 @@ async def unwarn_cmd(msg: Message):
     actor=msg.from_user
     if not actor or not await check_permission(actor.id,2):
         await msg.answer('({15})У вас недостаточно прав для снятия варнов.'); return
-    target_id,username,full_name,count_token=await parse_target_and_reason(msg)
+    target_id,username,full_name,unwarn_reason,count_token=await parse_target_and_reason(msg)
     if target_id is None or not str(count_token).isdigit():
         await msg.answer('({8})**Ошибка снятие варна**\n'
                          '"**Возможные причины**\n'
@@ -3594,7 +3619,7 @@ async def unwarn_cmd(msg: Message):
                          '• С ответом на сообщение:\n'
                          '    //unwarn (n)/\n'
                          '• Без ответа:\n'
-                         '    //unwarn (n) @username/"\n'
+                         '    //unwarn @username (n) [причина]/"\n'
                          '({19})Если нашли ошибки в команде свяжитесь с нами.\n∆Contact Us(https://t.me/duosup_bot)∆'); return
     n=int(count_token)
     current=await get_user_warns(target_id)
@@ -3617,9 +3642,11 @@ async def unwarn_cmd(msg: Message):
     try: await clear_restrictions(target_chat,target_id)
     except Exception: pass
     mention=user_mention(target_id,username,full_name)
+    reason_line = f'Причина снятия: «{esc(unwarn_reason)}»\n' if unwarn_reason else ''
     await msg.reply(
         '({1.31.7.32.4_3.2.6.7.1})\nС пользователя {mention}\n'
         f'"Количество снятых варнов: {n}\nОсталось варнов: {max(0,current-n)} /4\n'
+        f'{reason_line}'
         f'<b>ID</b> • /#{esc(number)}/\n'
         f'•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n'
         f'Пожалуйста ознакомтесь с правилами сообщества HuBBlox. ({33}) "'
@@ -3661,58 +3688,117 @@ async def unban_cmd(msg: Message):
         f'Пожалуйста ознакомтесь с правилами сообщества HuBBlox. ({33}) "'
     )
 async def profile_text(user_id: int):
-    row = await require_db().fetchrow(
-        "SELECT messages_count,joined_at,profile_tag,profile_comment,roblox_username,verified,warns,banned FROM users WHERE user_id=$1",
+    """Безопасный профиль: обязательные поля всегда показываются, необязательные — «не указано»."""
+    pool = require_db()
+    # known_users хранит последний известный username/имя даже если профиль не заполнен.
+    known = await pool.fetchrow(
+        "SELECT username, full_name FROM known_users WHERE user_id=$1", user_id
+    )
+    row = await pool.fetchrow(
+        "SELECT messages_count, joined_at, profile_tag, profile_comment, "
+        "roblox_username, verified, warns, banned FROM users WHERE user_id=$1",
         user_id,
     )
-    known = await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1", user_id)
+    moderator = await pool.fetchrow(
+        "SELECT role, level FROM moderators WHERE user_id=$1", user_id
+    )
+
     username = known["username"] if known else None
-    mention = user_mention(user_id, username, known["full_name"] if known else None)
+    full_name = known["full_name"] if known else None
+    mention = user_mention(user_id, username, full_name)
+
+    # Если пользователь ещё не попал в users, создаём базовую запись через remember_user,
+    # чтобы сообщения/дата вступления были постоянными.
+    if row is None:
+        # Только минимальные гарантированные данные, без изменения счётчика сообщений.
+        joined_at = int(datetime.now(timezone.utc).timestamp())
+        await pool.execute(
+            "INSERT INTO users(user_id, messages_count, joined_at) VALUES($1,0,$2) "
+            "ON CONFLICT(user_id) DO NOTHING",
+            user_id, joined_at,
+        )
+        row = await pool.fetchrow(
+            "SELECT messages_count, joined_at, profile_tag, profile_comment, "
+            "roblox_username, verified, warns, banned FROM users WHERE user_id=$1",
+            user_id,
+        )
+
     joined = "не указано"
     if row and row["joined_at"]:
-        try: joined = datetime.fromtimestamp(int(row["joined_at"]), tz=timezone.utc).strftime("%d.%m.%Y")
-        except Exception: pass
+        try:
+            joined = datetime.fromtimestamp(int(row["joined_at"]), tz=timezone.utc).strftime("%d.%m.%Y")
+        except Exception:
+            joined = "не указано"
+
+    messages_count = int(row["messages_count"] or 0) if row else 0
     warns = int(row["warns"] or 0) if row else 0
+    banned = bool(row["banned"]) if row else False
     roblox = row["roblox_username"] if row else None
     tag = row["profile_tag"] if row else None
     comment = row["profile_comment"] if row else None
-    moderator = await require_db().fetchrow("SELECT role,level FROM moderators WHERE user_id=$1", user_id)
-    display_tag = (moderator["role"] if moderator and moderator["role"] else tag) or "не указан"
-    achievements = await require_db().fetch("SELECT name FROM achievements WHERE user_id=$1 ORDER BY id", user_id)
-    ach = "\n".join(f"• {esc(a['name'])}" for a in achievements) if achievements else "• ..."
+    verified = bool(row["verified"]) if row else False
+    role = moderator["role"] if moderator and moderator["role"] else tag
+
     return (
-        '({44})Профиль\n'
+        '({44})**Профиль**\n\n'
         f'"Telegram: {mention}\n'
-        f'Roblox: {esc(roblox or "не указан")}\n'
-        f'Тег: {esc(tag or "не указан")}\n'
-        f'Варнов : {warns}/4\n'
-        f'Сообщений: {int(row["messages_count"] or 0) if row else 0}\n'
-        f'Комментарий: {esc(comment or "...")}\n'
+        f'Username: {("@" + esc(username)) if username else "не указано"}\n'
+        f'Сообщений: {messages_count}\n'
         f'В сообществе с: {joined}\n'
-        f'•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n'
-        f'🏆 Достижения:\n{ach}"'
+        f'Roblox: {esc(roblox or "не указано")}\n'
+        f'Тег: {esc(role or "не указан")}\n'
+        f'Комментарий: {esc(comment or "не указан")}\n'
+        f'Проверен: {"да" if verified else "нет"}\n'
+        f'Активные варны: {warns}/4\n'
+        f'Статус: {"заблокирован" if banned else "активен"}"'
     )
 
 
-
-# ========================== ГЛАВНОЕ МЕНЮ: ВСЕ CALLBACK ==========================
+# ========================== ГЛАВНОЕ МЕНЮ ==========================
 def back_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("({63}) Назад", "menu_back")],
     ])
 
 
+async def _profile_target_from_command(msg: Message):
+    """Цель /profile: ответ, @username/ID или автор команды."""
+    payload = command_payload(msg).strip()
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        user = msg.reply_to_message.from_user
+        await remember_user(user)
+        return user.id
+    if payload:
+        target_id, _, _ = await resolve_user(msg, payload.split()[0])
+        return target_id
+    if msg.from_user:
+        await remember_user(msg.from_user)
+        return msg.from_user.id
+    return None
+
+
+async def _show_profile(target_id: int, message: Message, *, edit: bool = False):
+    text = await profile_text(target_id)
+    rendered = render_premium_placeholders(text)
+    if edit:
+        await message.edit_text(rendered, reply_markup=back_menu_keyboard())
+    else:
+        await message.answer(rendered, reply_markup=back_menu_keyboard())
+
+
 @dp.message(Command("profile"))
 async def profile_cmd(msg: Message):
-    """Показывает профиль автора команды. Команда работает в ЛС и группах."""
     if not msg.from_user:
         return
     try:
-        text = await profile_text(msg.from_user.id)
-        await msg.answer(render_premium_placeholders(text), reply_markup=back_menu_keyboard())
+        target_id = await _profile_target_from_command(msg)
+        if target_id is None:
+            await msg.answer('({46})Не удалось найти пользователя. Укажите @username, ID или ответьте на его сообщение.')
+            return
+        await _show_profile(target_id, msg)
     except Exception:
-        LOGGER.exception("/profile failed for user %s", msg.from_user.id)
-        await msg.answer("({14})Не удалось открыть профиль. Попробуйте ещё раз.")
+        LOGGER.exception("/profile failed")
+        await msg.answer('({14})Не удалось открыть профиль. Попробуйте ещё раз.')
 
 
 @dp.callback_query(F.data == "menu_back")
@@ -3731,8 +3817,8 @@ async def menu_profile_cb(cb: CallbackQuery):
         await cb.answer("Пользователь не найден.", show_alert=True)
         return
     try:
-        text = await profile_text(cb.from_user.id)
-        await cb.message.edit_text(render_premium_placeholders(text), reply_markup=back_menu_keyboard())
+        await remember_user(cb.from_user)
+        await _show_profile(cb.from_user.id, cb.message, edit=True)
         await cb.answer()
     except Exception:
         LOGGER.exception("menu_profile failed for user %s", cb.from_user.id)
@@ -3742,67 +3828,6 @@ async def menu_profile_cb(cb: CallbackQuery):
 async def _simple_menu_cb(cb: CallbackQuery, title: str, body: str):
     await cb.message.edit_text(f"<b>{esc(title)}</b>\n\n{body}", reply_markup=back_menu_keyboard())
     await cb.answer()
-
-
-@dp.callback_query(F.data == "menu_sea")
-async def menu_sea_cb(cb: CallbackQuery):
-    await _simple_menu_cb(cb, "Морские ивенты", "Раздел подготовки морских ивентов. Скоро будет новая функция.")
-
-
-@dp.callback_query(F.data == "menu_raid")
-async def menu_raid_cb(cb: CallbackQuery):
-    await _simple_menu_cb(cb, "Создать рейд", "Создание заявки на рейд будет доступно после завершения этого раздела.")
-
-
-@dp.callback_query(F.data == "menu_trade")
-async def menu_trade_cb(cb: CallbackQuery):
-    await _simple_menu_cb(cb, "Создать трейд", "Создание заявки на трейд будет доступно после завершения этого раздела.")
-
-
-@dp.callback_query(F.data == "menu_trial")
-async def menu_trial_cb(cb: CallbackQuery):
-    await _simple_menu_cb(cb, "Создать триал", "Создание заявки на триал будет доступно после завершения этого раздела.")
-
-
-@dp.callback_query(F.data == "menu_apps")
-async def menu_apps_cb(cb: CallbackQuery):
-    await _simple_menu_cb(cb, "Мои заявки", "Сейчас у вас нет доступного списка заявок в этом разделе.")
-
-
-@dp.callback_query(F.data == "menu_active")
-async def menu_active_cb(cb: CallbackQuery):
-    if not cb.from_user:
-        await cb.answer("Пользователь не найден.", show_alert=True)
-        return
-    try:
-        warns = await get_user_warns(cb.from_user.id)
-        banned = await is_banned(cb.from_user.id)
-        status = "🔨 Заблокирован" if banned else "✅ Не заблокирован"
-        await _simple_menu_cb(cb, "Активные нарушения", f"Варны: <b>{warns}/4</b>\nСтатус: <b>{status}</b>")
-    except Exception:
-        LOGGER.exception("menu_active failed for user %s", cb.from_user.id)
-        await cb.answer("Не удалось получить нарушения.", show_alert=True)
-
-
-@dp.callback_query(F.data == "menu_appeal")
-async def menu_appeal_cb(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await cb.message.edit_text(
-        "📝 <b>Подача апелляции</b>\n\n"
-        "Используйте кнопку «Подать апелляцию» в сообщении наказания или команду /appeal в личных сообщениях.",
-        reply_markup=back_menu_keyboard(),
-    )
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "menu_question")
-async def menu_question_cb(cb: CallbackQuery):
-    await _simple_menu_cb(cb, "Вопрос | ответ", "Раздел вопросов и ответов пока находится в разработке.")
-
-
-@dp.callback_query(F.data == "menu_navigation")
-async def menu_navigation_cb(cb: CallbackQuery):
-    await _simple_menu_cb(cb, "Навигация и правила", "Раздел навигации и правил будет подключён отдельно.")
 
 
 @dp.callback_query(F.data == "menu_events")
