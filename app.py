@@ -850,7 +850,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.22.2"
+BOT_VERSION = "2.22.3"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -3846,7 +3846,12 @@ async def _profile_target_from_command(msg: Message):
 async def _show_profile(target_id: int, message: Message, *, edit: bool = False, owner: bool = False):
     text = await profile_text(target_id)
     rendered = render_premium_placeholders(text)
-    markup = profile_keyboard(owner)
+
+    # Кнопки профиля показываются только в личном чате с ботом.
+    # В группах/супергруппах чужой профиль остаётся обычным сообщением.
+    is_private_chat = bool(message.chat and message.chat.type == "private")
+    markup = profile_keyboard(owner) if is_private_chat else None
+
     if edit:
         await message.edit_text(rendered, reply_markup=markup)
     else:
