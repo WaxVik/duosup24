@@ -1,7 +1,3 @@
-from aiogram.client.default import Default
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import ChatJoinRequest
-import unicodedata
 import asyncio
 import html
 import json
@@ -19,10 +15,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import SimpleEventIsolation
-from aiogram.fsm.storage.base import BaseStorage
-from urllib.parse import urlsplit, unquote
-from contextlib import suppress
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
@@ -30,7 +23,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    ReplyParameters,
+    MessageEntity,
+    BotCommand,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -484,7 +478,7 @@ UI_TEXTS.update({
     "TEXT_0312": 'Duosup @%s запущен',  # Duosup @%s запущен
     "TEXT_0313": 'Переменная ',  # Переменная
     "TEXT_0314": ' должна быть целым числом',  # должна быть целым числом
-    "TEXT_0315": "            INSERT INTO moderators (user_id, username, level, role, lives, simulator_data, activity_month)\n            VALUES ($1, $2, 3, 'Создатель', 3, 0, to_char(NOW(), 'YYYY-MM'))\n            ON CONFLICT (user_id) DO UPDATE\n            SET username=EXCLUDED.username, level=3, role='Создатель'\n            ",  # INSERT INTO moderators (user_id, username, level, role, lives, simulator_data, activity_mo
+    "TEXT_0315": "            INSERT INTO moderators (user_id, username, level, role, lives, simulator_data, activity_month)\n            VALUES ($1, $2, 7, 'Создатель', 3, 0, to_char(NOW(), 'YYYY-MM'))\n            ON CONFLICT (user_id) DO UPDATE\n            SET username=EXCLUDED.username, level=7, role='Создатель', lives=3, activity_month=to_char(NOW(), 'YYYY-MM')\n            ",  # INSERT INTO moderators (user_id, username, level, role, lives, simulator_data, activity_mo
     "TEXT_0316": '⚠️ Административный чат не подключён. Запрос создателю отправить нельзя.',  # ⚠️ Административный чат не подключён. Запрос создателю отправить нельзя.
     "TEXT_0317": ' получает варн (',  # получает варн (
     "TEXT_0318": '/4)\nПричина: «',  # /4) Причина: «
@@ -829,15 +823,19 @@ _UI_TEXT_DEFAULTS = dict(UI_TEXTS)
 
 
 def user_custom_emoji_id(number: int) -> str | None:
+    """Возвращает ID из ручного списка PREMIUM_EMOJI."""
     try:
-        value = str(PREMIUM_EMOJI.get(int(number), '')).strip()
+        value = PREMIUM_EMOJI.get(int(number))
     except (TypeError, ValueError):
         return None
-    return value if value.isdigit() else None
+    return str(value).strip() if value else None
 
 
-def user_tg_emoji(number: int, fallback: str = '') -> str:
-    return custom_emoji_position(number, fallback)
+def user_tg_emoji(number: int, fallback: str = "") -> str:
+    eid = user_custom_emoji_id(number)
+    if not eid:
+        return fallback
+    return f'<tg-emoji emoji-id="{esc(eid)}">{fallback}</tg-emoji>'
 
 
 def env_int(name: str, default: int) -> int:
@@ -852,7 +850,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "3.0.1"
+BOT_VERSION = "2.22.0"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -889,44 +887,8 @@ warning_record_locks: dict[tuple[int, int], asyncio.Lock] = {}
 ban_target_locks: dict[tuple[int, int], asyncio.Lock] = {}
 command_cooldowns: dict[int, float] = {}
 
-class PostgresStorage(BaseStorage):
-    """FSM drafts share the same durable database as profiles and moderation."""
-    @staticmethod
-    def key_name(key):
-        return json.dumps([key.bot_id, key.chat_id, key.user_id, key.thread_id,
-                           key.business_connection_id, key.destiny], separators=(',', ':'))
-
-    async def set_state(self, key, state=None):
-        value = state.state if isinstance(state, State) else state
-        await require_db().execute('''INSERT INTO fsm_states(key,state,updated_at) VALUES($1,$2,$3)
-            ON CONFLICT(key) DO UPDATE SET state=EXCLUDED.state,updated_at=EXCLUDED.updated_at''',
-            self.key_name(key), value, now_ts())
-
-    async def get_state(self, key):
-        return await require_db().fetchval('SELECT state FROM fsm_states WHERE key=$1', self.key_name(key))
-
-    async def set_data(self, key, data):
-        await require_db().execute('''INSERT INTO fsm_states(key,data,updated_at) VALUES($1,$2::jsonb,$3)
-            ON CONFLICT(key) DO UPDATE SET data=EXCLUDED.data,updated_at=EXCLUDED.updated_at''',
-            self.key_name(key), json.dumps(dict(data), ensure_ascii=False), now_ts())
-
-    async def get_data(self, key):
-        value = await require_db().fetchval('SELECT data FROM fsm_states WHERE key=$1', self.key_name(key))
-        return json.loads(value) if isinstance(value, str) else dict(value or {})
-
-    async def update_data(self, key, data):
-        value = await require_db().fetchval('''INSERT INTO fsm_states(key,data,updated_at) VALUES($1,$2::jsonb,$3)
-            ON CONFLICT(key) DO UPDATE SET data=fsm_states.data || EXCLUDED.data,updated_at=EXCLUDED.updated_at
-            RETURNING data''', self.key_name(key), json.dumps(dict(data), ensure_ascii=False), now_ts())
-        return json.loads(value) if isinstance(value, str) else dict(value or {})
-
-    async def close(self):
-        pass  # main owns the shared pool
-
-
-storage = PostgresStorage()
-dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation())
-
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
 
 # ========================== ОБЩИЕ ФУНКЦИИ ==========================
@@ -951,10 +913,7 @@ def msk_time() -> str:
 
 
 def esc(value: object) -> str:
-    """Escape dynamic values, including template punctuation, before HTML rendering."""
-    return (html.escape(str(value), quote=True).replace('*', '&#42;')
-            .replace('_', '&#95;').replace('/', '&#47;').replace('∆', '&#8710;')
-            .replace('{', '&#123;').replace('}', '&#125;'))
+    return html.escape(str(value), quote=False)
 
 
 def user_mention(
@@ -972,11 +931,26 @@ def command_payload(message: Message) -> str:
 
 
 def extract_custom_emoji_id(msg: Message) -> str | None:
+    """Извлекает custom_emoji_id из одного Premium Emoji сообщения.
+
+    Premium Emoji в Telegram приходят не как обычный emoji-текст, а как
+    MessageEntity типа custom_emoji. Поэтому проверять только msg.text
+    недостаточно: у такого сообщения текст может выглядеть как обычный символ,
+    а сам ID находится в entity.custom_emoji_id.
+    """
     entities = list(msg.entities or []) + list(msg.caption_entities or [])
-    ids = [str(entity.custom_emoji_id) for entity in entities
-           if str(getattr(entity.type, 'value', entity.type)) == 'custom_emoji'
-           and getattr(entity, 'custom_emoji_id', None)]
-    return ids[0] if len(ids) == 1 and ids[0].isdigit() else None
+    ids: list[str] = []
+    for entity in entities:
+        entity_type = getattr(entity, "type", None)
+        if hasattr(entity_type, "value"):
+            entity_type = entity_type.value
+        if str(entity_type).lower() == "custom_emoji":
+            emoji_id = getattr(entity, "custom_emoji_id", None)
+            if emoji_id:
+                ids.append(str(emoji_id))
+    # Для настройки принимаем ровно один Premium Emoji.
+    unique = list(dict.fromkeys(ids))
+    return unique[0] if len(unique) == 1 else None
 
 
 def validate_reason(reason: str) -> str | None:
@@ -998,6 +972,7 @@ def message_url(chat_id: int, message_id: int) -> str | None:
 def custom_emoji(slot: str, fallback: str = "✨") -> str:
     """Возвращает HTML custom emoji, если для слота сохранён custom_emoji_id."""
     try:
+        emoji_id = None
         # get_config синхронно здесь вызвать нельзя, поэтому эта функция используется
         # только через async custom_emoji_html ниже.
         return fallback
@@ -1024,26 +999,35 @@ BUTTON_EMOJI_FALLBACK: dict[int, str] = {
 }
 
 def render_button_text(text: str) -> str:
-    text = editable_text(text) or ''
-    text = re.sub(r'\(\{[^{}]+\}\)', '', text)
-    return html.unescape(re.sub(r'<[^>]*>', '', text)).strip() or '▫️'
+    """Очищает служебный ({N}) из текста кнопки. Сам Premium Emoji ставится как icon_custom_emoji_id."""
+    text = editable_text(text) or ""
+    # В тексте кнопки служебный placeholder не дублируем: Premium Emoji
+    # передаётся Telegram отдельным icon_custom_emoji_id. Поэтому на кнопке
+    # всегда остаётся ровно один эмодзи, а ({N}) никогда не показывается.
+    return re.sub(r'\(\{[^{}]+\}\)', '', text).strip()
 
 
-
-def _btn(text: str, callback_data: str = '', *, icon_key: str | None = None, url: str | None = None) -> InlineKeyboardButton:
-    raw = editable_text(text) or ''
-    found = re.search(r'\(\{(\d+)(?:[._][0-9]+)*\}\)', raw)
-    position = int(found.group(1)) if found else SLOT_POSITION.get(icon_key)
-    values = {'text': render_button_text(raw)}
+def _btn(text: str, callback_data: str, *, icon_key: str | None = None, url: str | None = None) -> InlineKeyboardButton:
+    # В text НИКОГДА не отправляем <tg-emoji ...> и Premium ID.
+    # ({N}) остаётся только внутренней шпаргалкой и превращается в обычный символ.
+    kwargs = {"text": render_button_text(text)}
+    if callback_data:
+        kwargs["callback_data"] = callback_data
     if url:
-        values['url'] = url
-    elif callback_data:
-        values['callback_data'] = callback_data
-    emoji_id = user_custom_emoji_id(position) if position else None
-    if emoji_id:
-        values['icon_custom_emoji_id'] = emoji_id
-    return InlineKeyboardButton(**values)
-
+        kwargs["url"] = url
+    # Если Telegram Bot API поддерживает custom emoji-иконку кнопки, используем её.
+    # Сам текст при этом всё равно остаётся чистым и читаемым.
+    try:
+        m = re.search(r'\(\{(\d+)\}\)', text)
+        position = int(m.group(1)) if m else None
+        if icon_key:
+            position = SLOT_POSITION.get(icon_key) or position
+        emoji_id = user_custom_emoji_id(position) if position else None
+        if emoji_id:
+            kwargs["icon_custom_emoji_id"] = emoji_id
+    except Exception:
+        pass
+    return InlineKeyboardButton(**kwargs)
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -1062,20 +1046,14 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-PREMIUM_EMOJI_FALLBACK = dict(BUTTON_EMOJI_FALLBACK)
-# Telegram requires a regular emoji inside tg-emoji, including letter artwork.
-PREMIUM_EMOJI_FALLBACK.update({
-    **{n: '▫️' for n in (2, 3, 4, 5, 6, 7, 12, 13, 18, 31, 32, 35, 36, 41, 42, 43)},
-    1:'📍', 9:'🎁', 20:'✔️', 23:'▶️', 33:'🩸', 34:'➡️', 47:'🔴', 48:'😔',
-    50:'⚓', 52:'🌊', 60:'💬', 66:'🌋', 70:'💾', 73:'🖥',
-})
-
-def custom_emoji_position(position: int, fallback: str = '') -> str:
+def custom_emoji_position(position: int, fallback: str = "") -> str:
+    """Рендерит одну позицию из ручного PREMIUM_EMOJI."""
     emoji_id = user_custom_emoji_id(position)
-    glyph = fallback or PREMIUM_EMOJI_FALLBACK.get(position, '▫️')
-    safe_glyph = html.escape(glyph, quote=False)
-    return f'<tg-emoji emoji-id="{emoji_id}">{safe_glyph}</tg-emoji>' if emoji_id else safe_glyph
-
+    if emoji_id:
+        return f'<tg-emoji emoji-id="{esc(emoji_id)}">{fallback}</tg-emoji>'
+    # Если ID ещё не добавлен, ничего не показываем.
+    # Это важно: служебная запись ({N}) никогда не должна утечь пользователю.
+    return ""
 
 
 
@@ -1099,160 +1077,181 @@ def editable_text(text: str | None) -> str | None:
 
 
 def format_user_markup(text: str) -> str:
-    """Render authored templates while preserving HTML attributes and escaped values."""
+    """DuoSup syntax -> Telegram HTML.
+
+    **bold**, /italic/, _underline_, "quote" and ∆label(url)∆ are supported.
+    Quotes may span multiple lines and formatting inside quotes is preserved.
+    """
     if not isinstance(text, str):
         return text
-    protected = []
-    def hold(value):
-        protected.append(value)
-        return f'\x00HTML{len(protected)-1}\x00'
-    # Keep code blocks literal and protect supported tags before reading quotes.
-    text = re.sub(r'<(pre|code)\b[^>]*>.*?</\1>', lambda m: hold(m.group(0)), text, flags=re.S)
-    allowed = r'</?(?:b|strong|i|em|u|ins|s|strike|del|span|tg-spoiler|a|code|pre|blockquote|tg-emoji)(?:\s+[^<>]*?)?/?>'
-    text = re.sub(allowed, lambda m: hold(m.group(0)), text)
-    text = re.sub(r'\(\{[0-9]+(?:[._][0-9]+)*\}\)', lambda m: hold(m.group(0)), text)
-    def link(m):
-        return hold('<a href="' + html.escape(m.group(2), quote=True) + '">' + format_inline(m.group(1)) + '</a>')
-    text = re.sub(r'∆([^∆]+?)\((https?://[^)\s]+)\)∆', link, text)
-    text = re.sub(r'(?:https?://|tg://)[^\s<>\"\x00]+', lambda m: hold(html.escape(m.group(0), quote=False)), text)
-    text = re.sub(r'"([^"\x00]*(?:\x00HTML\d+\x00[^"\x00]*)*)"',
-                  lambda m: hold('<blockquote>' + format_inline(m.group(1)) + '</blockquote>'), text, flags=re.S)
-    text = format_inline(text)
-    for i in range(len(protected)-1, -1, -1):
-        text = text.replace(f'\x00HTML{i}\x00', protected[i])
-    return text
 
+    # Protect nothing permanently here: quote/link parsing happens before
+    # HTML tags are introduced, so quotes can safely contain Premium Emoji placeholders.
+    def inline(value: str) -> str:
+        value = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', value, flags=re.S)
+        value = re.sub(r'(?<!/)/([^/\n]+?)/(?!/)', r'<i>\1</i>', value)
+        value = re.sub(r'(?<!_)_(.+?)_(?!_)', r'<u>\1</u>', value, flags=re.S)
+        return value
 
+    # First convert quotes, including multiline quotes. A quote is everything
+    # between a pair of literal double quotes.
+    text = re.sub(r'"(.*?)"', lambda m: '<blockquote>' + m.group(1) + '</blockquote>', text, flags=re.S)
 
-def format_inline(value: str) -> str:
-    """Inline template markup; entities already escaped by esc remain untouched."""
-    # Escaping ampersands must retain existing named and numeric HTML entities.
-    value = re.sub(r'&(?!#\d+;|#x[0-9a-fA-F]+;|[A-Za-z][A-Za-z0-9]+;)', '&amp;', value)
-    value = value.replace('<', '&lt;').replace('>', '&gt;')
-    for pattern, tag in (
-        (r'\*\*(.+?)\*\*', 'b'),
-        (r'(?<![\w/:])/(?!/)([^/\n]+?)/(?=$|[\s.,!?;:])', 'i'),
-        (r'(?<!\w)_(?!_)(.+?)_(?!\w)', 'u'),
-    ):
-        value = re.sub(pattern, lambda m: f'<{tag}>{m.group(1)}</{tag}>', value, flags=re.S)
-    return value
+    # Then links. This also works inside blockquotes.
+    text = re.sub(
+        r'∆([^∆]+?)\((https?://[^)\s]+)\)∆',
+        lambda m: f'<a href="{esc(m.group(2))}">{m.group(1)}</a>',
+        text,
+    )
 
+    # Apply inline formatting only outside already-created HTML tags.
+    parts = re.split(r'(<[^>]+>)', text)
+    for i in range(0, len(parts), 2):
+        parts[i] = inline(parts[i])
+    return ''.join(parts)
 
 
 def render_premium_placeholders(text: str | None) -> str | None:
     if text is None or not isinstance(text, str):
         return text
-    text = format_user_markup(editable_text(text))
+    text = editable_text(text)
+    text = format_user_markup(text)
     parts = re.split(r'(<[^>]+>)', text)
     for i in range(0, len(parts), 2):
-        parts[i] = re.sub(r'\(\{([0-9]+(?:[._][0-9]+)*)\}\)',
-                          lambda m: custom_emoji_sequence(m.group(1)), parts[i])
+        value = parts[i]
+        parts[i] = re.sub(r'\(\{([^{}]+)\}\)', lambda m: custom_emoji_sequence(m.group(1)), value)
     return ''.join(parts)
-
 
 
 premiumize_text = render_premium_placeholders
 
 
 def _transform_markup(markup):
-    if markup is None or not isinstance(markup, InlineKeyboardMarkup):
-        return markup
-    copied = markup.model_copy(deep=True)
-    for row in copied.inline_keyboard:
-        for button in row:
-            raw = editable_text(button.text) or ''
-            match = re.search(r'\(\{(\d+)(?:[._][0-9]+)*\}\)', raw)
-            if match and not button.icon_custom_emoji_id:
-                button.icon_custom_emoji_id = user_custom_emoji_id(int(match.group(1)))
-            button.text = render_button_text(raw)
+    """Кнопки: служебный ({N}) становится одной Premium Emoji-иконкой.
+    В text кнопки никогда не попадает <tg-emoji> или сам ID.
+    """
+    if markup is None:
+        return None
+    try:
+        copied = markup.model_copy(deep=True)
+    except Exception:
+        copied = markup
+    try:
+        for row in copied.inline_keyboard:
+            for button in row:
+                if not getattr(button, 'text', None):
+                    continue
+                raw = button.text
+                m = re.search(r'\(\{(\d+)\}\)', raw)
+                if m:
+                    try:
+                        button.icon_custom_emoji_id = user_custom_emoji_id(int(m.group(1)))
+                    except Exception:
+                        pass
+                button.text = render_button_text(raw)
+    except Exception:
+        LOGGER.exception('Не удалось обработать Premium Emoji в inline-кнопке')
     return copied
 
 
-
-def _plain_telegram_text(text: str) -> str:
-    return html.unescape(re.sub(r'<[^>]*>', '', render_premium_placeholders(text)))
-
-
-def _without_premium(method):
-    result = method.model_copy(deep=True)
-    for name in ('text', 'caption'):
-        text = getattr(result, name, None)
-        if isinstance(text, str):
-            setattr(result, name, re.sub(r'</?tg-emoji\b[^>]*>', '', text))
-    media_items = getattr(result, 'media', None)
-    if media_items is not None:
-        items = media_items if isinstance(media_items, list) else [media_items]
-        transformed = [media.model_copy(update={'caption': re.sub(r'</?tg-emoji\b[^>]*>', '', media.caption)})
-                       if isinstance(getattr(media, 'caption', None), str) else media for media in items]
-        result.media = transformed if isinstance(media_items, list) else transformed[0]
-    markup = getattr(result, 'reply_markup', None)
-    if isinstance(markup, InlineKeyboardMarkup):
-        by_id = {value: PREMIUM_EMOJI_FALLBACK.get(key, '▫️') for key, value in PREMIUM_EMOJI.items()}
-        for row in markup.inline_keyboard:
-            for button in row:
-                if button.icon_custom_emoji_id:
-                    button.text = by_id.get(button.icon_custom_emoji_id, '▫️') + ' ' + button.text
-                    button.icon_custom_emoji_id = None
-    return result
+_ORIGINAL_BOT_SEND_MESSAGE = Bot.send_message
+_ORIGINAL_BOT_EDIT_MESSAGE_TEXT = Bot.edit_message_text
+_ORIGINAL_BOT_EDIT_MESSAGE_REPLY_MARKUP = getattr(Bot, 'edit_message_reply_markup', None)
+_ORIGINAL_BOT_ANSWER_CALLBACK_QUERY = getattr(Bot, 'answer_callback_query', None)
 
 
-class PremiumRequestMiddleware:
-    """Transform actual Telegram requests, including Message.answer/edit shortcuts."""
-    async def __call__(self, make_request, bot, method):
-        request = method.model_copy(deep=True)
-        if request.__api_method__ == 'answerCallbackQuery':
-            if isinstance(request.text, str):
-                request.text = _plain_telegram_text(request.text)
-        else:
-            for field, entity_field in (('text', 'entities'), ('caption', 'caption_entities')):
-                value = getattr(request, field, None)
-                if not isinstance(value, str) or getattr(request, entity_field, None):
-                    continue
-                if 'parse_mode' not in type(request).model_fields:
-                    continue
-                mode = getattr(request, 'parse_mode', None)
-                mode = bot.default.parse_mode if isinstance(mode, Default) else mode
-                if mode == ParseMode.HTML or mode == 'HTML':
-                    setattr(request, field, render_premium_placeholders(value))
-            media_items = getattr(request, 'media', None)
-            if media_items is not None:
-                transformed = []
-                for media in media_items if isinstance(media_items, list) else [media_items]:
-                    mode = getattr(media, 'parse_mode', None)
-                    mode = bot.default.parse_mode if isinstance(mode, Default) else mode
-                    if (isinstance(getattr(media, 'caption', None), str)
-                            and not getattr(media, 'caption_entities', None)
-                            and mode in (ParseMode.HTML, 'HTML')):
-                        media = media.model_copy(update={'caption': render_premium_placeholders(media.caption)})
-                    transformed.append(media)
-                request.media = transformed if isinstance(media_items, list) else transformed[0]
-        if 'reply_markup' in type(request).model_fields:
-            request.reply_markup = _transform_markup(request.reply_markup)
-        try:
-            return await make_request(bot, request)
-        except TelegramBadRequest as exc:
-            message = str(exc).lower()
-            if not any(token in message for token in ('custom emoji', 'custom_emoji', 'emoji_id', 'emoji-id', 'icon_custom')):
-                raise
-            fallback = _without_premium(request)
-            if fallback.model_dump() == request.model_dump():
-                raise
-            LOGGER.warning('Telegram rejected Premium Emoji; retrying with ordinary emoji: %s', exc)
-            return await make_request(bot, fallback)
+async def _premium_send_message(self, chat_id, text=None, *args, **kwargs):
+    if isinstance(text, str):
+        text = render_premium_placeholders(text)
+    if kwargs.get('reply_markup') is not None:
+        kwargs['reply_markup'] = _transform_markup(kwargs['reply_markup'])
+    return await _ORIGINAL_BOT_SEND_MESSAGE(self, chat_id, text, *args, **kwargs)
 
 
-def install_premium_rendering(bot: Bot) -> None:
-    if not any(isinstance(middleware, PremiumRequestMiddleware) for middleware in bot.session.middleware):
-        bot.session.middleware(PremiumRequestMiddleware())
+async def _premium_edit_message_text(self, chat_id, message_id, text, *args, **kwargs):
+    if isinstance(text, str):
+        text = render_premium_placeholders(text)
+    if kwargs.get('reply_markup') is not None:
+        kwargs['reply_markup'] = _transform_markup(kwargs['reply_markup'])
+    return await _ORIGINAL_BOT_EDIT_MESSAGE_TEXT(self, chat_id, message_id, text, *args, **kwargs)
+
+
+Bot.send_message = _premium_send_message
+Bot.edit_message_text = _premium_edit_message_text
+
+
+if _ORIGINAL_BOT_EDIT_MESSAGE_REPLY_MARKUP is not None:
+    async def _premium_edit_message_reply_markup(self, *args, **kwargs):
+        if kwargs.get('reply_markup') is not None:
+            kwargs['reply_markup'] = _transform_markup(kwargs['reply_markup'])
+        return await _ORIGINAL_BOT_EDIT_MESSAGE_REPLY_MARKUP(self, *args, **kwargs)
+    Bot.edit_message_reply_markup = _premium_edit_message_reply_markup
+
+
+if _ORIGINAL_BOT_ANSWER_CALLBACK_QUERY is not None:
+    async def _premium_answer_callback_query(self, callback_query_id, *args, **kwargs):
+        if isinstance(kwargs.get('text'), str):
+            kwargs['text'] = render_premium_placeholders(kwargs['text'])
+        return await _ORIGINAL_BOT_ANSWER_CALLBACK_QUERY(self, callback_query_id, *args, **kwargs)
+    Bot.answer_callback_query = _premium_answer_callback_query
+
+
+def _premiumize_kwargs(kwargs):
+    for key in ('caption', 'text'):
+        if isinstance(kwargs.get(key), str):
+            kwargs[key] = render_premium_placeholders(kwargs[key])
+    if kwargs.get('reply_markup') is not None:
+        kwargs['reply_markup'] = _transform_markup(kwargs['reply_markup'])
+    return kwargs
+
+
+def _wrap_media_method(name):
+    original = getattr(Bot, name, None)
+    if original is None:
+        return
+    async def wrapped(self, *args, **kwargs):
+        return await original(self, *args, **_premiumize_kwargs(kwargs))
+    setattr(Bot, name, wrapped)
+
+for _media_method in (
+    'send_photo', 'send_video', 'send_animation', 'send_document',
+    'send_audio', 'send_voice', 'send_video_note', 'send_paid_media',
+):
+    _wrap_media_method(_media_method)
+
 
 def custom_emoji_sequence(spec: str, fallback_map: dict[int, str] | None = None) -> str:
-    """Dots concatenate positions; underscores insert exactly one space."""
-    fallback_map = fallback_map or {}
-    if not re.fullmatch(r'[0-9]+(?:[._][0-9]+)*', spec):
-        return ''
-    return ' '.join(''.join(custom_emoji_position(int(n), fallback_map.get(int(n), ''))
-                            for n in group.split('.')) for group in spec.split('_'))
+    """Превращает ({8}) / ({1.3.12_7}) в Telegram custom emoji.
 
+    Номер — это только локальный ключ из PREMIUM_EMOJI. Сам номер никогда
+    не отправляется пользователю. '.' = без пробела, '_' = два пробела.
+    """
+    fallback_map = fallback_map or {}
+    out = []
+    for token in re.split(r'([._])', spec):
+        if token == '.':
+            continue
+        if token == '_':
+            if out: out.append('  ')
+            continue
+        if not token:
+            continue
+        # Токен обычно является одним числом. Если разделителя между двумя числами нет,
+        # поддерживаем greedy-разбор по 2 цифры, затем по 1.
+        rest = token
+        while rest:
+            n = None; width = 0
+            if len(rest) >= 2 and rest[:2].isdigit():
+                candidate = int(rest[:2])
+                if 1 <= candidate <= 99:
+                    n, width = candidate, 2
+            if n is None and rest[:1].isdigit():
+                n, width = int(rest[:1]), 1
+            if n is None:
+                break
+            out.append(custom_emoji_position(n, fallback_map.get(n, "")))
+            rest = rest[width:]
+    return "".join(out)
 
 
 def captcha_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -1305,261 +1304,75 @@ def appeal_keyboard(violation_number: str, violation_type: str = "warn") -> Inli
     )
 
 
-async def remember_user(user, *, count_message: bool=False, joined_at: int|None=None, source_message=None):
+async def remember_user(user, *, count_message: bool = False, joined_at: int | None = None) -> None:
     if user is None or user.is_bot:
         return
-    async with require_db().acquire() as conn,conn.transaction():
-        if source_message is not None:
-            count_message = bool(await conn.fetchval("INSERT INTO counted_messages(chat_id,message_id,created_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING 1",source_message[0],source_message[1],now_ts()))
-        await conn.execute("INSERT INTO users(user_id,messages_count,joined_at) VALUES($1,$2,$3) ON CONFLICT(user_id) DO UPDATE SET messages_count=users.messages_count+EXCLUDED.messages_count,joined_at=COALESCE(users.joined_at,EXCLUDED.joined_at)",user.id,int(count_message),joined_at)
-        if user.username:
-            await conn.execute("UPDATE known_users SET username=NULL WHERE LOWER(username)=LOWER($1) AND user_id<>$2",user.username,user.id)
-        await conn.execute("INSERT INTO known_users(user_id,username,full_name,updated_at) VALUES($1,$2,$3,$4) ON CONFLICT(user_id) DO UPDATE SET username=EXCLUDED.username,full_name=EXCLUDED.full_name,updated_at=EXCLUDED.updated_at",user.id,user.username,user.full_name,now_ts())
-
+    pool = require_db()
+    if count_message:
+        await pool.execute(
+            """
+            INSERT INTO users (user_id, messages_count, joined_at)
+            VALUES ($1, 1, $2)
+            ON CONFLICT (user_id) DO UPDATE
+            SET messages_count=users.messages_count + 1
+            """,
+            user.id, joined_at,
+        )
+    else:
+        await pool.execute(
+            """
+            INSERT INTO users (user_id, joined_at)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE
+            SET joined_at=COALESCE(users.joined_at, EXCLUDED.joined_at)
+            """,
+            user.id, joined_at,
+        )
+    await pool.execute(
+        """
+        INSERT INTO known_users (user_id, username, full_name, updated_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (user_id) DO UPDATE
+        SET username=EXCLUDED.username, full_name=EXCLUDED.full_name, updated_at=EXCLUDED.updated_at
+        """,
+        user.id, user.username, user.full_name, now_ts(),
+    )
 
 
 class RememberUserMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        user = getattr(event, 'from_user', None)
-        msg = event if isinstance(event, Message) else None
-        if msg and msg.sender_chat and msg.text and msg.text.startswith('/'):
-            await msg.answer('Команды от имени канала или анонимного администратора недоступны. Напишите от своего аккаунта.')
-            return
-        if msg and user:
-            hublox = await get_config('hublox_id')
-            in_main = bool(hublox and msg.chat.id == int(hublox))
-            await remember_user(user, source_message=(msg.chat.id,msg.message_id) if in_main else None)
-            if msg.reply_to_message and msg.reply_to_message.from_user:
-                await remember_user(msg.reply_to_message.from_user)
-            if await handle_automatic_warning(msg):
+        user = getattr(event, "from_user", None)
+        try:
+            event_message = event if isinstance(event, Message) else None
+            should_count = bool(
+                event_message
+                and event_message.chat
+                and event_message.chat.type in ("group", "supergroup")
+            )
+            if (
+                event_message
+                and event_message.text
+                and event_message.text.startswith("/")
+                and event_message.chat
+                and event_message.chat.type == "private"
+                and user
+                and user.id != CREATOR_ID
+                and await get_moderator_level(user.id) == 0
+                and is_command_spam_blocked(user.id)
+            ):
+                await event_message.answer("⏳ Не спамьте командами. Попробуйте через пару секунд.")
                 return
-        elif user:
-            await remember_user(user)
+            await remember_user(user, count_message=should_count)
+        except Exception:
+            LOGGER.exception("Не удалось обновить профиль пользователя")
         return await handler(event, data)
 
 
-def normalized_link(value: str):
-    value = value.strip().rstrip('.,!?:;')
-    if '://' not in value:
-        value = 'https://' + value
-    try:
-        parts = urlsplit(value)
-        host = (parts.hostname or '').encode('idna').decode('ascii').lower().rstrip('.')
-        if not host or parts.username or parts.password or parts.scheme not in ('http', 'https', 'tg'):
-            return None
-        if host in ('telegram.me', 'telegram.dog'):
-            host = 't.me'
-        path = parts.path
-        for _ in range(4):
-            decoded = unquote(path)
-            if decoded == path:
-                break
-            path = decoded
-        if '%' in path and unquote(path) != path:
-            return None
-        if '\\' in path or any(segment in ('.', '..') for segment in path.split('/')):
-            return None
-        return host, path.rstrip('/'), parts.query
-    except (ValueError, UnicodeError):
-        return None
-
-def link_is_allowed(url: str, whitelist) -> bool:
-    target = normalized_link(url)
-    if target is None:
-        return False
-    host, path, query = target
-    for item in whitelist:
-        allowed = normalized_link(item)
-        if not allowed:
-            continue
-        ahost, apath, aquery = allowed
-        if host != ahost:
-            continue
-        if apath and path != apath and not path.startswith(apath + '/'):
-            continue
-        if aquery and query != aquery:
-            continue
-        return True
-    return False
-
-def message_links(msg: Message) -> list[str]:
-    links = []
-    for text, entities in ((msg.text or '', msg.entities or []), (msg.caption or '', msg.caption_entities or [])):
-        for entity in entities:
-            if entity.type == 'text_link' and entity.url:
-                links.append(entity.url)
-            elif entity.type == 'url':
-                links.append(entity.extract_from(text))
-        links.extend(re.findall(r'(?i)(?:https?://|tg://|(?:www\.)|(?:t\.me/)|(?:telegram\.me/))[^\s<>]+', text))
-    return list(dict.fromkeys(links))
-
-async def handle_automatic_warning(msg: Message) -> bool:
-    if not msg.from_user or msg.from_user.is_bot or msg.sender_chat:
-        return False
-    hublox = await get_config('hublox_id')
-    if not hublox or msg.chat.id != int(hublox) or msg.message_thread_id in IGNORED_TOPICS:
-        return False
-    if await get_moderator_level(msg.from_user.id) > 0:
-        return False
-    links = message_links(msg)
-    if not links:
-        return False
-    rows = await require_db().fetch('SELECT value FROM link_whitelist')
-    whitelist = [r['value'] for r in rows]
-    if all(link_is_allowed(link, whitelist) for link in links):
-        return False
-    # One durable event per source message, including retried updates.
-    async with require_db().acquire() as conn, conn.transaction():
-        await conn.execute('SELECT pg_advisory_xact_lock($1)', msg.chat.id ^ msg.message_id)
-        if await conn.fetchval('SELECT 1 FROM auto_warning_events WHERE chat_id=$1 AND message_id=$2', msg.chat.id, msg.message_id):
-            return True
-        issued, count, number, error, ban_number = await issue_warning(
-            msg.chat.id, msg.from_user.id, '1.15 Запрещенная ссылка', require_bot().id,
-            msg.message_id, conn=conn)
-        if not issued:
-            if error:
-                LOGGER.warning('Automatic moderation failed for chat=%s message=%s: %s', msg.chat.id, msg.message_id, error)
-            return True
-        await conn.execute('INSERT INTO auto_warning_events(chat_id,message_id,warn_number) VALUES($1,$2,$3)',
-                           msg.chat.id, msg.message_id, number)
-        text = build_warn_msg(user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name), count,
-                              '1.15 Запрещенная ссылка', number)
-        text = text.replace('({1.3.12.13.2.7_3.2.6.7.1})', '({1.2.3.4.5.3.2.6.7.1})', 1)
-        await enqueue_delivery(conn,msg.chat.id,text,message_thread_id=msg.message_thread_id,
-                               reply_markup=appeal_keyboard(number),dedupe_key=f'auto-warn:{msg.chat.id}:{msg.message_id}',
-                               reply_to_message_id=msg.message_id)
-        if ban_number:
-            mention=user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)
-            await enqueue_delivery(conn,msg.chat.id,build_ban_msg(mention,'Достигнут лимит варнов (4/4)',ban_number),
-                message_thread_id=msg.message_thread_id,reply_markup=appeal_keyboard(ban_number,'ban'),
-                dedupe_key=f'auto-ban:{ban_number}')
-            await enqueue_delivery(conn,msg.from_user.id,build_ban_dm_msg('Достигнут лимит варнов (4/4)',ban_number),
-                reply_markup=appeal_keyboard(ban_number,'ban'),dedupe_key=f'auto-ban-dm:{ban_number}')
-    return True
-
-async def welcome_member(chat_id: int, user):
-    if user.is_bot:
-        return
-    await remember_user(user, joined_at=now_ts())
-    if await get_moderator_level(user.id) > 0:
-        return
-    async with require_db().acquire() as conn, conn.transaction():
-        await conn.execute('SELECT pg_advisory_xact_lock($1)', user.id)
-        pending = await conn.fetchrow('SELECT * FROM captcha_pending WHERE user_id=$1', user.id)
-        if pending and pending['chat_id'] == chat_id and now_ts()-pending['joined_at'] < 60:
-            return
-        await conn.execute('UPDATE users SET verified=FALSE WHERE user_id=$1', user.id)
-        await conn.execute('''INSERT INTO captcha_pending(user_id,chat_id,joined_at) VALUES($1,$2,$3)
-            ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,joined_at=EXCLUDED.joined_at''', user.id,chat_id,now_ts())
-        # A delivery failure must not strand a muted newcomer without a button.
-        await enqueue_delivery(conn,chat_id,
-            f'👋 Добро пожаловать, {user_mention(user.id,user.username,user.full_name)}!\n'
-            'Рады видеть вас в нашем сообществе.\nПожалуйста, подтвердите свой профиль.',
-            message_thread_id=TOPICS['welcome'] or None,reply_markup=captcha_keyboard(user.id),
-            dedupe_key=f'captcha:{chat_id}:{user.id}:{now_ts()}')
-        await require_bot().restrict_chat_member(chat_id,user.id,permissions=ChatPermissions(can_send_messages=False))
-
-async def handle_membership_event(update: ChatMemberUpdated):
-    hublox = await get_config('hublox_id')
-    if not hublox or update.chat.id != int(hublox):
-        return
-    old = update.old_chat_member
-    new = update.new_chat_member
-    old_in = old.status in ('member','administrator','creator') or (old.status=='restricted' and old.is_member)
-    new_in = new.status in ('member','administrator','creator') or (new.status=='restricted' and new.is_member)
-    if new_in and not old_in:
-        await welcome_member(update.chat.id,new.user)
-
-@dp.message(F.new_chat_members)
-async def new_members_msg(msg: Message):
-    hublox = await get_config('hublox_id')
-    if hublox and msg.chat.id == int(hublox):
-        for member in msg.new_chat_members:
-            await welcome_member(msg.chat.id,member)
-
-@dp.edited_message()
-async def edited_message_checked(msg: Message):
-    # Outer middleware checks edited links; commands are never executed on edit.
-    pass
-
-
 dp.message.outer_middleware(RememberUserMiddleware())
-dp.edited_message.outer_middleware(RememberUserMiddleware())
 dp.callback_query.outer_middleware(RememberUserMiddleware())
 
 
 # ========================== ИНИЦИАЛИЗАЦИЯ БД ==========================
-async def migrate_existing_data(conn):
-    """Additive, one-time repair; snapshot affected rows before changing them."""
-    name = 'duosup_3_preserve_data'
-    if await conn.fetchval('SELECT 1 FROM schema_migrations WHERE name=$1',name):
-        return
-    await conn.execute('''INSERT INTO migration_snapshots(name,payload,created_at)
-        SELECT $1,jsonb_build_object(
-            'moderators',COALESCE((SELECT jsonb_agg(to_jsonb(x)) FROM moderators x),'[]'::jsonb),
-            'users',COALESCE((SELECT jsonb_agg(to_jsonb(x)) FROM users x),'[]'::jsonb),
-            'ban_logs',COALESCE((SELECT jsonb_agg(to_jsonb(x)) FROM ban_logs x),'[]'::jsonb),
-            'appeals',COALESCE((SELECT jsonb_agg(to_jsonb(x)) FROM appeals x),'[]'::jsonb),
-            'applications',COALESCE((SELECT jsonb_agg(to_jsonb(x)) FROM applications x),'[]'::jsonb),
-            'admin_requests',COALESCE((SELECT jsonb_agg(to_jsonb(x)) FROM admin_punishment_requests x),'[]'::jsonb)
-        ),$2 ON CONFLICT(name) DO NOTHING''', name,now_ts())
-    await conn.execute('''UPDATE moderators SET level=CASE WHEN user_id=$1 THEN 3
-        WHEN level>=6 THEN 2 WHEN level>0 THEN 1 ELSE 0 END''',CREATOR_ID)
-    # Keep all old counters and advance past every historically allocated number.
-    for table,column,counter in (
-        ('warn_logs','warn_number','warn_counter'),('ban_logs','ban_number','ban_counter'),
-        ('unwarn_logs','unwarn_number','unwarn_counter'),('unban_logs','unban_number','unban_counter'),
-        ('appeals','appeal_number','appeal_counter'),('reports','report_number','report_counter'),
-        ('questions','question_number','question_counter')):
-        maximum = await conn.fetchval(f"SELECT MAX(NULLIF(regexp_replace({column},'[^0-9]','','g'),'')::bigint) FROM {table}")
-        await conn.execute('''INSERT INTO config(key,value) VALUES($1,$2)
-            ON CONFLICT(key) DO UPDATE SET value=GREATEST(
-                CASE WHEN config.value ~ '^[0-9]+$' THEN config.value::bigint ELSE 0 END,
-                EXCLUDED.value::bigint)::text''',counter,str(maximum or 0))
-    # Missing old log records are represented explicitly, never silently resetting a user's count.
-    rows = await conn.fetch('''SELECT u.user_id,u.warns,COUNT(w.id)::int AS logged
-        FROM users u LEFT JOIN warn_logs w ON w.user_id=u.user_id AND w.is_active
-        GROUP BY u.user_id,u.warns''')
-    main_chat = await conn.fetchval("SELECT value FROM config WHERE key='hublox_id'")
-    for row in rows:
-        for _ in range(max(0,int(row['warns'])-int(row['logged']))):
-            number=format_number(await next_number(conn,'warn_counter'))
-            await conn.execute('''INSERT INTO warn_logs(user_id,warn_number,reason,moderator_id,chat_id,created_at)
-                VALUES($1,$2,'Перенесённый активный варн из предыдущей версии',0,$3,$4)''',
-                row['user_id'],number,int(main_chat or 0),now_ts()-86401)
-        await conn.execute('UPDATE users SET warns=GREATEST(warns,$2) WHERE user_id=$1',row['user_id'],row['logged'])
-    # Prior releases had no active flag; use saved ban state plus latest ban per user.
-    await conn.execute('''UPDATE ban_logs b SET is_active=EXISTS(SELECT 1 FROM users u WHERE u.user_id=b.user_id AND u.banned)
-        AND b.id=(SELECT MAX(x.id) FROM ban_logs x WHERE x.user_id=b.user_id)''')
-    await conn.execute('''UPDATE ban_logs b SET source_warn_number=(SELECT w.warn_number FROM warn_logs w
-        WHERE w.user_id=b.user_id AND w.is_active ORDER BY w.created_at DESC,w.id DESC LIMIT 1)
-        WHERE b.is_active AND b.reason LIKE 'Достигнут лимит варнов%' ''')
-    legacy_banned = await conn.fetch('SELECT user_id FROM users u WHERE banned AND NOT EXISTS(SELECT 1 FROM ban_logs b WHERE b.user_id=u.user_id AND b.is_active)')
-    for user in legacy_banned:
-        number=format_number(await next_number(conn,'ban_counter'))
-        await conn.execute("INSERT INTO ban_logs(user_id,ban_number,reason,moderator_id,chat_id,created_at) VALUES($1,$2,'Перенесённый бан из предыдущей версии',0,$3,$4)",user['user_id'],number,int(main_chat or 0),now_ts())
-    # Infer only unexpired timed restrictions; do not reissue expired mutes.
-    await conn.execute('''UPDATE users u SET mute_until=t.until FROM (
-        SELECT w.user_id,MAX(w.created_at)+CASE WHEN COUNT(*)=2 THEN 300 ELSE 86400 END AS until
-        FROM warn_logs w WHERE w.is_active GROUP BY w.user_id HAVING COUNT(*) IN (2,3)) t
-        WHERE u.user_id=t.user_id AND NOT u.banned AND t.until>$1''',now_ts())
-    await conn.execute("UPDATE applications SET publication_state=CASE WHEN chat_message_id IS NOT NULL THEN 'published' ELSE 'pending' END")
-    if main_chat:
-        await conn.execute('UPDATE applications SET chat_id=$1 WHERE chat_id IS NULL',int(main_chat))
-    for kind,key in [('raid','raids'),('trade','trades'),('sea','sea_events'),('trial','trials')]:
-        await conn.execute('UPDATE applications SET topic_id=$2 WHERE kind=$1 AND topic_id IS NULL',kind,TOPICS[key])
-    await conn.execute('''INSERT INTO application_helpers(application_id,user_id,created_at)
-        SELECT id,claimed_by,COALESCE(claimed_at,created_at) FROM applications
-        WHERE claimed_by IS NOT NULL AND claimed_by<>user_id ON CONFLICT DO NOTHING''')
-    await conn.execute('''UPDATE appeals a SET status='legacy_duplicate' WHERE status='pending' AND EXISTS(
-        SELECT 1 FROM appeals b WHERE b.user_id=a.user_id AND b.violation_type=a.violation_type
-        AND b.violation_number=a.violation_number AND b.status='pending' AND b.id<a.id)''')
-    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS appeal_pending_unique ON appeals(user_id,violation_type,violation_number) WHERE status='pending'")
-    await conn.execute("UPDATE admin_punishment_requests a SET status='legacy_duplicate' WHERE EXISTS(SELECT 1 FROM admin_punishment_requests b WHERE b.chat_id=a.chat_id AND b.source_message_id=a.source_message_id AND b.id<a.id)")
-    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS admin_request_source_unique ON admin_punishment_requests(chat_id,source_message_id) WHERE source_message_id IS NOT NULL AND status<>'legacy_duplicate'")
-    await conn.execute('INSERT INTO schema_migrations(name,applied_at) VALUES($1,$2)',name,now_ts())
-
-
 async def init_db() -> None:
     global db
 
@@ -1721,49 +1534,7 @@ async def init_db() -> None:
         """,
     ]
 
-    statements.extend([
-        "CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY,applied_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS migration_snapshots(name TEXT PRIMARY KEY,payload JSONB NOT NULL,created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS fsm_states(key TEXT PRIMARY KEY,state TEXT,data JSONB NOT NULL DEFAULT '{}'::jsonb,updated_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS counted_messages(chat_id BIGINT,message_id BIGINT,created_at BIGINT NOT NULL,PRIMARY KEY(chat_id,message_id))",
-        "CREATE TABLE IF NOT EXISTS auto_warning_events(chat_id BIGINT,message_id BIGINT,warn_number TEXT,PRIMARY KEY(chat_id,message_id))",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS mute_until BIGINT",
-        "ALTER TABLE moderators ADD COLUMN IF NOT EXISTS custom_rights JSONB",
-        "ALTER TABLE moderators ADD COLUMN IF NOT EXISTS can_ban BOOL NOT NULL DEFAULT TRUE",
-        "ALTER TABLE ban_logs ADD COLUMN IF NOT EXISTS is_active BOOL NOT NULL DEFAULT TRUE",
-        "ALTER TABLE ban_logs ADD COLUMN IF NOT EXISTS source_warn_number TEXT",
-        "ALTER TABLE unwarn_logs ADD COLUMN IF NOT EXISTS removed_count INT NOT NULL DEFAULT 0",
-        "ALTER TABLE unwarn_logs ADD COLUMN IF NOT EXISTS remaining_count INT NOT NULL DEFAULT 0",
-        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS chat_id BIGINT",
-        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS topic_id BIGINT",
-        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS request_key TEXT",
-        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS publication_error TEXT",
-        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS publication_started_at BIGINT",
-        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS publication_state TEXT NOT NULL DEFAULT 'pending'",
-        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS render_dirty BOOL NOT NULL DEFAULT FALSE",
-        "CREATE UNIQUE INDEX IF NOT EXISTS application_request_unique ON applications(request_key) WHERE request_key IS NOT NULL",
-        "CREATE TABLE IF NOT EXISTS application_helpers(application_id BIGINT REFERENCES applications(id) ON DELETE CASCADE,user_id BIGINT,created_at BIGINT NOT NULL,PRIMARY KEY(application_id,user_id))",
-        "ALTER TABLE appeals ADD COLUMN IF NOT EXISTS decided_by BIGINT",
-        "ALTER TABLE appeals ADD COLUMN IF NOT EXISTS decided_at BIGINT",
-        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS creator_only BOOL NOT NULL DEFAULT FALSE",
-        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_at BIGINT",
-        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS answered_at BIGINT",
-        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS submission_key TEXT",
-        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS source_chat_id BIGINT",
-        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS source_message_id BIGINT",
-        "CREATE UNIQUE INDEX IF NOT EXISTS question_submission_unique ON questions(submission_key) WHERE submission_key IS NOT NULL",
-        "ALTER TABLE admin_punishment_requests ADD COLUMN IF NOT EXISTS decided_at BIGINT",
-        "CREATE TABLE IF NOT EXISTS admin_invites(invite_link TEXT PRIMARY KEY,user_id BIGINT NOT NULL,chat_id BIGINT NOT NULL,expires_at BIGINT NOT NULL,consumed BOOL NOT NULL DEFAULT FALSE)",
-        "CREATE TABLE IF NOT EXISTS admin_delivery_jobs(id BIGSERIAL PRIMARY KEY,dedupe_key TEXT UNIQUE,chat_id BIGINT NOT NULL,message_thread_id BIGINT,text TEXT NOT NULL,reply_markup JSONB,created_at BIGINT NOT NULL,next_attempt_at BIGINT NOT NULL,attempts INT NOT NULL DEFAULT 0,delivered_at BIGINT,last_error TEXT)",
-        "ALTER TABLE admin_delivery_jobs ADD COLUMN IF NOT EXISTS reply_to_message_id BIGINT",
-        "CREATE INDEX IF NOT EXISTS admin_delivery_pending ON admin_delivery_jobs(next_attempt_at) WHERE delivered_at IS NULL",
-        "CREATE INDEX IF NOT EXISTS active_warn_user ON warn_logs(user_id,created_at) WHERE is_active=TRUE",
-        "CREATE INDEX IF NOT EXISTS active_ban_user ON ban_logs(user_id) WHERE is_active=TRUE",
-        "CREATE INDEX IF NOT EXISTS apps_author_status ON applications(user_id,status)",
-    ])
-
-    async with pool.acquire() as conn, conn.transaction():
-        await conn.execute("SELECT pg_advisory_xact_lock(739018283)")
+    async with pool.acquire() as conn:
         for statement in statements:
             await conn.execute(statement)
 
@@ -1801,14 +1572,13 @@ async def init_db() -> None:
         await conn.execute(
             """
             INSERT INTO moderators (user_id, username, level, role, lives, simulator_data, activity_month)
-            VALUES ($1, $2, 3, 'Создатель', 3, 0, to_char(NOW(), 'YYYY-MM'))
+            VALUES ($1, $2, 7, 'Создатель', 3, 0, to_char(NOW(), 'YYYY-MM'))
             ON CONFLICT (user_id) DO UPDATE
-            SET username=EXCLUDED.username, level=3, role='Создатель'
+            SET username=EXCLUDED.username, level=7, role='Создатель', lives=3, activity_month=to_char(NOW(), 'YYYY-MM')
             """,
             CREATOR_ID,
             CREATOR_USERNAME or None,
         )
-        await migrate_existing_data(conn)
 
 
 async def get_config(key: str) -> str | None:
@@ -1861,68 +1631,134 @@ def format_number(number: int) -> str:
 
 
 async def get_user_warns(user_id: int) -> int:
-    """Active immutable log entries are the authoritative warning balance."""
-    return int(await require_db().fetchval(
-        "SELECT COUNT(*) FROM warn_logs WHERE user_id=$1 AND is_active=TRUE", user_id
-    ) or 0)
+    """Возвращает текущее количество варнов пользователя.
+
+    Основной счётчик хранится в users.warns, потому что именно он
+    увеличивается при выдаче варна и сбрасывается при /unwarn и /unban.
+    Для совместимости со старыми/частично заполненными данными есть
+    безопасный fallback на активные записи warn_logs.
+    """
+    pool = require_db()
+    row = await pool.fetchrow(
+        "SELECT warns FROM users WHERE user_id=$1", user_id
+    )
+    if row is not None and int(row["warns"] or 0) > 0:
+        return int(row["warns"])
+
+    active_logs = await pool.fetchval(
+        "SELECT COUNT(*) FROM warn_logs WHERE user_id=$1 AND is_active=TRUE",
+        user_id,
+    )
+    return int(active_logs or 0)
 
 
+async def add_warn(
+    user_id: int,
+    reason: str,
+    moderator_id: int,
+    chat_id: int,
+    message_id: int | None = None,
+) -> tuple[int, str] | None:
+    pool = require_db()
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """
+            INSERT INTO users (user_id, warns, banned)
+            VALUES ($1, 1, FALSE)
+            ON CONFLICT (user_id) DO UPDATE
+            SET warns=users.warns + 1
+            WHERE users.banned=FALSE AND users.warns < 4
+            RETURNING warns
+            """,
+            user_id,
+        )
+        if row is None:
+            return None
 
-
-
-
-async def add_warn(user_id: int, reason: str, moderator_id: int, chat_id: int,
-                   message_id: int | None = None) -> tuple[int, str] | None:
-    # Keep the old entry point safe: it must not write a warning without applying its penalty.
-    issued, count, number, error, _ = await issue_warning(chat_id,user_id,reason,moderator_id,message_id)
-    if error:
-        raise RuntimeError(error)
-    return (count, number) if issued else None
-
-
-
-
+        new_warns = int(row["warns"])
+        warn_number = format_number(await next_number(conn, "warn_counter"))
+        await conn.execute(
+            """
+            INSERT INTO warn_logs
+                (user_id, warn_number, reason, moderator_id, chat_id, message_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            user_id,
+            warn_number,
+            reason,
+            moderator_id,
+            chat_id,
+            message_id,
+            now_ts(),
+        )
+        return new_warns, warn_number
 
 
 async def remove_all_warns(user_id: int) -> None:
-    async with get_warn_lock(0,user_id), require_db().acquire() as conn, conn.transaction():
-        await _locked_moderation_user(conn,user_id)
-        await conn.execute("UPDATE warn_logs SET is_active=FALSE WHERE user_id=$1 AND is_active=TRUE",user_id)
-        await conn.execute("UPDATE users SET warns=0 WHERE user_id=$1",user_id)
-
-
-
-
+    pool = require_db()
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            """
+                INSERT INTO users (user_id, warns) VALUES ($1, 0)
+                ON CONFLICT (user_id) DO UPDATE SET warns=0
+                """,
+            user_id,
+        )
+        await conn.execute(
+            "UPDATE warn_logs SET is_active=FALSE WHERE user_id=$1 AND is_active=TRUE",
+            user_id,
+        )
 
 
 async def is_banned(user_id: int) -> bool:
-    row = await require_db().fetchrow("SELECT banned,ban_until FROM users WHERE user_id=$1", user_id)
-    return bool(row and row['banned'] and (row['ban_until'] is None or int(row['ban_until']) > now_ts()))
+    row = await require_db().fetchrow(
+        "SELECT banned, ban_until FROM users WHERE user_id=$1",
+        user_id,
+    )
+    if not row:
+        return False
+    banned = bool(row["banned"])
+    until = row["ban_until"]
+    if banned and until is not None and now_ts() > int(until):
+        await require_db().execute(
+            "UPDATE users SET banned=FALSE, ban_until=NULL WHERE user_id=$1",
+            user_id,
+        )
+        return False
+    return banned
 
 
-
-
-
-
-async def get_moderator_level(user_id: int, conn=None) -> int:
-    if user_id == CREATOR_ID:
-        return 3
-    value = await (conn or require_db()).fetchval("SELECT level FROM moderators WHERE user_id=$1", user_id)
-    # init_db migrates the old 0..7 scale once; never reinterpret a new rank 2/3.
-    return effective_admin_role(int(value or 0))
-
-
-
-
+async def get_moderator_level(user_id: int) -> int:
+    value = await require_db().fetchval(
+        "SELECT level FROM moderators WHERE user_id=$1",
+        user_id,
+    )
+    return int(value or 0)
 
 
 def get_role_name(level: int) -> str:
-    return {0:'Участник', 1:'Админ', 2:'Главный админ', 3:'Создатель'}.get(int(level), 'Участник')
+    if level <= 0:
+        return "Участник"
+    if level >= 7:
+        return "Создатель"
+    if level >= 6:
+        return "Главный админ"
+    return "Админ"
 
 
 
 def get_admin_title(level: int) -> str:
-    return get_role_name(level)[:16]
+    # Telegram разрешает не более 16 символов в должности администратора.
+    titles = {
+        1: "Мл. модератор",
+        2: "Модератор",
+        3: "Мл. админ",
+        4: "Администратор",
+        5: "Старший админ",
+        6: "Главный админ",
+        7: "Создатель",
+    }
+    return titles[level]
 
 
 
@@ -1967,51 +1803,33 @@ async def apply_admin_life_loss(user_id: int) -> None:
 async def request_creator_admin_punishment(msg: Message, target_id: int, action: str, reason: str) -> bool:
     if not msg.from_user:
         return False
-    hubsup = await get_config('hubsup_id')
+    hubsup = await get_config("hubsup_id")
     if not hubsup:
-        await msg.answer('({15}) Вы не можете выдать наказание этому администратору.\n'
-                         '<blockquote>Административный чат не подключён. Запрос не отправлен.</blockquote>')
+        await msg.answer("({15}) **Вы не можете выдать наказание этому администратору.**\n\"Запрос отправить невозможно. Административный чат не подключён.\"")
         return False
-    source_id = msg.reply_to_message.message_id if msg.reply_to_message else msg.message_id
-    async with require_db().acquire() as conn, conn.transaction():
-        row = await conn.fetchrow(
-            """INSERT INTO admin_punishment_requests
-               (requester_id,target_id,action,reason,chat_id,source_message_id,created_at)
-               VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING RETURNING id""",
-            msg.from_user.id, target_id, action, reason, msg.chat.id, source_id, now_ts(),
-        )
-        if row is None:
-            await msg.answer('<blockquote>Это сообщение уже отправлено на рассмотрение</blockquote>')
-            return False
-        number = format_number(await next_number(conn, 'report_counter'))
-        report = await conn.fetchrow(
-            """INSERT INTO reports(report_number,reporter_id,violator_id,chat_id,message_id,reason,created_at,creator_only)
-               VALUES($1,$2,$3,$4,$5,$6,$7,TRUE) ON CONFLICT(chat_id,message_id)
-               DO UPDATE SET creator_only=TRUE,status='pending',reviewed_by=NULL,reviewed_at=NULL
-               RETURNING report_number""",
-            number, msg.from_user.id, target_id, msg.chat.id, source_id, reason, now_ts(),
-        )
-        target_known = await conn.fetchrow('SELECT username,full_name FROM known_users WHERE user_id=$1', target_id)
-        target = user_mention(target_id, target_known['username'] if target_known else None,
-                              target_known['full_name'] if target_known else None)
-        buttons = []
-        url = message_url(msg.chat.id, source_id)
-        if url:
-            buttons.append([_btn('({34}) Перейти к сообщению', '', url=url)])
-        buttons.append([_btn('Завершить дело ({20})', f"adminreq_reject_{row['id']}")])
-        text = (
-            '({1.6.35.36.5.6.4.1})\n<b>Админ пытается наказать равного/старшего</b>\n'
-            '<blockquote>Требуется ваше решение @WaxVik0\n'
-            'Пожалуйста, ознакомьтесь с ситуацией и примите нужные меры наказания, если они необходимы.</blockquote>\n'
-            f'Администратор: {user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)}\n'
-            f'Цель: {target}\nДействие: {esc(action)}\nПричина: «{esc(reason[:1200])}»\n'
-            f'Репорт {esc(report["report_number"])}\n<b>Рассмотрение доступно только создателю.</b>'
-        )
-        await enqueue_delivery(conn, int(hubsup), text, message_thread_id=TOPICS['admin'],
-                               reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-                               dedupe_key=f"adminreq:{row['id']}")
-    await msg.answer('({15}) Вы не можете выдать наказание этому администратору.\n'
-                     '<blockquote>Запрос отправлен создателю на рассмотрение. ({17})</blockquote>')
+    row = await require_db().fetchrow(
+        """INSERT INTO admin_punishment_requests(requester_id,target_id,action,reason,chat_id,source_message_id,created_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id""",
+        msg.from_user.id,target_id,action,reason,msg.chat.id,
+        msg.reply_to_message.message_id if msg.reply_to_message else None,now_ts()
+    )
+    target_known=await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1",target_id)
+    target=user_mention(target_id,target_known["username"] if target_known else None,target_known["full_name"] if target_known else None)
+    keyboard=InlineKeyboardMarkup(inline_keyboard=[
+        [ _btn("({34})Перейти к сообщению", "", url=message_url(msg.chat.id,msg.reply_to_message.message_id) if msg.reply_to_message and message_url(msg.chat.id,msg.reply_to_message.message_id) else "https://t.me/duosup_bot") ],
+        [_btn("Завершить дело ({{20}})", callback_data=f"adminreq_reject_{row['id']}")]
+    ])
+    text=(
+        '**Админ пытается наказать равного/старшего**\n'
+        '"Требуется ваше решение @WaxVik0\n'
+        'Пожалуйста ознакомтесь с ситуации и примите нужные мкры наказания если они есть. "\n'
+        f'Администратор: {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\n'
+        f'Цель: {target}\n'
+        f'Причина: «{esc(reason)}»\n'
+        f'ID запроса: /#{row["id"]}/'
+    )
+    await require_bot().send_message(int(hubsup),text,message_thread_id=TOPICS["admin"],reply_markup=keyboard)
+    await msg.answer('"Запрос отправлен создателю на рассмотрение.({17})"')
     return True
 
 
@@ -2058,116 +1876,122 @@ async def monthly_admin_loop() -> None:
 
 
 async def set_moderator_level(user_id: int, level: int, username: str | None = None) -> None:
-    if level not in (0, 1, 2, 3) or (level == 3 and user_id != CREATOR_ID):
-        raise ValueError('Недопустимый ранг администратора')
-    if user_id == CREATOR_ID:
-        level = 3
+    if level == 0:
+        await require_db().execute("DELETE FROM moderators WHERE user_id=$1", user_id)
+        return
     month = await current_activity_month()
-    async with get_warn_lock(0,user_id), require_db().acquire() as conn, conn.transaction():
-        await _locked_moderation_user(conn,user_id)
-        await conn.execute(
-            """INSERT INTO moderators (user_id,username,level,role,lives,simulator_data,activity_month)
-            VALUES ($1,$2,$3,$4,3,0,$5)
-            ON CONFLICT(user_id) DO UPDATE SET username=COALESCE($2,moderators.username), level=$3,
-            role=CASE WHEN moderators.role IS NULL OR moderators.role IN ('Участник','Админ','Главный админ','Создатель')
-                      THEN $4 ELSE moderators.role END""",
-            user_id, username, level, get_role_name(level), month)
+    await require_db().execute(
+        """
+        INSERT INTO moderators (user_id, username, level, role, lives, simulator_data, activity_month)
+        VALUES ($1,$2,$3,$4,3,0,$5)
+        ON CONFLICT(user_id) DO UPDATE SET username=COALESCE($2, moderators.username), level=$3, role=$4
+        """, user_id, username, level, get_role_name(level), month)
 
 
 def effective_admin_role(level: int) -> int:
-    return max(0, min(3, int(level)))
+    # Совместимость со старыми уровнями БД:
+    # 0 = участник, 1-5 = админ, 6 = главный админ, 7 = создатель.
+    if level >= 7:
+        return 3
+    if level >= 6:
+        return 2
+    if level > 0:
+        return 1
+    return 0
 
 
-
-
-
-
-async def check_permission(user_id: int, min_level: int, conn=None) -> bool:
+async def check_permission(user_id: int, min_level: int) -> bool:
     if user_id == CREATOR_ID:
         return True
-    banned = await (conn or require_db()).fetchval(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE user_id=$1 AND banned=TRUE AND (ban_until IS NULL OR ban_until>$2))", user_id,now_ts()
-    )
-    return not banned and await get_moderator_level(user_id,conn) >= min_level
+    return effective_admin_role(await get_moderator_level(user_id)) >= min_level
 
 
-
-
-
-
-async def can_punish(moderator_id: int, target_id: int, conn=None):
-    mod_level = 3 if moderator_id == CREATOR_ID else await get_moderator_level(moderator_id,conn)
-    target_level = 3 if target_id == CREATOR_ID else await get_moderator_level(target_id,conn)
-    if moderator_id == target_id:
-        return False, '({14})Нельзя наказать самого себя.', mod_level, target_level
-    if target_id == CREATOR_ID:
-        return False, '({15}) Вы не можете выдать наказание этому администратору.', mod_level, target_level
+async def can_punish(moderator_id: int, target_id: int):
+    raw_mod = await get_moderator_level(moderator_id)
+    raw_target = await get_moderator_level(target_id)
+    mod_level = effective_admin_role(raw_mod)
+    target_level = effective_admin_role(raw_target)
     if moderator_id == CREATOR_ID:
         return True, None, mod_level, target_level
-    if mod_level < 1 or not await check_permission(moderator_id,1,conn):
-        return False, '({15})У вас недостаточно прав', mod_level, target_level
-    if target_level >= mod_level:
-        return False, '({15}) Вы не можете выдать наказание этому администратору.', mod_level, target_level
+    if mod_level < 1:
+        return False, "({15})У вас недостаточно прав", mod_level, target_level
+    if target_level > 0 and target_level >= mod_level:
+        return False, '({15}) **Вы не можете выдать наказание этому администратору.**\n"Запрос отправлен создателю на рассмотрение.({17})"', mod_level, target_level
     return True, None, mod_level, target_level
 
 
-
-
-
-
 async def resolve_user(message: Message, token: str | None = None):
-    reply = message.reply_to_message
-    if reply and reply.from_user and not getattr(reply, "sender_chat", None):
-        user = reply.from_user
-        if user.is_bot or user.id <= 0:
-            return None, None, None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        user = message.reply_to_message.from_user
         await remember_user(user)
+        if user.id == require_bot().id:
+            return None, None, None
         return user.id, user.username, user.full_name
+
     if not token:
         return None, None, None
+
     token = token.strip()
-    actor = message.from_user
-    if token.startswith("@"):
-        username = token[1:]
+    pool = require_db()
+    if token.startswith("@"): 
+        username = token[1:].strip()
         if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
             return None, None, None
-        if actor and (actor.username or "").casefold() == username.casefold():
-            return actor.id, actor.username, actor.full_name
-        row = await require_db().fetchrow(
-            "SELECT user_id,username,full_name FROM known_users "
-            "WHERE LOWER(TRIM(BOTH '@' FROM username))=LOWER($1) "
-            "AND user_id<>$2 ORDER BY updated_at DESC,user_id DESC LIMIT 1",
-            username, require_bot().id,
+
+        actor = message.from_user
+        actor_id = actor.id if actor else None
+        normalized = username.casefold()
+        bot_id = require_bot().id
+
+        row = await pool.fetchrow(
+            """
+            SELECT user_id, username, full_name
+            FROM known_users
+            WHERE LOWER(TRIM(BOTH '@' FROM username)) = LOWER($1)
+              AND user_id <> $2
+              AND ($3::BIGINT IS NULL OR user_id <> $3)
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            username,
+            bot_id,
+            actor_id,
         )
-        return (int(row['user_id']), row['username'], row['full_name']) if row else (None, None, None)
-    if not re.fullmatch(r"[1-9][0-9]{0,18}", token):
+        if row:
+            return row["user_id"], row["username"], row["full_name"]
+
+        # Если совпадение есть только с автором команды, разрешаем его
+        # лишь для реального текущего username. Дальше обычная проверка
+        # команды не даст применить наказание к самому себе.
+        if actor and actor.id != bot_id and (actor.username or "").lstrip("@").casefold() == normalized:
+            return actor.id, actor.username, actor.full_name
+
         return None, None, None
-    user_id = int(token)
-    if user_id == require_bot().id or user_id > 9223372036854775807:
-        return None, None, None
-    row = await require_db().fetchrow("SELECT username,full_name FROM known_users WHERE user_id=$1", user_id)
-    return user_id, row['username'] if row else None, row['full_name'] if row else None
 
+    numeric = token.lstrip("-")
+    if numeric.isdigit():
+        user_id = int(token)
+        if user_id == require_bot().id:
+            return None, None, None
+        row = await pool.fetchrow(
+            "SELECT username, full_name FROM known_users WHERE user_id=$1",
+            user_id,
+        )
+        return (
+            user_id,
+            (row["username"] if row else None),
+            (row["full_name"] if row else None),
+        )
 
-
-
+    return None, None, None
 
 
 def get_warn_lock(chat_id: int, user_id: int) -> asyncio.Lock:
-    # users/warn_logs are global per user, so every moderation operation shares this lock.
-    return warning_record_locks.setdefault((0, user_id), asyncio.Lock())
-
-
-
-
+    return warning_record_locks.setdefault((chat_id, user_id), asyncio.Lock())
 
 
 def get_ban_lock(chat_id: int, user_id: int) -> asyncio.Lock:
-    return get_warn_lock(chat_id, user_id)
-
-
-
-
+    return ban_target_locks.setdefault((chat_id, user_id), asyncio.Lock())
 
 
 async def moderation_chat_id(fallback_chat_id: int) -> int:
@@ -2218,111 +2042,212 @@ async def require_group_chat(msg: Message) -> bool:
     return False
 
 
-async def strip_telegram_admin_status(user_id: int, conn=None) -> None:
-    """Demote Telegram privileges without taking a second pooled connection."""
-    rows = await (conn or require_db()).fetch(
-        "SELECT value FROM config WHERE key IN ('hublox_id','hubsup_id') AND value<>''"
-    )
-    for chat_id in {int(row['value']) for row in rows}:
+async def strip_telegram_admin_status(user_id: int) -> None:
+    """Снимает Telegram-права администратора, сохраняя ранг в БД для команд бота."""
+    chat_ids = set()
+    for key in ("hublox_id", "hubsup_id"):
+        value = await get_config(key)
+        if value:
+            chat_ids.add(int(value))
+    for chat_id in chat_ids:
         try:
-            # The level-zero sync path does not query moderator data.
-            await sync_telegram_admin(chat_id,user_id,0)
+            await sync_telegram_admin(chat_id, user_id, 0)
         except Exception:
-            LOGGER.exception('Не удалось снять Telegram-права администратора: user=%s chat=%s',user_id,chat_id)
+            LOGGER.exception("Не удалось снять Telegram-права администратора: user=%s chat=%s", user_id, chat_id)
 
 
+async def issue_warning(
+    chat_id: int,
+    user_id: int,
+    reason: str,
+    admin_id: int,
+    source_message_id: int | None = None,
+) -> tuple[bool, int | None, str | None, str | None, str | None]:
+    """Выдаёт варн и на 4/4 автоматически оформляет вечный бан.
+
+    Возвращает: issued, warn_count, warn_number, action_error, ban_number.
+    """
+    lock = get_warn_lock(chat_id, user_id)
+    async with lock:
+        result = await add_warn(
+            user_id,
+            reason,
+            admin_id,
+            chat_id,
+            source_message_id,
+        )
+        if result is None:
+            return False, None, None, None, None
+
+        warn_count, warn_number = result
+        action_error = None
+        ban_number = None
+        try:
+            if warn_count in (2, 3, 4) and await get_moderator_level(user_id) > 0 and (admin_id != user_id or reason == "Запрещенная ссылка"):
+                await strip_telegram_admin_status(user_id)
+            if warn_count == 2:
+                await require_bot().restrict_chat_member(
+                    chat_id,
+                    user_id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=datetime.now(timezone.utc) + timedelta(minutes=5),
+                )
+            elif warn_count == 3:
+                await require_bot().restrict_chat_member(
+                    chat_id,
+                    user_id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=datetime.now(timezone.utc) + timedelta(hours=24),
+                )
+            elif warn_count == 4:
+                # Четвёртый варн = автоматический вечный бан.
+                await require_bot().restrict_chat_member(
+                    chat_id,
+                    user_id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                )
+                pool = require_db()
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute(
+                            """
+                            INSERT INTO users (user_id, banned, ban_until)
+                            VALUES ($1, TRUE, NULL)
+                            ON CONFLICT (user_id) DO UPDATE
+                            SET banned=TRUE, ban_until=NULL
+                            """,
+                            user_id,
+                        )
+                        ban_number = format_number(await next_number(conn, "ban_counter"))
+                        await conn.execute(
+                            """
+                            INSERT INTO ban_logs
+                                (user_id, ban_number, reason, moderator_id, chat_id, message_id, created_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            """,
+                            user_id,
+                            ban_number,
+                            "Достигнут лимит варнов (4/4)",
+                            admin_id,
+                            chat_id,
+                            source_message_id,
+                            now_ts(),
+                        )
+        except Exception as exc:
+            action_error = str(exc)
+            LOGGER.exception("Не удалось применить ступень наказания %s/4", warn_count)
+
+        return True, warn_count, warn_number, action_error, ban_number
 
 
-async def issue_warning(chat_id: int, user_id: int, reason: str, admin_id: int,
-                        source_message_id: int | None = None, count: int = 1, conn=None):
-    result = await issue_warnings_batch(chat_id,user_id,reason,admin_id,source_message_id,count,conn)
-    return result['issued'],result['count'],result['numbers'][-1] if result['numbers'] else None,result['error'],result['ban_number']
+async def apply_ban(
+    chat_id: int,
+    user_id: int,
+    reason: str,
+    moderator_id: int,
+    source_message_id: int | None = None,
+):
+    lock = get_ban_lock(chat_id, user_id)
+    async with lock:
+        if await is_banned(user_id):
+            return False, None
+
+        if await get_moderator_level(user_id) > 0 and moderator_id != user_id:
+            await strip_telegram_admin_status(user_id)
+
+        await require_bot().restrict_chat_member(
+            chat_id,
+            user_id,
+            permissions=ChatPermissions(can_send_messages=False),
+        )
+        pool = require_db()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO users (user_id, banned, ban_until) VALUES ($1, TRUE, NULL)
+                    ON CONFLICT (user_id) DO UPDATE SET banned=TRUE, ban_until=NULL
+                    """,
+                    user_id,
+                )
+                ban_number = format_number(await next_number(conn, "ban_counter"))
+                await conn.execute(
+                    """
+                    INSERT INTO ban_logs
+                        (user_id, ban_number, reason, moderator_id, chat_id, message_id, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    """,
+                    user_id,
+                    ban_number,
+                    reason,
+                    moderator_id,
+                    chat_id,
+                    source_message_id,
+                    now_ts(),
+                )
+        return True, ban_number
 
 
-
-
-
-
-async def apply_ban(chat_id: int, user_id: int, reason: str, moderator_id: int,
-                    source_message_id: int | None = None):
-    error = validate_reason(reason)
-    if error:
-        raise ValueError(error)
-    if not await can_issue_ban(moderator_id):
-        raise PermissionError('Недостаточно прав для бана.')
-    allowed, error, _, _ = await can_punish(moderator_id,user_id)
-    if not allowed:
-        raise PermissionError(error)
-    async with get_ban_lock(chat_id,user_id), require_db().acquire() as conn, conn.transaction():
-        user = await _locked_moderation_user(conn,user_id)
-        allowed,error,_,_=await can_punish(moderator_id,user_id,conn)
-        if not allowed or not await can_issue_ban(moderator_id,conn):
-            raise PermissionError(error or 'Недостаточно прав для бана.')
-        if user['banned']:
-            return False,None
-        number = format_number(await next_number(conn,'ban_counter'))
-        await conn.execute("INSERT INTO ban_logs(user_id,ban_number,reason,moderator_id,chat_id,message_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)",user_id,number,reason.strip(),moderator_id,chat_id,source_message_id,now_ts())
-        if await get_moderator_level(user_id,conn)>0:
-            await strip_telegram_admin_status(user_id,conn)
-        await _set_warning_restriction(chat_id,user_id,4)
-        await conn.execute("UPDATE users SET banned=TRUE,ban_until=NULL WHERE user_id=$1",user_id)
-        return True,number
-
-
-
-
-
-
-async def apply_unban(chat_id: int, user_id: int, moderator_id: int, ban_number: str | None = None, conn=None):
-    if conn is None:
-        async with get_ban_lock(chat_id,user_id), require_db().acquire() as connection, connection.transaction():
-            return await apply_unban(chat_id,user_id,moderator_id,ban_number,connection)
-    user = await _locked_moderation_user(conn,user_id)
-    if not await check_permission(moderator_id,2,conn):
-        raise PermissionError('Недостаточно прав для снятия наказания.')
-    bans = await conn.fetch("SELECT ban_number,source_warn_number FROM ban_logs WHERE user_id=$1 AND is_active=TRUE AND ($2::TEXT IS NULL OR ban_number=$2) FOR UPDATE",user_id,ban_number)
-    if not bans and (ban_number or not user['banned']):
-        return False,None
-    await conn.execute("UPDATE ban_logs SET is_active=FALSE WHERE user_id=$1 AND is_active=TRUE AND ($2::TEXT IS NULL OR ban_number=$2)",user_id,ban_number)
-    for entry in bans:
-        if entry['source_warn_number']:
-            await revoke_warning(user_id,1,moderator_id,chat_id,entry['source_warn_number'],conn,reconcile=False)
-    current = int(await conn.fetchval("SELECT COUNT(*) FROM warn_logs WHERE user_id=$1 AND is_active=TRUE",user_id))
-    if current<4:
-        await conn.execute("UPDATE ban_logs SET is_active=FALSE WHERE user_id=$1 AND is_active=TRUE AND source_warn_number IS NOT NULL",user_id)
-    another_ban=await conn.fetchval("SELECT EXISTS(SELECT 1 FROM ban_logs WHERE user_id=$1 AND is_active=TRUE)",user_id)
-    if another_ban:
-        await _reconcile_warning_restriction(conn,chat_id,user_id,int(user['warns']))
-    else:
-        # Old releases expelled users; an absent user cannot be restricted.
-        member=await require_bot().get_chat_member(chat_id,user_id)
-        if getattr(member,'status',None) in ('kicked','left'):
-            if member.status=='kicked':
-                await require_bot().unban_chat_member(chat_id,user_id,only_if_banned=True)
-            await conn.execute("UPDATE users SET banned=FALSE,ban_until=NULL,warns=$2,mute_until=NULL WHERE user_id=$1",user_id,current)
-        else:
-            await _reconcile_warning_restriction(conn,chat_id,user_id,int(user['warns']))
-    number = format_number(await next_number(conn,'unban_counter'))
-    await conn.execute("INSERT INTO unban_logs(user_id,unban_number,moderator_id,chat_id,created_at) VALUES($1,$2,$3,$4,$5)",user_id,number,moderator_id,chat_id,now_ts())
-    return True,number
-
-
-
-
+async def apply_unban(chat_id: int, user_id: int, moderator_id: int):
+    lock = get_ban_lock(chat_id, user_id)
+    async with lock:
+        if not await is_banned(user_id):
+            return False, None
+        try:
+            await require_bot().unban_chat_member(chat_id, user_id, only_if_banned=True)
+        except Exception:
+            # Для нового формата "бан" — это вечный мут, а не удаление.
+            # Старые записи, созданные до этой версии, могли быть настоящим ban.
+            pass
+        await clear_restrictions(chat_id, user_id)
+        pool = require_db()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE users SET banned=FALSE, ban_until=NULL, warns=0 WHERE user_id=$1",
+                    user_id,
+                )
+                await conn.execute(
+                    "UPDATE warn_logs SET is_active=FALSE WHERE user_id=$1 AND is_active=TRUE",
+                    user_id,
+                )
+                number = format_number(await next_number(conn, "unban_counter"))
+                await conn.execute(
+                    """
+                    INSERT INTO unban_logs
+                        (user_id, unban_number, moderator_id, chat_id, message_id, created_at)
+                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    """,
+                    user_id,
+                    number,
+                    moderator_id,
+                    chat_id,
+                    now_ts(),
+                )
+        return True, number
 
 
 async def clear_restrictions(chat_id: int, user_id: int) -> None:
-    if user_id == require_bot().id:
-        raise RuntimeError('Нельзя менять ограничения самого бота.')
-    chat = await require_bot().get_chat(chat_id)
-    permissions = getattr(chat,'permissions',None)
-    if permissions is None:
-        raise RuntimeError('Не удалось получить стандартные разрешения чата.')
-    await require_bot().restrict_chat_member(chat_id,user_id,permissions=permissions,until_date=0,use_independent_chat_permissions=True)
-
-
-
-
+    bot_instance = require_bot()
+    if user_id == bot_instance.id:
+        raise RuntimeError("целью оказался сам бот; ограничение не изменено")
+    await bot_instance.restrict_chat_member(
+        chat_id,
+        user_id,
+        permissions=ChatPermissions(
+            can_send_messages=True,
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+            can_invite_users=True,
+        ),
+    )
 
 
 # ========================== СООБЩЕНИЯ И ЛОГИ ==========================
@@ -2330,35 +2255,44 @@ SEPARATOR = "•—-—-—-—-—-<⁠✧>-—-—-—-—-—•"
 
 
 def build_warn_msg(mention: str, warn_count: int, reason: str, warn_number: str) -> str:
-    lines = [f"• {n}/4 — {label} {'({8})' if warn_count==n else ''}" for n,label in ((1,'предупреждение'),(2,'мут на 5 минут'),(3,'мут на 24 часа'),(4,'бан'))]
-    return ('({1.3.12.13.2.7_3.2.6.7.1})\n'
-            f'<b>Выдан</b>: {mention} ({warn_count}/4)\n'
-            f'<blockquote><b>Причина</b>: «{esc(reason)}»\n{SEPARATOR}\n'
-            + '\n'.join(lines) + f'\n{SEPARATOR}\n<b>ID</b> • <i>{esc(warn_number)}</i>\n'
-            f'({{11}})Время выдачи: {msk_time()} МСК</blockquote>\n'
-            '({9})Апелляцию можно подать в течение 24 часов с момента выдачи.')
-
-
-
-
+    header = "({1.3.12.13.2.7_3.2.6.7.1})"
+    marker = "({8})"
+    lines = [
+        f"• 1/4 — предупреждение {marker if warn_count == 1 else ''}",
+        f"• 2/4 — мут на 5 минут {marker if warn_count == 2 else ''}",
+        f"• 3/4 — мут на 24 часа {marker if warn_count == 3 else ''}",
+        f"• 4/4 — бан {marker if warn_count == 4 else ''}",
+    ]
+    return (
+        f"{header}\n"
+        f"<b>Выдан</b>: {mention} ({warn_count}/4)\n"
+        f"\"<b>Причина</b>: «{esc(reason)}\n"
+        f"•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n"
+        + "\n".join(lines)
+        + "\n•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n"
+        f"<b>ID</b> • /#{esc(warn_number)}/\n"
+        f"({{11}})Время выдачи: {msk_time()} МСК\"\n"
+        f"({{9}})Апелляцию можно подать в течение 24 часов с момента выдачи."
+    )
 
 def build_ban_msg(mention: str, reason: str, ban_number: str) -> str:
-    return ('({1.3.12.13.2.7_18.2.7.1})\n'
-            f'{mention} получает бан\n<blockquote><b>Причина</b>: «{esc(reason)}»\n'
-            f'<b>ID_BAN</b> • <i>{esc(ban_number)}</i>\n'
-            f'({{11}})Время выдачи: {msk_time()} МСК</blockquote>\n'
-            'Вы можете подать апелляцию в любое время. ({11})')
-
-
-
-
+    return (
+        "({1.3.12.13.2.7_17.2.7.1})\n"
+        f"{mention} получает бан\n"
+        f"\"<b>причина</b>: {esc(reason)}\n"
+        f"<b>ID_BAN</b> • /#{esc(ban_number)}/\n"
+        f"({{11}})Время выдачи: {msk_time()} МСК\"\n"
+        f"Вы можете подать апелляцию в любое время. ({{11}})"
+    )
 
 def build_ban_dm_msg(reason: str, ban_number: str) -> str:
-    return build_ban_msg('Вы',reason,ban_number).replace('Вы получает бан','Вам выдан бан')
-
-
-
-
+    return (
+        "({1.3.12.13.2.7_17.2.7.1})\n"
+        f"<b>Вам выдан бан</b>\n"
+        f"\"<b>причина</b>: {esc(reason)}\n"
+        f"<b>ID_BAN</b> • /#{esc(ban_number)}/\n"
+        f"({{11}})Время выдачи: {msk_time()} МСК\""
+    )
 
 
 async def notify_ban_in_dm(user_id: int, reason: str, ban_number: str) -> None:
@@ -2374,15 +2308,13 @@ async def notify_ban_in_dm(user_id: int, reason: str, ban_number: str) -> None:
         LOGGER.info("Не удалось отправить ЛС о бане пользователю %s", user_id, exc_info=True)
 
 
-def build_unwarn_msg(mention: str, unwarn_number: str, removed_count: int = 1, remaining_count: int = 0) -> str:
-    return ('({1.31.7.32.4_3.2.6.7.1})\n'
-            f'С пользователя {mention}\n<blockquote>Количество снятых варнов: {removed_count}\n'
-            f'Осталось варнов: {remaining_count}/4\n<b>ID</b> • <i>{esc(unwarn_number)}</i>\n'
-            f'{SEPARATOR}\nПожалуйста ознакомьтесь с правилами сообщества HuBBlox. ({{33}})</blockquote>')
-
-
-
-
+def build_unwarn_msg(mention: str, unwarn_number: str) -> str:
+    return (
+        f"💚 С пользователя {mention} сняты все варны (0/4)\n"
+        "— • — • — • — • — • — • —\n"
+        f"🆔 Номер снятия: {esc(unwarn_number)}\n"
+        "— • — • — • — • — • — • —"
+    )
 
 
 async def send_admin_log(
@@ -2439,42 +2371,52 @@ async def log_forbidden_attempt(
         LOGGER.exception("Не удалось записать запрещённую попытку")
 
 
-async def update_admin_list() -> list[str]:
-    rows = list(await require_db().fetch(
-        "SELECT user_id,username,level,role FROM moderators WHERE level>0 ORDER BY level DESC,user_id"))
-    if not any(int(row['user_id']) == CREATOR_ID for row in rows):
-        rows.insert(0, {'user_id': CREATOR_ID, 'username': CREATOR_USERNAME, 'level': 3, 'role': 'Создатель'})
-    text = '({44}) <b>Состав администрации:</b>\n' + '\n'.join(
-        f"{user_mention(row['user_id'], row['username'])} — {esc(row['role'] or get_role_name(row['level']))}"
-        for row in rows)
-    failures = []
-    for chat_key, topic in (('hubsup_id', TOPICS['modlist']), ('hublox_id', TOPICS['admin'])):
+async def update_admin_list() -> None:
+    """Редактирует закреплённое/сохранённое сообщение состава администрации. Новые сообщения по таймеру не создаёт."""
+    rows = await require_db().fetch(
+        "SELECT user_id, username, level, role, lives, simulator_data FROM moderators WHERE level > 0 ORDER BY level DESC, user_id"
+    )
+    if not rows:
+        text = "👥 Список администраторов пуст."
+    else:
+        lines = [
+            f"{user_mention(row['user_id'], row['username'])} — {esc(row['role'] or get_role_name(row['level']))}"
+            for row in rows
+        ]
+        text = "👥 <b>Состав администрации:</b>\n" + "\n".join(lines)
+
+    for chat_key, topic in (
+        ("hubsup_id", TOPICS["modlist"]),
+        ("hublox_id", TOPICS["admin"]),
+    ):
         chat_id = await get_config(chat_key)
         if not chat_id:
             continue
-        message_key = f'adminlist_msg_{chat_key}'
-        old_id = await get_config(message_key)
-        if old_id:
+        message_key = f"adminlist_msg_{chat_key}"
+        old_message_id = await get_config(message_key)
+        if old_message_id:
             try:
-                await require_bot().edit_message_text(text=text, chat_id=int(chat_id), message_id=int(old_id))
+                await require_bot().edit_message_text(
+                    text,
+                    chat_id=int(chat_id),
+                    message_id=int(old_message_id),
+                )
                 continue
-            except TelegramBadRequest as exc:
-                if 'message is not modified' in str(exc).lower():
-                    continue
-                if 'message to edit not found' not in str(exc).lower():
-                    failures.append(f'{chat_key}: список администраторов не обновлён: {exc}')
-                    continue
             except Exception as exc:
-                failures.append(f'{chat_key}: список администраторов не обновлён: {exc}')
-                continue
+                if "message is not modified" in str(exc).lower():
+                    continue
+                LOGGER.warning("Не удалось обновить старый список админов: %s", exc)
         try:
-            sent = await require_bot().send_message(int(chat_id), text, message_thread_id=topic)
+            sent = await require_bot().send_message(
+                int(chat_id),
+                text,
+                message_thread_id=topic,
+            )
             await set_config(message_key, sent.message_id)
-        except Exception as exc:
-            failures.append(f'{chat_key}: список администраторов не опубликован: {exc}')
-    for failure in failures:
-        LOGGER.warning('%s', failure)
-    return failures
+        except Exception:
+            LOGGER.exception(
+                "Не удалось опубликовать список администраторов в %s", chat_key
+            )
 
 
 # ========================== ФУНКЦИИ HUВBLOX ==========================
@@ -2577,20 +2519,16 @@ EMOJI_SLOTS = {
 # Точные позиции из разметки сообщений владельца.
 # Там, где пользователь указал (N), используем именно N, а не угадываем emoji.
 SLOT_POSITION = {
-    'welcome':33, 'blocked':15, 'waiting':9, 'info':19, 'success':20,
-    'admin_warn':8, 'warning':8, 'user':44, 'ban':37, 'error':14,
-    'unwarn':20, 'unban':20, 'report':17, 'appeal':10, 'question':60,
-    'raid':69, 'balance':68, 'sea_events':49, 'trade':48, 'trial':71,
-    'profile':44, 'applications':10, 'active':8, 'navigation':61,
-    'rules':73, 'premium':28, 'redact':24, 'administration':44,
-    'admin_list':44, 'update':56, 'roblox':59, 'stats':72, 'comment':25,
-    'help':45, 'back':63, 'link':26, 'time':11, 'calendar':64,
-    'trash':27, 'creator':29, 'chief_admin':28, 'admin':44, 'junior_admin':44,
+    "welcome": 1, "blocked": 2, "waiting": 3, "info": 4, "success": 5,
+    "admin_warn": 6, "warning": 7, "user": 10, "ban": 11, "error": 12,
+    "unwarn": 13, "unban": 14, "report": 15, "appeal": 34, "question": 37,
+    "raid": 38, "balance": 39, "sea_events": 41, "trade": 51, "trial": 53,
+    "profile": 10, "applications": 52, "active": 61, "navigation": 32,
+    "rules": 73, "premium": 65, "redact": 58, "administration": 74,
+    "admin_list": 75, "update": 59, "roblox": 54, "stats": 62, "comment": 56,
+    "help": 49, "back": 49, "link": 50, "time": 31, "calendar": 57,
+    "trash": 72, "creator": 68, "chief_admin": 76, "admin": 76, "junior_admin": 76,
 }
-
-TRIAL_RACES = [('human','Хуман'), ('cyborg','Киборг'), ('angel','Ангел'),
-               ('shark','Шарк'), ('ghoul','Гуль'), ('mink','Минк')]
-
 PREMIUM_EMOJI_IDS = {}  # Старый slot-механизм оставлен только для совместимости с фруктами/расами.
 FRUIT_CUSTOM_EMOJI_IDS: dict[str, str] = {}
 
@@ -2684,31 +2622,6 @@ def stock_fruit_emoji_fallback(name: str) -> str:
     return "🍎"
 
 
-async def custom_emoji_html(slot: str, fallback: str = '✨') -> str:
-    # Fruit/race IDs are always read from their existing persistent keys.
-    emoji_id = await get_config(f'custom_emoji_{slot}')
-    if emoji_id and str(emoji_id).isdigit():
-        return f'<tg-emoji emoji-id="{emoji_id}">{html.escape(fallback, quote=False)}</tg-emoji>'
-    position = SLOT_POSITION.get(slot)
-    return custom_emoji_position(position, fallback) if position else esc(fallback)
-
-async def load_custom_emoji_overrides() -> None:
-    """Load only explicit message overrides; never seed/reset fruit or race IDs."""
-    rows = await require_db().fetch("SELECT key,value FROM config WHERE key LIKE 'premium_emoji_%'")
-    for row in rows:
-        suffix = row['key'].removeprefix('premium_emoji_')
-        if suffix.isdigit() and int(suffix) in PREMIUM_EMOJI and str(row['value']).isdigit():
-            PREMIUM_EMOJI[int(suffix)] = str(row['value'])
-
-async def save_message_emoji(slot: str, emoji_id: str) -> None:
-    if slot not in EMOJI_SLOTS or not emoji_id.isdigit():
-        raise ValueError('Неизвестный раздел эмодзи')
-    await set_config(f'custom_emoji_{slot}', emoji_id)
-    position = SLOT_POSITION.get(slot)
-    if position:
-        await set_config(f'premium_emoji_{position}', emoji_id)
-        PREMIUM_EMOJI[position] = emoji_id
-
 async def fruit_emoji_html(fruit_key: str, fallback: str = "🍎") -> str:
     return await custom_emoji_html(f"fruit_{fruit_key}", fallback)
 
@@ -2724,6 +2637,7 @@ def raid_fruit_keyboard() -> InlineKeyboardMarkup:
     buttons = []
     for key, (name, _) in RAID_FRUITS.items():
         kwargs = {"text": name, "callback_data": f"raid_fruit_{key}"}
+        emoji_id = None
         # Не угадываем фруктовый ID: его задаёт /addemoji.
         try:
             # Нельзя await в sync-функции, поэтому icon будет добавлен безопасно
@@ -2737,31 +2651,34 @@ def raid_fruit_keyboard() -> InlineKeyboardMarkup:
 
 
 async def raid_fruit_keyboard_async() -> InlineKeyboardMarkup:
-    rows, current = [], []
+    rows = []
+    current = []
     for key, (name, _) in RAID_FRUITS.items():
-        fruit_id = await get_config(f'custom_emoji_fruit_{key}')
-        kwargs = {'text': name, 'callback_data': f'raid_fruit_{key}'}
-        if fruit_id and fruit_id.isdigit():
-            kwargs['icon_custom_emoji_id'] = fruit_id
-        current.append(InlineKeyboardButton(**kwargs))
+        fruit_id = await get_config(f"custom_emoji_fruit_{key}")
+        kwargs = {"text": name, "callback_data": f"raid_fruit_{key}"}
+        if fruit_id:
+            kwargs["icon_custom_emoji_id"] = fruit_id
+        try:
+            button = InlineKeyboardButton(**kwargs)
+        except Exception:
+            kwargs.pop("icon_custom_emoji_id", None)
+            button = InlineKeyboardButton(**kwargs)
+        current.append(button)
         if len(current) == 2:
-            rows.append(current)
-            current = []
-    if current:
-        rows.append(current)
-    rows.append([_btn('({63}) Назад', 'menu_back')])
+            rows.append(current); current = []
+    if current: rows.append(current)
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 
 
 def raid_skill_keyboard(fruit_key: str, selected: set[str]) -> InlineKeyboardMarkup:
-    skills = RAID_FRUITS[fruit_key][1]
-    rows = [[InlineKeyboardButton(text=f'{"✅ " if key in selected else ""}{key} • {price:,}'.replace(',', '.'), callback_data=f'raid_skill_{fruit_key}_{key}')] for key, price in skills.items()]
-    rows.append([_btn('({63}) Назад', 'raid_back_fruits'), _btn('({34}) Далее', f'raid_next_{fruit_key}')])
+    _, skills = RAID_FRUITS[fruit_key]
+    rows = []
+    for key, price in skills.items():
+        mark = "✅ " if key in selected else ""
+        price_text = f" • {price:,}".replace(",", ".") if price else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{key}{price_text}", callback_data=f"raid_skill_{fruit_key}_{key}")])
+    rows.append([_btn("({{63}}) Назад", "raid_back_fruits"), InlineKeyboardButton(text="➡️ Далее", callback_data=f"raid_next_{fruit_key}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 
 
 # ========================== FSM ==========================
@@ -2780,29 +2697,20 @@ class EmojiState(StatesGroup):
 
 
 class RaidState(StatesGroup):
-    choosing_fruit = State()
     waiting_skills = State()
     waiting_balance = State()
     waiting_chip = State()
     waiting_comment = State()
 
 
-
-
 class SeaState(StatesGroup):
-    choosing_event = State()
     waiting_count = State()
     waiting_details = State()
 
 
-
-
 class TradeState(StatesGroup):
-    choosing_action = State()
     waiting_trade = State()
     waiting_fruit = State()
-
-
 
 
 class TrialState(StatesGroup):
@@ -2811,12 +2719,9 @@ class TrialState(StatesGroup):
 
 
 class ProfileState(StatesGroup):
-    choosing_field = State()
     waiting_tag = State()
     waiting_comment = State()
     waiting_roblox = State()
-
-
 
 
 class QuestionState(StatesGroup):
@@ -2838,30 +2743,32 @@ async def cancel_cmd(msg: Message, state: FSMContext):
     await msg.answer("✅ Действие отменено.")
 
 
-@dp.message(Command('start'))
+@dp.message(Command("start"))
 async def start_cmd(msg: Message, state: FSMContext):
-    if msg.chat.type != 'private':
-        await msg.answer('Откройте личные сообщения бота для /start.')
+    if msg.chat.type != "private":
+        await msg.answer("⛔ /start доступен только в личных сообщениях бота.")
         return
     payload = command_payload(msg)
-    if payload == 'appeal' or payload.startswith('appeal_'):
-        match = re.fullmatch(r'appeal_(warn|ban)_(-\d{5,})',payload)
-        legacy = re.fullmatch(r'appeal_(-\d{5,})',payload)
-        if payload != 'appeal' and not match and not legacy:
-            await msg.answer('Ссылка на наказание некорректна. Используйте /appeal.')
-            return
-        await appeal_start(msg,state,'#'+(match.group(2) if match else legacy.group(1)) if match or legacy else None,
-                           match.group(1) if match else None)
+    if msg.chat.type == "private" and (payload == "appeal" or payload.startswith("appeal_")):
+        expected_violation = None
+        expected_type = None
+        if payload.startswith("appeal_"):
+            raw = payload.removeprefix("appeal_")
+            typed_match = re.fullmatch(r"(warn|ban)_(-\d{5})", raw)
+            legacy_match = re.fullmatch(r"-\d{5}", raw)
+            if typed_match:
+                expected_type, raw_number = typed_match.groups()
+                expected_violation = f"#{raw_number}"
+            elif legacy_match:
+                expected_violation = f"#{raw}"
+        await appeal_start(msg, state, expected_violation, expected_type)
         return
-    pending = await require_db().fetchval('SELECT roblox_prompt_pending FROM users WHERE user_id=$1',msg.from_user.id)
-    if pending and (payload=='profile_setup' or await state.get_state() is None):
-        await state.set_state(ProfileState.waiting_roblox)
-        await msg.answer('({24}) Укажите ваш ник в Roblox.')
-        return
-    current = await state.get_state()
-    await msg.answer('Добро пожаловать в DuoSup ({33})\n<blockquote>Выберите нужный раздел.</blockquote>'
-                     + ('\nУ вас осталось незавершённое действие. Продолжите его или используйте /cancel.' if current else ''),
-                     reply_markup=main_menu_keyboard())
+    await state.clear()
+    await msg.answer(
+        "👋 <b>Добро пожаловать в DuoSup</b> ❤️\n\n"
+        "Выберите нужный раздел:",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 def generate_link_code() -> str:
@@ -2987,15 +2894,21 @@ async def save_rules(text: str, msg: Message) -> None:
     await msg.answer(f"✅ Правила обновлены до версии {esc(new_version)}.")
 
 
-@dp.message(Command('addemoji', 'addemoj'))
+@dp.message(Command("addemoji"))
 async def addemoji_cmd(msg: Message, state: FSMContext):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
-        await msg.answer('({15})Настраивать Premium Emoji может только создатель.')
+        await msg.answer("⛔ Настраивать Premium Emoji может только создатель.")
         return
     await state.clear()
-    await msg.answer('({28})<b>Центр Premium Emoji DuoSup</b>\n' + SEPARATOR + '\n'
-                     'Выберите раздел. Установленные эмодзи фруктов и рас сохранены; '
-                     'замена происходит только после отправки нового эмодзи.', reply_markup=emoji_admin_keyboard())
+    await msg.answer(
+        "💎 <b>Центр Premium Emoji DuoSup</b>\n" + SEPARATOR + "\n"
+        "Выберите, что хотите настроить.\n\n"
+        "🍎 <b>Эмодзи фруктов</b> — 41 фрукт от Rocket до Dragon.\n"
+        "💬 <b>Эмодзи сообщений</b> — системные сообщения, разделы, модерация и заявки.\n"
+        "🧬 <b>Эмодзи рас триалов</b> — Хуман, Киборг, Ангел, Шарк, Гуль и Минк.\n"
+        "💾 Все эмодзи сохраняются в базе и используются в кнопках и сообщениях.",
+        reply_markup=emoji_admin_keyboard(),
+    )
 
 
 @dp.callback_query(F.data == "emoji_setup_all")
@@ -3022,13 +2935,15 @@ async def emoji_fruits_setup_cb(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-@dp.callback_query(F.data == 'emoji_sections_setup')
+@dp.callback_query(F.data == "emoji_sections_setup")
 async def emoji_sections_setup_cb(cb: CallbackQuery, state: FSMContext):
     if not cb.from_user or cb.from_user.id != CREATOR_ID:
-        await cb.answer('Только создатель.', show_alert=True)
+        await cb.answer("⛔ Только создатель.", show_alert=True)
         return
     await state.clear()
-    await cb.message.edit_text('Выберите раздел для изменения эмодзи:', reply_markup=emoji_sections_keyboard())
+    await state.update_data(emoji_section_index=0, emoji_auto_mode=False)
+    await state.set_state(EmojiState.waiting_emoji)
+    await cb.message.edit_text(emoji_section_setup_prompt(0))
     await cb.answer()
 
 
@@ -3054,61 +2969,45 @@ async def emoji_admin_back_cb(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-@dp.callback_query(F.data == 'emoji_fruits_reset')
+@dp.callback_query(F.data == "emoji_fruits_reset")
 async def emoji_fruits_reset_cb(cb: CallbackQuery, state: FSMContext):
     if not cb.from_user or cb.from_user.id != CREATOR_ID:
-        await cb.answer('Только создатель.', show_alert=True)
+        await cb.answer("⛔ Только создатель.", show_alert=True)
         return
-    nonce = secrets.token_hex(4)
-    await state.clear()
-    await state.update_data(emoji_reset_nonce=nonce, emoji_reset_expires=now_ts()+120)
-    await cb.message.edit_text('({8})Удалить все сохранённые эмодзи фруктов? Это действие нельзя отменить.',
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [_btn('Удалить ({27})', f'emoji_fruits_confirm_{nonce}')],
-            [_btn('Отмена ({14})', 'emoji_admin_back')]]))
-    await cb.answer()
-
-
-@dp.callback_query(F.data.startswith('emoji_fruits_confirm_'))
-async def emoji_fruits_confirm_cb(cb: CallbackQuery, state: FSMContext):
-    if not cb.from_user or cb.from_user.id != CREATOR_ID:
-        await cb.answer('Только создатель.', show_alert=True)
-        return
-    data = await state.get_data()
-    if (data.get('emoji_reset_expires', 0) < now_ts()
-            or cb.data != f"emoji_fruits_confirm_{data.get('emoji_reset_nonce')}"):
-        await cb.answer('Подтверждение истекло.', show_alert=True)
-        return
-    await state.clear()
     for key, _ in FRUIT_EMOJI_ORDER:
-        await set_config(f'custom_emoji_fruit_{key}', '')
-    await cb.message.edit_text('({20})Эмодзи фруктов удалены.', reply_markup=emoji_admin_keyboard())
-    await cb.answer()
+        await set_config(f"custom_emoji_fruit_{key}", "")
+    await state.clear()
+    await cb.answer("✅ Эмодзи фруктов сброшены.", show_alert=True)
+    await cb.message.edit_text("🗑 <b>Эмодзи всех фруктов сброшены.</b>", reply_markup=emoji_admin_keyboard())
 
-@dp.callback_query(F.data == 'emoji_list')
+
+@dp.callback_query(F.data == "emoji_list")
 async def emoji_list_cb(cb: CallbackQuery):
     if not cb.from_user or cb.from_user.id != CREATOR_ID:
-        await cb.answer('Только создатель.', show_alert=True)
+        await cb.answer("⛔ Только создатель.", show_alert=True)
         return
-    lines = ['({10})<b>Установленные Premium Emoji</b>', SEPARATOR, '<b>Фрукты:</b>']
-    count = 0
+    lines = ["📋 <b>Установленные Premium Emoji</b>", SEPARATOR, "<b>🍎 Фрукты:</b>"]
+    installed = 0
     for key, name in FRUIT_EMOJI_ORDER:
-        emoji_id = await get_config(f'custom_emoji_fruit_{key}')
+        emoji_id = await get_config(f"custom_emoji_fruit_{key}")
         if emoji_id:
-            count += 1
-            lines.append(f"{await custom_emoji_html(f'fruit_{key}', '🍎')} {esc(name)}")
-    lines.append(f'Установлено: {count}/{len(FRUIT_EMOJI_ORDER)}\n<b>Расы:</b>')
-    for key, name in TRIAL_RACES:
-        emoji_id = await get_config(f'custom_emoji_race_{key}')
-        lines.append(f"{await custom_emoji_html(f'race_{key}', '🧬') if emoji_id else '▫️'} {esc(name)}")
-    lines.append('<b>Эмодзи сообщений:</b>')
-    lines.append(f'Загружено {len(PREMIUM_EMOJI)} позиций. Фрукты и расы хранятся отдельно.')
-    await cb.message.edit_text('\n'.join(lines), reply_markup=InlineKeyboardMarkup(
-        inline_keyboard=[[_btn('Назад ({63})', 'emoji_admin_back')]]))
+            installed += 1
+            emoji = await custom_emoji_html(f"fruit_{key}", "🍎")
+            lines.append(f"{emoji} {esc(name)}")
+    lines.append(f"\nУстановлено: <b>{installed}/{len(FRUIT_EMOJI_ORDER)}</b>")
+    lines.append("\n<b>🧬 Расы:</b>")
+    for race_key, race_name in TRIAL_RACES:
+        race_id = await get_config(f"custom_emoji_race_{race_key}")
+        lines.append(f"{custom_emoji_position(5, '✅') if race_id else custom_emoji_position(4, '▫️')} {esc(race_name)}")
+    lines.append("\n<b>Разделы:</b>")
+    for key, title in EMOJI_SLOTS.items():
+        emoji_id = await get_config(f"custom_emoji_{key}")
+        lines.append(f"{custom_emoji_position(5, '✅') if emoji_id else custom_emoji_position(4, '▫️')} {esc(title)}")
+    await cb.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="emoji_admin_back")]]))
     await cb.answer()
 
 
-@dp.message(EmojiState.waiting_fruit_emoji, lambda message: not (message.text or '').lstrip().startswith('/'))
+@dp.message(EmojiState.waiting_fruit_emoji)
 async def save_fruit_custom_emoji(msg: Message, state: FSMContext):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await state.clear()
@@ -3119,7 +3018,7 @@ async def save_fruit_custom_emoji(msg: Message, state: FSMContext):
         return
     data = await state.get_data()
     index = int(data.get("emoji_fruit_index", 0))
-    if not 0 <= index < len(FRUIT_EMOJI_ORDER):
+    if index >= len(FRUIT_EMOJI_ORDER):
         await state.clear()
         return
     fruit_key, fruit_name = FRUIT_EMOJI_ORDER[index]
@@ -3144,43 +3043,43 @@ async def save_fruit_custom_emoji(msg: Message, state: FSMContext):
     )
 
 
-@dp.message(EmojiState.waiting_emoji, lambda message: not (message.text or '').lstrip().startswith('/'))
+@dp.message(EmojiState.waiting_emoji)
 async def save_custom_emoji(msg: Message, state: FSMContext):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await state.clear()
         return
     emoji_id = extract_custom_emoji_id(msg)
     if not emoji_id:
-        await msg.answer('({8})Отправьте ровно один Premium Emoji.')
+        await msg.answer("⚠️ Я не вижу Premium Emoji. Отправьте именно один custom emoji.")
         return
     data = await state.get_data()
-    slot = data.get('emoji_slot')
-    if slot in EMOJI_SLOTS:
-        await save_message_emoji(slot, emoji_id)
+    # Автоматическая последовательная настройка разделов.
+    if data.get(EMOJI_AUTO_MODE_KEY) or "emoji_section_index" in data:
+        items = emoji_section_items()
+        index = int(data.get("emoji_section_index", 0))
+        if index >= len(items):
+            await state.clear()
+            return
+        slot, title = items[index]
+        await set_config(f"custom_emoji_{slot}", emoji_id)
+        next_index = index + 1
+        if next_index < len(items):
+            await state.update_data(emoji_section_index=next_index)
+            await msg.answer(f"✅ {esc(title)} сохранён.\n\n{emoji_section_setup_prompt(next_index)}")
+            return
+        if data.get(EMOJI_AUTO_MODE_KEY):
+            await state.update_data(emoji_race_index=0)
+            await state.set_state(EmojiState.waiting_race_emoji)
+            await msg.answer("🎉 <b>Эмодзи сообщений сохранены.</b>\n\n" + emoji_race_setup_prompt(0))
+            return
         await state.clear()
-        await msg.answer(f'({20})Эмодзи раздела {esc(EMOJI_SLOTS[slot])} сохранён.', reply_markup=emoji_admin_keyboard())
+        await msg.answer(f"🎉 <b>Все {len(items)} эмодзи сообщений сохранены.</b>")
         return
-    items = emoji_section_items()
-    index = data.get('emoji_section_index')
-    if not isinstance(index, int) or not 0 <= index < len(items):
-        await state.clear()
-        await msg.answer('({8})Сессия настройки истекла. Повторите /addemoji.')
-        return
-    slot, title = items[index]
-    await save_message_emoji(slot, emoji_id)
-    if index + 1 < len(items):
-        await state.update_data(emoji_section_index=index + 1)
-        await msg.answer(f'({20}){esc(title)} сохранён.\n\n{emoji_section_setup_prompt(index+1)}')
-    elif data.get(EMOJI_AUTO_MODE_KEY):
-        await state.update_data(emoji_race_index=0)
-        await state.set_state(EmojiState.waiting_race_emoji)
-        await msg.answer('({20})Эмодзи сообщений сохранены.\n\n' + emoji_race_setup_prompt(0))
-    else:
-        await state.clear()
-        await msg.answer('({20})Эмодзи сообщений сохранены.', reply_markup=emoji_admin_keyboard())
+    await msg.answer("⚠️ Сессия настройки устарела. Запустите /addemoji заново.")
+    await state.clear()
 
 
-@dp.message(EmojiState.waiting_race_emoji, lambda message: not (message.text or '').lstrip().startswith('/'))
+@dp.message(EmojiState.waiting_race_emoji)
 async def save_race_custom_emoji(msg: Message, state: FSMContext):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await state.clear()
@@ -3191,7 +3090,7 @@ async def save_race_custom_emoji(msg: Message, state: FSMContext):
         return
     data = await state.get_data()
     index = int(data.get("emoji_race_index", 0))
-    if not 0 <= index < len(TRIAL_RACES):
+    if index >= len(TRIAL_RACES):
         await state.clear()
         return
     race_key, race_name = TRIAL_RACES[index]
@@ -3277,7 +3176,7 @@ async def redact_del_cmd(msg: Message):
     await msg.answer("✅ Ссылка удалена из белого списка." if result.endswith("1") else "ℹ️ Такой записи нет в белом списке.")
 
 
-@dp.message(RuleState.waiting_text, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
+@dp.message(RuleState.waiting_text, F.text)
 async def rule_text(msg: Message, state: FSMContext):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await state.clear()
@@ -3286,190 +3185,86 @@ async def rule_text(msg: Message, state: FSMContext):
     await state.clear()
 
 
-def normalized_admin_rights(value=None) -> dict[str, bool]:
-    if isinstance(value, str):
-        value = json.loads(value)
-    if value is None:
-        value = {'delete_messages': True, 'restrict_members': True}
-    if not isinstance(value, dict):
-        raise ValueError('Некорректные сохранённые права администратора')
-    return {key: value.get(key) is True for key in PREMMOD_RIGHTS}
-
-
-async def send_admin_invitation(user_id: int, role: str) -> list[str]:
-    admin_chat = await get_config('hubsup_id')
-    if not admin_chat:
-        return ['Чат администрации ещё не настроен.']
-    api = require_bot()
-    try:
-        member = await api.get_chat_member(int(admin_chat), user_id)
-        if member.status in ('member', 'administrator', 'creator'):
-            return []
-    except Exception as exc:
-        return [f'Не удалось проверить участие в админ-чате: {exc}']
-    link = None
-    try:
-        old_links = await require_db().fetch(
-            'SELECT invite_link FROM admin_invites WHERE user_id=$1 AND consumed=FALSE', user_id)
-        for old in old_links:
-            await api.revoke_chat_invite_link(int(admin_chat), old['invite_link'])
-            await require_db().execute('UPDATE admin_invites SET consumed=TRUE WHERE invite_link=$1', old['invite_link'])
-        expires_at = now_ts() + 900
-        link = await api.create_chat_invite_link(chat_id=int(admin_chat), expire_date=expires_at,
-                                                 creates_join_request=True, name=f'admin-{user_id}')
-        await require_db().execute(
-            'INSERT INTO admin_invites(invite_link,user_id,chat_id,expires_at) VALUES($1,$2,$3,$4)',
-            link.invite_link, user_id, int(admin_chat), expires_at)
-        await api.send_message(user_id,
-            f'Вас повысили до роли: <b>{esc(role)}</b>.\n'
-            f'Ссылка в чат администрации действует 15 минут и доступна только вам:\n{esc(link.invite_link)}')
-        return []
-    except Exception as exc:
-        if link:
-            try:
-                await api.revoke_chat_invite_link(int(admin_chat), link.invite_link)
-                await require_db().execute('UPDATE admin_invites SET consumed=TRUE WHERE invite_link=$1', link.invite_link)
-            except Exception:
-                LOGGER.exception('Не удалось отозвать неотправленную ссылку администратора')
-        LOGGER.exception('Приглашение администратора не отправлено')
-        return [f'Приглашение не отправлено: {exc}. Пользователю нужно открыть ЛС бота и нажать /start.']
-
-
-async def sync_admin_everywhere(user_id: int, level: int) -> list[str]:
-    failures = []
-    for config_key, label in (('hublox_id', 'HuBBlox'), ('hubsup_id', 'Админ-чат')):
-        chat_id = await get_config(config_key)
-        if not chat_id:
-            continue
-        try:
-            member = await require_bot().get_chat_member(int(chat_id), user_id)
-            if member.status in ('left', 'kicked'):
-                if config_key == 'hublox_id' and level > 0:
-                    failures.append(f'{label}: участник отсутствует, права будут применены после вступления.')
-                continue
-            await sync_telegram_admin(int(chat_id), user_id, level)
-        except Exception as exc:
-            LOGGER.exception('Не удалось применить права администратора в %s', config_key)
-            failures.append(f'{label}: права не применены: {exc}')
-    return failures
-
-
-@dp.chat_join_request()
-async def admin_join_request(update: ChatJoinRequest):
-    invite_link = getattr(update.invite_link, 'invite_link', None)
-    if not invite_link:
-        return
-    api = require_bot()
-    async with get_warn_lock(update.chat.id,update.from_user.id), require_db().acquire() as connection:
-        async with connection.transaction():
-            record = await connection.fetchrow(
-                'SELECT * FROM admin_invites WHERE invite_link=$1 FOR UPDATE', invite_link)
-            if not record:
-                return
-            valid = (not record['consumed'] and record['expires_at'] >= now_ts()
-                     and record['chat_id'] == update.chat.id
-                     and record['user_id'] == update.from_user.id
-                     and int(await connection.fetchval(
-                         'SELECT level FROM moderators WHERE user_id=$1', update.from_user.id) or 0) > 0
-                     and not await admin_has_active_punishment(update.from_user.id, connection))
-            try:
-                if not valid:
-                    await api.decline_chat_join_request(update.chat.id, update.from_user.id)
-                    return
-                await _locked_moderation_user(connection,update.from_user.id)
-                if await admin_has_active_punishment(update.from_user.id,connection):
-                    await api.decline_chat_join_request(update.chat.id,update.from_user.id)
-                    return
-                await api.approve_chat_join_request(update.chat.id, update.from_user.id)
-                await connection.execute('UPDATE admin_invites SET consumed=TRUE WHERE invite_link=$1', invite_link)
-            except Exception as exc:
-                LOGGER.exception('Не удалось обработать заявку администратора')
-                await api.send_message(CREATOR_ID, f'({8})Не удалось обработать вход администратора: {esc(exc)}')
-                return
-    try:
-        await api.revoke_chat_invite_link(update.chat.id, invite_link)
-        await sync_telegram_admin(update.chat.id, update.from_user.id,
-                                  await get_moderator_level(update.from_user.id))
-    except Exception as exc:
-        LOGGER.exception('Не удалось завершить вход администратора')
-        await api.send_message(CREATOR_ID, f'({8})Администратор вступил, но права/ссылка требуют проверки: {esc(exc)}')
-
-async def sync_telegram_admin(chat_id: int, user_id: int, level: int, conn=None) -> None:
-    if user_id == CREATOR_ID:
-        return
-    if level not in (0, 1, 2):
-        raise ValueError('Недопустимый ранг')
-    if level and conn is None:
-        # The same user lock serializes promotion with warning/ban application.
-        async with get_warn_lock(chat_id,user_id), require_db().acquire() as connection, connection.transaction():
-            await _locked_moderation_user(connection,user_id)
-            return await sync_telegram_admin(chat_id,user_id,level,connection)
-    if level:
-        if await admin_has_active_punishment(user_id,conn):
-            raise PermissionError('Права администратора не восстановлены: действует бан или мут.')
-        if await get_moderator_level(user_id,conn) != level:
-            raise PermissionError('Ранг администратора уже изменился; повторите синхронизацию.')
-    row = await (conn or require_db()).fetchrow('SELECT role,custom_rights FROM moderators WHERE user_id=$1', user_id) if level else None
-    rights = normalized_admin_rights(row['custom_rights'] if row else None) if level else {}
-    kwargs = {
-        'chat_id': chat_id, 'user_id': user_id, 'can_manage_chat': level > 0,
-        'can_delete_messages': bool(rights.get('delete_messages')),
-        'can_restrict_members': bool(rights.get('restrict_members')),
-        'can_invite_users': bool(rights.get('invite_users')),
-        'can_change_info': bool(rights.get('change_info')),
-        'can_pin_messages': bool(rights.get('pin_messages')),
-        'can_promote_members': bool(rights.get('promote_members')),
-        'can_manage_topics': bool(rights.get('manage_topics')),
-        'can_manage_video_chats': bool(rights.get('manage_video')),
-        'can_manage_tags': bool(rights.get('change_tags')),
-        'can_post_stories': False, 'can_edit_stories': False, 'can_delete_stories': False,
-        'can_post_messages': False, 'can_edit_messages': False,
-        'can_manage_direct_messages': False, 'can_send_welcome_messages': False,
-        'is_anonymous': False,
-    }
-    await require_bot().promote_chat_member(**kwargs)
-    if level:
-        role = (row['role'] if row else None) or get_admin_title(level)
-        await require_bot().set_chat_administrator_custom_title(chat_id, user_id, role[:16])
-
+async def sync_telegram_admin(chat_id: int, user_id: int, level: int) -> None:
+    is_admin = level > 0
+    await require_bot().promote_chat_member(
+        chat_id=chat_id,
+        user_id=user_id,
+        can_manage_chat=is_admin,
+        can_delete_messages=is_admin,
+        can_restrict_members=is_admin,
+        can_invite_users=False,
+        can_change_info=False,
+        can_pin_messages=False,
+        can_promote_members=False,
+        can_manage_topics=False,
+        can_manage_video_chats=False,
+        can_post_stories=False,
+        can_edit_stories=False,
+        can_delete_stories=False,
+    )
+    if is_admin:
+        await require_bot().set_chat_administrator_custom_title(
+            chat_id,
+            user_id,
+            get_admin_title(level),
+        )
 
 
 async def change_mod_level(msg: Message, delta: int) -> None:
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
-        await msg.answer('({15})Изменять ранги может только создатель.')
+        await msg.answer("⛔ Изменять ранги может только создатель.")
         return
     payload = command_payload(msg)
-    target_id, username, full_name = await resolve_user(msg, payload.split()[0] if payload else None)
+    token = payload.split()[0] if payload else None
+    target_id, username, full_name = await resolve_user(msg, token)
     if target_id is None:
-        await msg.answer('({8})Ответьте на сообщение пользователя либо укажите известный боту @username или ID.')
+        await msg.answer(
+            "⚠️ Ответьте на сообщение пользователя либо укажите известный боту @username или ID."
+        )
         return
-    if target_id == CREATOR_ID:
-        await msg.answer('({14})Нельзя изменить ранг создателя.')
+    if target_id in (msg.from_user.id, CREATOR_ID):
+        await msg.answer("❌ Нельзя изменить ранг создателя.")
         return
-    new_level = await get_moderator_level(target_id) + delta
-    if new_level not in (0, 1, 2):
-        await msg.answer('({8})Дальше изменить ранг нельзя. Ранги: 0 — участник, 1 — админ, 2 — главный админ, 3 — создатель.')
+    current = await get_moderator_level(target_id)
+    new_level = current + delta
+    if not 0 <= new_level <= 6:
+        await msg.answer("⚠️ Дальше изменить ранг нельзя.")
         return
     await set_moderator_level(target_id, new_level, username)
-    failures = await sync_admin_everywhere(target_id, new_level)
-    if new_level == 0:
-        for record in await require_db().fetch(
-                'SELECT invite_link,chat_id FROM admin_invites WHERE user_id=$1 AND consumed=FALSE', target_id):
-            try:
-                await require_bot().revoke_chat_invite_link(record['chat_id'], record['invite_link'])
-                await require_db().execute('UPDATE admin_invites SET consumed=TRUE WHERE invite_link=$1', record['invite_link'])
-            except Exception as exc:
-                failures.append(f'Не удалось отозвать приглашение: {exc}')
-    elif delta > 0:
-        role = await require_db().fetchval('SELECT role FROM moderators WHERE user_id=$1', target_id)
-        failures.extend(await send_admin_invitation(target_id, role or get_role_name(new_level)))
-    failures.extend(await update_admin_list())
-    action = 'повышен' if delta > 0 else 'понижен'
-    response = f'({20}){user_mention(target_id, username, full_name)} {action} до уровня {new_level} ({esc(get_role_name(new_level))}).'
-    if failures:
-        response += '\n({8})Требуют внимания:\n' + '\n'.join(esc(item) for item in failures)
-    await msg.answer(response)
 
+    failures = []
+    for config_key, label in (("hublox_id", "HuBBlox"), ("hubsup_id", "админ-чате")):
+        chat_id = await get_config(config_key)
+        if not chat_id:
+            continue
+        try:
+            await sync_telegram_admin(int(chat_id), target_id, new_level)
+        except Exception as exc:
+            LOGGER.exception("Не удалось синхронизировать права в %s", config_key)
+            failures.append(f"{label}: {exc}")
+
+    await update_admin_list()
+    if delta > 0 and new_level > 0:
+        admin_chat = await get_config("hubsup_id")
+        if admin_chat:
+            try:
+                link = await require_bot().create_chat_invite_link(int(admin_chat), member_limit=1)
+                await require_bot().send_message(
+                    target_id,
+                    f'Вас повысили до роли: <b>{esc(get_role_name(new_level))}</b>.\n'
+                    f'Одноразовая ссылка на чат администрации: {esc(link.invite_link)}'
+                )
+            except Exception:
+                LOGGER.info("Не удалось отправить одноразовую ссылку новому админу", exc_info=True)
+    action = "повышен" if delta > 0 else "понижен"
+    mention = user_mention(target_id, username, full_name)
+    response = f"✅ {mention} {action} до уровня {new_level} ({{esc(get_role_name(new_level))}})."
+    if failures:
+        response += "\n⚠️ Telegram-права синхронизированы не везде:\n" + "\n".join(
+            esc(x) for x in failures
+        )
+    await msg.answer(response)
 
 
 @dp.message(Command("upmod"))
@@ -3500,333 +3295,477 @@ PREMMOD_RIGHTS = {
     "manage_topics": "Управление темами ({21})",
 }
 
-def premmod_keyboard(rights: dict[str, bool], nonce: str = '') -> InlineKeyboardMarkup:
-    rows = [[_btn(('✅ ' if rights.get(key) else '▫️ ') + label, f'premright_{nonce}_{key}')]
-            for key, label in PREMMOD_RIGHTS.items()]
-    rows.append([_btn('Готово ({20})', f'premright_{nonce}_done')])
+def premmod_keyboard(rights: dict[str,bool]) -> InlineKeyboardMarkup:
+    rows=[]
+    for key,label in PREMMOD_RIGHTS.items():
+        base = re.sub(r'\(\{\d+\}\)', '', label).strip()
+        rows.append([_btn(("({24})" if rights.get(key) else "") + base, f"premright_{key}")])
+    rows.append([_btn("({20})Готово", "premright_done")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-
-@dp.message(Command('premmod'))
+@dp.message(Command("premmod"))
 async def premmod_cmd(msg: Message, state: FSMContext):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
-        await msg.answer('({15})У вас недостаточно прав.')
-        return
-    payload = command_payload(msg)
-    target = await resolve_user(msg, payload.split()[0] if payload else None)
+        await msg.answer('({15})**У вас недостаточно прав**'); return
+    token = None if msg.reply_to_message else (command_payload(msg).split()[0] if command_payload(msg) else None)
+    target = await resolve_user(msg, token)
     if target[0] is None:
-        await msg.answer('({8})Ответьте на сообщение участника или укажите @username.')
-        return
-    if target[0] == CREATOR_ID:
-        await msg.answer('({14})Нельзя изменить права создателя.')
-        return
-    await state.clear()
-    await state.update_data(prem_target_id=target[0], prem_target_username=target[1],
-                            prem_target_name=target[2], prem_expires=now_ts()+900,
-                            prem_nonce=secrets.token_hex(4))
+        await msg.answer('({8})Ответьте на сообщение участника или укажите @username.'); return
+    await state.update_data(prem_target_id=target[0],prem_target_username=target[1],prem_target_name=target[2])
     await state.set_state(PremModState.waiting_role)
-    await msg.answer('Напишите роль для админа ({24})\nДо 16 символов, без эмодзи. Эта роль появится в профиле, составе администрации и теге.')
+    await msg.answer('Напишите роль для админа ({24})')
 
-
-@dp.message(PremModState.waiting_role, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
+@dp.message(PremModState.waiting_role, F.text)
 async def premmod_role_msg(msg: Message, state: FSMContext):
-    if not msg.from_user or msg.from_user.id != CREATOR_ID:
-        await state.clear()
+    role=(msg.text or "").strip()
+    aliases={"1":1,"админ":1,"администратор":1,"модератор":1,"2":2,"главный админ":2,"главныйадмин":2,"главный":2}
+    level=aliases.get(role.casefold())
+    if level is None:
+        await msg.answer('({15})Укажите роль: /1 — админ/модератор или /2 — главный админ.')
         return
-    data = await state.get_data()
-    if not data.get('prem_target_id') or data.get('prem_expires', 0) < now_ts():
-        await state.clear()
-        await msg.answer('({8})Сессия истекла. Повторите /premmod.')
-        return
-    role = (msg.text or '').strip()
-    if not role or len(role) > 16 or any(unicodedata.category(c) in ('So','Cs','Cc') or c in '\ufe0f\u200d' for c in role):
-        await msg.answer('({8})Роль должна содержать от 1 до 16 символов без эмодзи и переносов строк.')
-        return
-    level = await get_moderator_level(int(data['prem_target_id']))
-    level = level if level in (1, 2) else 1
-    row = await require_db().fetchrow('SELECT custom_rights FROM moderators WHERE user_id=$1', int(data['prem_target_id']))
-    rights = normalized_admin_rights(row['custom_rights']) if row and row['custom_rights'] is not None else {k:False for k in PREMMOD_RIGHTS}
-    await state.update_data(role=role, level=level, rights=rights)
+    data=await state.get_data()
+    await state.update_data(role=role,level=level,rights={k:False for k in PREMMOD_RIGHTS})
     await state.set_state(PremModState.choosing_rights)
-    await msg.answer('Выберите админские права для участника:', reply_markup=premmod_keyboard(rights, data['prem_nonce']))
+    await msg.answer('Выберете админские права для участника:',reply_markup=premmod_keyboard({k:False for k in PREMMOD_RIGHTS}))
 
-
-@dp.callback_query(F.data.startswith('premright_'))
+@dp.callback_query(F.data.startswith("premright_"))
 async def premmod_right_cb(cb: CallbackQuery, state: FSMContext):
-    if not cb.from_user or cb.from_user.id != CREATOR_ID:
-        await cb.answer('Только создатель может менять эти права.', show_alert=True)
-        return
-    data = await state.get_data()
-    prefix = f"premright_{data.get('prem_nonce', '')}_"
-    if (not data.get('prem_target_id') or data.get('prem_expires', 0) < now_ts()
-            or await state.get_state() != PremModState.choosing_rights.state
-            or not (cb.data or '').startswith(prefix)):
-        await cb.answer('Сессия настройки истекла. Повторите /premmod.', show_alert=True)
-        return
-    action = cb.data[len(prefix):]
-    rights = normalized_admin_rights(data.get('rights', {}))
-    if action != 'done':
-        if action not in PREMMOD_RIGHTS:
-            await cb.answer('Неизвестное право.', show_alert=True)
-            return
-        rights[action] = not rights[action]
-        await state.update_data(rights=rights)
-        await cb.message.edit_reply_markup(reply_markup=premmod_keyboard(rights, data['prem_nonce']))
-        await cb.answer()
-        return
-    target_id = int(data['prem_target_id'])
-    if target_id == CREATOR_ID:
+    if cb.from_user.id != CREATOR_ID:
+        await cb.answer("Только создатель может менять эти права.",show_alert=True); return
+    data=await state.get_data()
+    if not data.get("prem_target_id"):
+        await cb.answer("Сессия настройки истекла.",show_alert=True); return
+    action=cb.data.removeprefix("premright_")
+    rights=dict(data.get("rights") or {})
+    if action=="done":
+        target_id=int(data["prem_target_id"]); level=int(data["level"]); role=str(data["role"])
+        await set_moderator_level(target_id,level,data.get("prem_target_username"))
+        await require_db().execute("UPDATE moderators SET role=$2 WHERE user_id=$1",target_id,role)
+        for chat_key in ("hublox_id","hubsup_id"):
+            chat_id=await get_config(chat_key)
+            if not chat_id: continue
+            try:
+                await require_bot().promote_chat_member(
+                    chat_id=int(chat_id),user_id=target_id,
+                    can_manage_chat=bool(rights.get("change_info")),
+                    can_delete_messages=bool(rights.get("delete_messages")),
+                    can_restrict_members=bool(rights.get("restrict_members")),
+                    can_invite_users=bool(rights.get("invite_users")),
+                    can_change_info=bool(rights.get("change_info")),
+                    can_pin_messages=bool(rights.get("pin_messages")),
+                    can_promote_members=bool(rights.get("promote_members")),
+                    can_manage_topics=bool(rights.get("manage_topics")),
+                    can_manage_video_chats=bool(rights.get("manage_video")),
+                )
+                await require_bot().set_chat_administrator_custom_title(int(chat_id),target_id,role[:16])
+            except Exception:
+                LOGGER.exception("Не удалось назначить права /premmod")
+        # Одноразовая ссылка в админ-чат.
+        admin_chat=await get_config("hubsup_id")
+        if admin_chat:
+            try:
+                link=await require_bot().create_chat_invite_link(int(admin_chat),member_limit=1)
+                await require_bot().send_message(target_id,f"Вас повысили до роли: <b>{esc(role)}</b>.\nВступите в чат администрации по одноразовой ссылке:\n{esc(link.invite_link)}")
+            except Exception:
+                LOGGER.info("Не удалось отправить одноразовую ссылку /premmod",exc_info=True)
+        await update_admin_list()
         await state.clear()
-        await cb.answer('Нельзя изменить права создателя.', show_alert=True)
-        return
-    # Clear the one-shot session before any external side effect.
-    await state.clear()
-    level = int(data['level'])
-    role = data['role']
-    await set_moderator_level(target_id, level, data.get('prem_target_username'))
-    await require_db().execute(
-        'UPDATE moderators SET role=$2,custom_rights=$3::jsonb,can_ban=$4 WHERE user_id=$1',
-        target_id, role, json.dumps(rights), rights['restrict_members'])
-    await cb.answer('Права сохранены. Применяю в Telegram…')
-    failures = await sync_admin_everywhere(target_id, level)
-    failures.extend(await send_admin_invitation(target_id, role))
-    failures.extend(await update_admin_list())
-    text = f'({20})Права администратора сохранены. Роль: <b>{esc(role)}</b>.'
-    if failures:
-        text += '\n({8})Требуют внимания:\n' + '\n'.join(esc(item) for item in failures)
-    await cb.message.edit_text(text)
-
+        await cb.message.edit_text('({20})Права администратора сохранены.')
+        await cb.answer("Готово."); return
+    if action not in PREMMOD_RIGHTS:
+        await cb.answer(); return
+    rights[action]=not bool(rights.get(action))
+    await state.update_data(rights=rights)
+    await cb.message.edit_reply_markup(reply_markup=premmod_keyboard(rights))
+    await cb.answer()
 
 # ========================== НАКАЗАНИЯ ==========================
 async def _parse_count_token(token: str | None) -> int | None:
     if not token:
         return None
-    match = re.fullmatch(r'(?:([1-4])|\(([1-4])\))',token.strip())
-    return int(match.group(1) or match.group(2)) if match else None
-
-
-
-
+    m = re.fullmatch(r"\(?([0-9]+)\)?", token.strip())
+    return int(m.group(1)) if m else None
 
 
 async def parse_target_and_reason(msg: Message):
+    """Разбирает наказания в удобных формах.
+
+    /warn (2) причина                 — ответом на сообщение цели
+    /warn @username (2) причина       — без ответа
+    /warn (2) @username причина       — совместимость
+    /unwarn (2) причина               — ответом на сообщение цели
+    /unwarn @username (2) причина     — без ответа
+    /unwarn (2) @username причина     — совместимость
+    """
     payload = command_payload(msg).strip()
-    command = (msg.text or '').split()[0].split('@')[0].lower() if msg.text else ''
+    command = (msg.text or "").split()[0].split("@")[0].lower() if msg.text else ""
     parts = payload.split()
-    if command in ('/warn','/unwarn'):
+
+    if command == "/warn":
         if msg.reply_to_message:
             count = await _parse_count_token(parts[0] if parts else None)
-            return (*await resolve_user(msg),' '.join(parts[1:]) if count else '',str(count) if count else '')
-        if len(parts)<2:
-            return None,None,None,'',''
-        count = await _parse_count_token(parts[0])
-        token = parts[1]
+            reason = " ".join(parts[1:]).strip() if count is not None else ""
+            target = await resolve_user(msg)
+            return (*target, reason, str(count) if count is not None else "")
+
+        if len(parts) < 2:
+            return None, None, None, "", ""
+        # Основной формат: @username (2) причина
+        target_token = parts[0]
+        count = await _parse_count_token(parts[1])
+        reason_start = 2
+        # Совместимый формат: (2) @username причина
         if count is None:
-            count = await _parse_count_token(parts[1])
-            token = parts[0]
+            count = await _parse_count_token(parts[0])
+            if count is not None and len(parts) >= 3:
+                target_token = parts[1]
+                reason_start = 2
+        if count is None or not target_token:
+            return None, None, None, "", ""
+        target = await resolve_user(msg, target_token)
+        reason = " ".join(parts[reason_start:]).strip()
+        return (*target, reason, str(count))
+
+    if command == "/unwarn":
+        if msg.reply_to_message:
+            count = await _parse_count_token(parts[0] if parts else None)
+            reason = " ".join(parts[1:]).strip() if count is not None else ""
+            target = await resolve_user(msg)
+            return (*target, reason, str(count) if count is not None else "")
+
+        if len(parts) < 2:
+            return None, None, None, "", ""
+        # Основной формат: @username (2) [причина]
+        target_token = parts[0]
+        count = await _parse_count_token(parts[1])
+        reason_start = 2
+        # Совместимый формат: (2) @username [причина]
         if count is None:
-            return None,None,None,'',''
-        return (*await resolve_user(msg,token),' '.join(parts[2:]),str(count))
+            count = await _parse_count_token(parts[0])
+            if count is not None and len(parts) >= 2:
+                target_token = parts[1]
+                reason_start = 2
+        if count is None:
+            return None, None, None, "", ""
+        target = await resolve_user(msg, target_token)
+        reason = " ".join(parts[reason_start:]).strip()
+        return (*target, reason, str(count))
+
+    # /ban and /unban: reply => reason; no reply => target + reason.
     if msg.reply_to_message:
-        return (*await resolve_user(msg),payload,None)
+        target = await resolve_user(msg)
+        return (*target, payload, None)
     parts = payload.split(maxsplit=1)
     if not parts:
-        return None,None,None,'',None
-    return (*await resolve_user(msg,parts[0]),parts[1] if len(parts)>1 else '',None)
+        return None, None, None, "", None
+    target = await resolve_user(msg, parts[0])
+    return (*target, parts[1].strip() if len(parts) == 2 else "", None)
 
 
-
-
-
-
-@dp.message(Command('warn'))
+@dp.message(Command("warn"))
 async def warn_cmd(msg: Message):
     if not await require_group_chat(msg):
         return
-    actor=msg.from_user
-    if not actor or not await check_permission(actor.id,1):
-        await msg.answer('({15})У вас недостаточно прав')
+    actor = msg.from_user
+    if not actor or not await check_permission(actor.id, 1):
+        await msg.answer('({15})**У вас недостаточно прав**')
         return
-    target_id,username,full_name,reason,count_token=await parse_target_and_reason(msg)
-    if target_id is None or not count_token or validate_reason(reason):
-        await msg.answer(_moderation_usage('warn'))
+
+    target_id, username, full_name, reason, count_token = await parse_target_and_reason(msg)
+    if target_id is None or not count_token or not count_token.isdigit():
+        await msg.answer(
+            '({8})**Ошибка выдачи варна**\n'
+            '"**Возможные причины**\n'
+            '• Не указано имя пользователя.\n'
+            '    /Ответьте на сообщение нарушителя/\n'
+            '    либо укажите @username.\n'
+            '• Нет причины:/\n'
+            '    /({8})Укажите причину выдачи варна./\n'
+            '• Не указано кол-во варнов.\n'
+            '    /({8})Укажите количество варнов./\n'
+            'Пример применения команды:\n'
+            '• С ответом на сообщение:\n'
+            '    //warn (n) <причина>/\n'
+            '• Без ответа:\n'
+            '    //warn @username (n) <причина>/"\n'
+            '({19})Если нашли ошибки в команде свяжитесь с нами.\n'
+            '∆Contact Us(https://t.me/duosup_bot)∆'
+        )
         return
-    if target_id==actor.id:
-        await msg.answer('({14})Нельзя выдать варн самому себе.')
+
+    count = int(count_token)
+    max_count = 4 if effective_admin_role(await get_moderator_level(actor.id)) >= 2 else 3
+    current_warns = await get_user_warns(target_id)
+    if count < 1 or count > max_count or current_warns + count > max_count:
+        await msg.answer(f'({{15}})**У вас недостаточно прав**')
         return
-    if not await _moderation_target_allowed(msg,target_id,username,'варн',reason):
+    if target_id == actor.id:
+        await msg.answer('({14})**Нельзя выдать варн самому себе.**')
         return
-    target_chat=await moderation_chat_id(msg.chat.id)
-    source_id=msg.reply_to_message.message_id if msg.reply_to_message and msg.chat.id==target_chat else None
-    result=await issue_warnings_batch(target_chat,target_id,reason,actor.id,source_id,int(count_token))
-    if not result['issued']:
-        await msg.answer('({8})Не удалось применить наказание: '+esc(result['error']) if result['error'] else '({8})Пользователь уже забанен или достиг лимита 4/4.')
+    error = validate_reason(reason)
+    if error:
+        await msg.answer(error)
         return
+
+    allowed, permission_error, mod_level, target_level = await can_punish(actor.id, target_id)
+    if not allowed:
+        await log_forbidden_attempt("выдать варн", actor, target_id, username, mod_level, target_level, permission_error)
+        if target_level > 0 and actor.id != CREATOR_ID:
+            await request_creator_admin_punishment(msg, target_id, "варн", reason)
+        else:
+            await msg.answer(permission_error)
+        return
+
+    target_chat = await moderation_chat_id(msg.chat.id)
+    source_id = msg.reply_to_message.message_id if msg.reply_to_message else None
+    issued_numbers=[]
+    final_count=None
+    action_error=None
+    ban_number=None
+    lock=get_warn_lock(target_chat,target_id)
+    async with lock:
+        for _ in range(count):
+            result=await add_warn(target_id, reason, actor.id, target_chat, source_id)
+            if result is None:
+                break
+            final_count, num=result
+            issued_numbers.append(num)
+        if not issued_numbers:
+            await msg.answer('({8}) Пользователь уже забанен.')
+            return
+        try:
+            if final_count == 2:
+                await require_bot().restrict_chat_member(target_chat,target_id,permissions=ChatPermissions(can_send_messages=False),until_date=datetime.now(timezone.utc)+timedelta(minutes=5))
+            elif final_count == 3:
+                await require_bot().restrict_chat_member(target_chat,target_id,permissions=ChatPermissions(can_send_messages=False),until_date=datetime.now(timezone.utc)+timedelta(minutes=30))
+            elif final_count >= 4:
+                await require_bot().restrict_chat_member(target_chat,target_id,permissions=ChatPermissions(can_send_messages=False))
+                async with require_db().acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute("INSERT INTO users(user_id,banned,ban_until) VALUES($1,TRUE,NULL) ON CONFLICT(user_id) DO UPDATE SET banned=TRUE,ban_until=NULL",target_id)
+                        ban_number=format_number(await next_number(conn,"ban_counter"))
+                        await conn.execute("INSERT INTO ban_logs(user_id,ban_number,reason,moderator_id,chat_id,message_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)",target_id,ban_number,reason,actor.id,target_chat,source_id,now_ts())
+        except Exception as exc:
+            action_error=str(exc)
+
     mention=user_mention(target_id,username,full_name)
-    numbers=result['numbers']
-    rows=[]
-    for number in numbers:
-        keyboard=appeal_keyboard(number,'warn')
-        for row in keyboard.inline_keyboard:
-            rows.append([button.model_copy(update={'text':f'({{10}}) Апелляция: варн {number}'}) for button in row])
-    text=build_warn_msg(mention,result['count'],reason,numbers[-1])
-    if len(numbers)>1:
-        text+='\nВыданные варны: '+', '.join(esc(number) for number in numbers)
-    await msg.reply(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    if result['ban_number']:
-        await msg.reply(build_ban_msg(mention,reason,result['ban_number']),reply_markup=appeal_keyboard(result['ban_number'],'ban'))
-        await notify_ban_in_dm(target_id,reason,result['ban_number'])
+    sent=await msg.reply(build_warn_msg(mention,final_count,reason,issued_numbers[-1]),reply_markup=None if ban_number else appeal_keyboard(issued_numbers[-1],"warn"))
+    if ban_number:
+        await msg.reply(build_ban_msg(mention,reason,ban_number),reply_markup=appeal_keyboard(ban_number,"ban"))
+        await notify_ban_in_dm(target_id,reason,ban_number)
+    if action_error:
+        await msg.answer(f'({{8}}) Наказание записано, но ограничение Telegram не применилось: {esc(action_error)}')
     await add_simulator_data(actor.id,10)
-    await send_admin_log(f'({{1.6.35.36.5.6.4.1}})\n<b>Варн выдан</b>\nПользователь: {mention}\nПричина: {esc(reason)}\nID: '+', '.join(esc(number) for number in numbers)+f'\nКоличество: {result["count"]}/4\nВремя: {msk_time()} МСК',msg.chat.id,msg.reply_to_message.message_id if msg.reply_to_message else msg.message_id)
+    await send_admin_log(
+        f'({{1.6.35.36.5.6.4.1}})\n**Варн выдан**\nПользователь: {mention}\nПричина: {esc(reason)}\nID: /#{esc(issued_numbers[-1])}/\nКоличество: {final_count}\nВремя: {msk_time()} МСК',
+        msg.chat.id, source_id
+    )
 
 
-
-
-
-
-@dp.message(Command('ban'))
+@dp.message(Command("ban"))
 async def ban_cmd(msg: Message):
     if not await require_group_chat(msg):
         return
     actor=msg.from_user
-    if not actor or not await can_issue_ban(actor.id):
-        await msg.answer('({15})У вас недостаточно прав')
+    if not actor or not await check_permission(actor.id,2):
+        await msg.answer('({15})**У вас недостаточно прав**')
         return
     target_id,username,full_name,reason,_=await parse_target_and_reason(msg)
-    if target_id is None or validate_reason(reason):
-        await msg.answer(_moderation_usage('ban'))
-        return
+    if target_id is None or not reason.strip():
+        await msg.answer(
+            '({8})**Ошибка выдачи бана**\n'
+            '"**Возможные причины**\n'
+            '• Не указано имя пользователя.\n'
+            '    /Ответьте на сообщение нарушителя/\n'
+            '    либо укажите @username.\n'
+            '• Нет причины:/\n'
+            '    /({8})Укажите причину выдачи бана./\n'
+            'Пример применения команды:\n'
+            '• С ответом на сообщение:\n'
+            '    //ban <причина>/\n'
+            '• Без ответа:\n'
+            '    //ban @username <причина>/"\n'
+            '({19})Если нашли ошибки в команде свяжитесь с нами.\n'
+            '∆Contact Us(https://t.me/duosup_bot)∆'
+        ); return
     if target_id==actor.id:
-        await msg.answer('({14})Нельзя забанить самого себя.')
-        return
-    if not await _moderation_target_allowed(msg,target_id,username,'бан',reason):
+        await msg.answer('({14}) Нельзя забанить самого себя.'); return
+    allowed,permission_error,mod_level,target_level=await can_punish(actor.id,target_id)
+    if not allowed:
+        await log_forbidden_attempt("выдать бан",actor,target_id,username,mod_level,target_level,permission_error)
+        if target_level>0 and actor.id!=CREATOR_ID:
+            await request_creator_admin_punishment(msg,target_id,"бан",reason)
+        else: await msg.answer(permission_error)
         return
     target_chat=await moderation_chat_id(msg.chat.id)
-    source_id=msg.reply_to_message.message_id if msg.reply_to_message and msg.chat.id==target_chat else None
-    try:
-        success,number=await apply_ban(target_chat,target_id,reason,actor.id,source_id)
-    except Exception as exc:
-        LOGGER.exception('Ошибка команды /ban')
-        await msg.answer('({8})Бан не применён: '+esc(str(exc)))
-        return
+    source_id=msg.reply_to_message.message_id if msg.reply_to_message else None
+    success,number=await apply_ban(target_chat,target_id,reason,actor.id,source_id)
     if not success:
-        await msg.answer('({8})Пользователь уже забанен.')
-        return
+        await msg.answer('({8})Пользователь уже забанен.'); return
     mention=user_mention(target_id,username,full_name)
-    await msg.reply(build_ban_msg(mention,reason,number),reply_markup=appeal_keyboard(number,'ban'))
+    await msg.reply(build_ban_msg(mention,reason,number),reply_markup=appeal_keyboard(number,"ban"))
     await notify_ban_in_dm(target_id,reason,number)
     await add_simulator_data(actor.id,10)
-    await send_admin_log(f'({{1.6.35.36.5.6.4.1}})\n<b>Бан выдан</b>\nПользователь: {mention}\nПричина: {esc(reason)}\nID_BAN: {esc(number)}\nВремя: {msk_time()} МСК',msg.chat.id,msg.reply_to_message.message_id if msg.reply_to_message else msg.message_id)
+    await send_admin_log(
+        f'({{1.6.35.36.5.6.4.1}})\n**Бан выдан**\nПользователь: {mention}\nПричина: {esc(reason)}\nID_BAN: /#{esc(number)}/\nВремя: {msk_time()} МСК',
+        msg.chat.id,source_id
+    )
 
 
-
-
-
-
-@dp.message(Command('unwarn'))
+@dp.message(Command("unwarn"))
 async def unwarn_cmd(msg: Message):
-    if not await require_group_chat(msg):
-        return
+    if not await require_group_chat(msg): return
     actor=msg.from_user
     if not actor or not await check_permission(actor.id,2):
-        await msg.answer('({15})У вас недостаточно прав для снятия варнов.')
-        return
-    target_id,username,full_name,reason,count_token=await parse_target_and_reason(msg)
-    if target_id is None or not count_token:
-        await msg.answer(_moderation_usage('unwarn'))
-        return
-    if not await _moderation_target_allowed(msg,target_id,username,'снятие варна',reason):
-        return
+        await msg.answer('({15})У вас недостаточно прав для снятия варнов.'); return
+    target_id,username,full_name,unwarn_reason,count_token=await parse_target_and_reason(msg)
+    if target_id is None or not str(count_token).isdigit():
+        await msg.answer('({8})**Ошибка снятие варна**\n'
+                         '"**Возможные причины**\n'
+                         '• Не указано имя пользователя.\n'
+                         '    /Ответьте на сообщение пользователя/\n'
+                         '    либо укажите @username.\n'
+                         '• Не указано кол-во снятий варнов.\n'
+                         '    /({8})Укажите количество снятий варнов./\n'
+                         '• Нет активных варнов.\n'
+                         '    /({8})У пользователя нет активных варнов./\n'
+                         'Пример применения команды:\n'
+                         '• С ответом на сообщение:\n'
+                         '    //unwarn (n)/\n'
+                         '• Без ответа:\n'
+                         '    //unwarn @username (n) [причина]/"\n'
+                         '({19})Если нашли ошибки в команде свяжитесь с нами.\n∆Contact Us(https://t.me/duosup_bot)∆'); return
+    n=int(count_token)
+    current=await get_user_warns(target_id)
+    if n<1 or n>current:
+        await msg.answer('({8})У пользователя нет активных варнов.'); return
+    allowed,permission_error,mod_level,target_level=await can_punish(actor.id,target_id)
+    if not allowed:
+        await msg.answer(permission_error); return
+    # Unwarn removes exactly n most recent active warn records.
+    async with require_db().acquire() as conn:
+        async with conn.transaction():
+            rows=await conn.fetch("SELECT id FROM warn_logs WHERE user_id=$1 AND is_active=TRUE ORDER BY id DESC LIMIT $2",target_id,n)
+            if not rows: await msg.answer('({8})У пользователя нет активных варнов.'); return
+            ids=[r["id"] for r in rows]
+            await conn.execute("UPDATE warn_logs SET is_active=FALSE WHERE id=ANY($1::bigint[])",ids)
+            remain=max(0,current-n)
+            await conn.execute("UPDATE users SET warns=$2 WHERE user_id=$1",target_id,remain)
+            number=format_number(await next_number(conn,"unwarn_counter"))
     target_chat=await moderation_chat_id(msg.chat.id)
-    try:
-        removed,remaining,number=await revoke_warning(target_id,int(count_token),actor.id,target_chat)
-    except Exception as exc:
-        LOGGER.exception('Ошибка команды /unwarn')
-        await msg.answer('({8})Варны не сняты: '+esc(str(exc)))
-        return
-    if not removed:
-        await msg.answer(_moderation_usage('unwarn'))
-        return
-    await msg.reply(build_unwarn_msg(user_mention(target_id,username,full_name),number,removed,remaining))
+    try: await clear_restrictions(target_chat,target_id)
+    except Exception: pass
+    mention=user_mention(target_id,username,full_name)
+    reason_line = f'\nПричина: «{esc(unwarn_reason)}»' if unwarn_reason else ''
+    await msg.reply(
+        '({1.31.7.32.4_3.2.6.7.1})\nС пользователя {mention}\n'
+        f'"Количество снятых варнов: {n}\nОсталось варнов: {max(0,current-n)} /4\n'
+        f'<b>ID</b> • /#{esc(number)}/\n'
+        f'{SEPARATOR}\n'
+        f'Пожалуйста ознакомтесь с правилами сообщества HuBBlox. ({{33}}){reason_line} "'
+    )
 
 
-
-
-
-
-@dp.message(Command('unban'))
+@dp.message(Command("unban"))
 async def unban_cmd(msg: Message):
-    if not await require_group_chat(msg):
-        return
+    if not await require_group_chat(msg): return
     actor=msg.from_user
     if not actor or not await check_permission(actor.id,2):
-        await msg.answer('({15})У вас недостаточно прав для разбана.')
-        return
+        await msg.answer('({15})У вас недостаточно прав для разбана.'); return
     target_id,username,full_name,_,_=await parse_target_and_reason(msg)
     if target_id is None:
-        await msg.answer(_moderation_usage('unban'))
-        return
-    if not await _moderation_target_allowed(msg,target_id,username,'снятие бана',''):
-        return
+        await msg.answer('({8})**Ошибка снятие бана**\n'
+                         '"**Возможные причины**\n'
+                         '• Не указано имя пользователя.\n'
+                         '    /Ответьте на сообщение пользователя/\n'
+                         '    либо укажите @username.\n'
+                         '• Пользователь не забанен.\n'
+                         '    /({8})Пользователя не забанен./\n'
+                         'Пример применения команды:\n'
+                         '• С ответом на сообщение:\n'
+                         '    //unban/\n'
+                         '• Без ответа:\n'
+                         '    //unban @username/"\n'
+                         '({19})Если нашли ошибки в команде свяжитесь с нами.\n∆Contact Us(https://t.me/duosup_bot)∆'); return
+    if not await is_banned(target_id):
+        await msg.answer('({8})Пользователь не забанен.'); return
     target_chat=await moderation_chat_id(msg.chat.id)
-    try:
-        success,number=await apply_unban(target_chat,target_id,actor.id)
-    except Exception as exc:
-        LOGGER.exception('Ошибка команды /unban')
-        await msg.answer('({8})Бан не снят: '+esc(str(exc)))
-        return
+    success,number=await apply_unban(target_chat,target_id,actor.id)
     if not success:
-        await msg.answer(_moderation_usage('unban'))
-        return
+        await msg.answer('({8})Пользователь не забанен.'); return
     mention=user_mention(target_id,username,full_name)
-    await msg.reply('({1.31.7.32.4_18.2.7.1})\n'
-                    f'С пользователя {mention} снят бан\n<blockquote><b>ID</b> • <i>{esc(number)}</i>\n'
-                    f'{SEPARATOR}\nПожалуйста ознакомьтесь с правилами сообщества HuBBlox. ({{33}})</blockquote>')
-
-
-
-
+    await msg.reply(
+        '({1.31.7.32.4_18.2.7.1})\nС пользователя {mention}\n'
+        f'"<b>ID</b> • /#{esc(number)}/\n'
+        f'•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n'
+        f'Пожалуйста ознакомтесь с правилами сообщества HuBBlox. ({{33}}) "'
+    )
 async def profile_text(user_id: int):
+    """Безопасный профиль: обязательные поля всегда показываются, необязательные — «не указано»."""
     pool = require_db()
-    known = await pool.fetchrow('SELECT username,full_name FROM known_users WHERE user_id=$1', user_id)
-    row = await pool.fetchrow('SELECT messages_count,joined_at,profile_tag,profile_comment,roblox_username,verified,warns,banned FROM users WHERE user_id=$1', user_id)
-    moderator = await pool.fetchrow('SELECT role,level FROM moderators WHERE user_id=$1', user_id)
-    username = known['username'] if known else None
-    mention = user_mention(user_id, username, known['full_name'] if known else None)
-    joined = 'не указано'
-    if row and row['joined_at']:
+    # known_users хранит последний известный username/имя даже если профиль не заполнен.
+    known = await pool.fetchrow(
+        "SELECT username, full_name FROM known_users WHERE user_id=$1", user_id
+    )
+    row = await pool.fetchrow(
+        "SELECT messages_count, joined_at, profile_tag, profile_comment, "
+        "roblox_username, verified, warns, banned FROM users WHERE user_id=$1",
+        user_id,
+    )
+    moderator = await pool.fetchrow(
+        "SELECT role, level FROM moderators WHERE user_id=$1", user_id
+    )
+
+    username = known["username"] if known else None
+    full_name = known["full_name"] if known else None
+    mention = user_mention(user_id, username, full_name)
+
+    # Если пользователь ещё не попал в users, создаём базовую запись через remember_user,
+    # чтобы сообщения/дата вступления были постоянными.
+    if row is None:
+        # Только минимальные гарантированные данные, без изменения счётчика сообщений.
+        joined_at = int(datetime.now(timezone.utc).timestamp())
+        await pool.execute(
+            "INSERT INTO users(user_id, messages_count, joined_at) VALUES($1,0,$2) "
+            "ON CONFLICT(user_id) DO NOTHING",
+            user_id, joined_at,
+        )
+        row = await pool.fetchrow(
+            "SELECT messages_count, joined_at, profile_tag, profile_comment, "
+            "roblox_username, verified, warns, banned FROM users WHERE user_id=$1",
+            user_id,
+        )
+
+    joined = "не указано"
+    if row and row["joined_at"]:
         try:
-            joined = datetime.fromtimestamp(int(row['joined_at']), tz=timezone.utc).strftime('%d.%m.%Y')
-        except (ValueError, OverflowError, OSError):
-            pass
-    count = int(row['messages_count'] or 0) if row else 0
-    warns = int(row['warns'] or 0) if row else 0
-    banned = bool(row['banned']) if row else False
-    verified = bool(row['verified']) if row else False
-    tag = str(row['profile_tag'] or 'не указан')[:64] if row else 'не указан'
-    comment = str(row['profile_comment'] or 'не указан')[:500] if row else 'не указан'
-    roblox = str(row['roblox_username'] or 'не указано')[:20] if row else 'не указано'
-    helped = await pool.fetchval('SELECT COUNT(*) FROM application_helpers WHERE user_id=$1', user_id)
-    finished = await pool.fetchval("SELECT COUNT(*) FROM applications WHERE user_id=$1 AND status='finished' AND publication_state='published'", user_id)
-    achievements = []
-    if verified:
-        achievements.append('• Профиль верифицирован')
-    if helped:
-        achievements.append(f'• Откликов на заявки: {helped}')
-    if finished:
-        achievements.append(f'• Завершённых заявок: {finished}')
-    if count >= 100:
-        achievements.append(f'• Более {count // 100 * 100} сообщений в сообществе')
-    role_line = f'\nРоль: {esc(moderator["role"] or get_role_name(moderator["level"]))}' if moderator and moderator['level'] > 0 else ''
-    return ('({44})<b>Профиль</b>\n\n'
-            f'<blockquote>Telegram: {mention}\nRoblox: {esc(roblox)}\nТег: {esc(tag)}{role_line}\n'
-            f'Варнов: {warns}/4\nСообщений: {count}\nКомментарий: {esc(comment)}\n'
-            f'В сообществе с: {joined}\nПроверен: {"да" if verified else "нет"}\n'
-            f'Статус: {"заблокирован" if banned else "активен"}</blockquote>\n\n'
-            '({72})<b>Достижения:</b>\n' + ('\n'.join(achievements) if achievements else 'Пока нет.'))
+            joined = datetime.fromtimestamp(int(row["joined_at"]), tz=timezone.utc).strftime("%d.%m.%Y")
+        except Exception:
+            joined = "не указано"
 
+    messages_count = int(row["messages_count"] or 0) if row else 0
+    warns = int(row["warns"] or 0) if row else 0
+    banned = bool(row["banned"]) if row else False
+    roblox = row["roblox_username"] if row else None
+    tag = row["profile_tag"] if row else None
+    comment = row["profile_comment"] if row else None
+    verified = bool(row["verified"]) if row else False
+    role = moderator["role"] if moderator and moderator["role"] else tag
 
+    return (
+        '({44})**Профиль**\n\n'
+        f'"Telegram: {mention}\n'
+        f'Username: {("@" + esc(username)) if username else "не указано"}\n'
+        f'Сообщений: {messages_count}\n'
+        f'В сообществе с: {joined}\n'
+        f'Roblox: {esc(roblox or "не указано")}\n'
+        f'Тег: {esc(role or "не указан")}\n'
+        f'Комментарий: {esc(comment or "не указан")}\n'
+        f'Проверен: {"да" if verified else "нет"}\n'
+        f'Активные варны: {warns}/4\n'
+        f'Статус: {"заблокирован" if banned else "активен"}"'
+    )
 
 
 # ========================== ГЛАВНОЕ МЕНЮ ==========================
@@ -3854,52 +3793,51 @@ async def _profile_target_from_command(msg: Message):
 
 async def _show_profile(target_id: int, message: Message, *, edit: bool = False, owner: bool = False):
     text = await profile_text(target_id)
-    markup = profile_keyboard(owner) if message.chat.type == 'private' else None
+    rendered = render_premium_placeholders(text)
+    markup = profile_keyboard(owner)
     if edit:
-        await message.edit_text(text, reply_markup=markup)
+        await message.edit_text(rendered, reply_markup=markup)
     else:
-        await message.answer(text, reply_markup=markup)
+        await message.answer(rendered, reply_markup=markup)
 
 
-
-
-@dp.message(Command('profile'))
+@dp.message(Command("profile"))
 async def profile_cmd(msg: Message):
     if not msg.from_user:
-        return
-    if msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.is_bot:
-        await msg.answer('🤖 У ботов нет профиля участника.')
         return
     try:
         target_id = await _profile_target_from_command(msg)
         if target_id is None:
             await msg.answer('({46})Не удалось найти пользователя. Укажите @username, ID или ответьте на его сообщение.')
             return
-        await _show_profile(target_id, msg, owner=target_id == msg.from_user.id)
+        await _show_profile(target_id, msg, owner=(target_id == msg.from_user.id))
     except Exception:
-        LOGGER.exception('/profile failed')
+        LOGGER.exception("/profile failed")
         await msg.answer('({14})Не удалось открыть профиль. Попробуйте ещё раз.')
 
 
-
-
-@dp.callback_query(F.data == 'menu_back')
+@dp.callback_query(F.data == "menu_back")
 async def menu_back_cb(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.edit_text('Добро пожаловать в DuoSup({33})\n<blockquote>Выберите нужный раздел</blockquote>', reply_markup=main_menu_keyboard())
+    await cb.message.edit_text(
+        "👋 <b>Добро пожаловать в DuoSup</b> ❤️\n\nВыберите нужный раздел:",
+        reply_markup=main_menu_keyboard(),
+    )
     await cb.answer()
 
 
-
-
-@dp.callback_query(F.data == 'menu_profile')
-async def menu_profile_cb(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await remember_user(cb.from_user)
-    await _show_profile(cb.from_user.id, cb.message, edit=True, owner=True)
-    await cb.answer()
-
-
+@dp.callback_query(F.data == "menu_profile")
+async def menu_profile_cb(cb: CallbackQuery):
+    if not cb.from_user:
+        await cb.answer("Пользователь не найден.", show_alert=True)
+        return
+    try:
+        await remember_user(cb.from_user)
+        await _show_profile(cb.from_user.id, cb.message, edit=True, owner=True)
+        await cb.answer()
+    except Exception:
+        LOGGER.exception("menu_profile failed for user %s", cb.from_user.id)
+        await cb.answer("Не удалось открыть профиль.", show_alert=True)
 
 
 async def _simple_menu_cb(cb: CallbackQuery, title: str, body: str):
@@ -3907,279 +3845,144 @@ async def _simple_menu_cb(cb: CallbackQuery, title: str, body: str):
     await cb.answer()
 
 
-@dp.callback_query(F.data == 'menu_events')
-async def menu_events_cb(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    hublox = await get_config('hublox_id')
-    rows = []
-    if hublox:
-        url = message_url(int(hublox), TOPICS['announcements'])
-        if url:
-            rows.append([InlineKeyboardButton(text=render_button_text('({72})Объявления сообщества'), url=url)])
-    rows.append([_btn('({63}) Назад', 'menu_back')])
-    await callback.message.edit_text('({72})<b>Ивенты</b>\n\nАнонсы и условия участия публикуются в объявлениях сообщества.', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+@dp.callback_query(F.data == "menu_events")
+async def menu_events_cb(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🏆 <b>Ивенты</b>\n\nСкоро будет новая функция.",
+        reply_markup=back_menu_keyboard(),
+    )
     await callback.answer()
-
-
 
 
 
 
 # ========================== РЕПОРТЫ И АПЕЛЛЯЦИИ ==========================
 async def appeal_choices_markup(user_id: int) -> InlineKeyboardMarkup:
-    rows = []
-    warns = await require_db().fetch(
-        """SELECT w.warn_number FROM warn_logs w WHERE w.user_id=$1 AND w.is_active=TRUE
-           AND w.created_at >= $2 AND NOT EXISTS(SELECT 1 FROM appeals a WHERE a.user_id=w.user_id
-           AND a.violation_type='warn' AND a.violation_number=w.warn_number AND a.status<>'legacy_duplicate')
-           ORDER BY w.id DESC LIMIT 50""", user_id, now_ts() - 86400,
-    )
-    for row in warns:
-        number = row['warn_number']
-        rows.append([_btn(f'({{8}}) Варн {number}', f'appeal_select_warn_{number.removeprefix("#")}')])
-    bans = await require_db().fetch(
-        """SELECT b.ban_number FROM ban_logs b JOIN users u ON u.user_id=b.user_id
-           WHERE b.user_id=$1 AND b.is_active=TRUE AND u.banned=TRUE
-           AND (u.ban_until IS NULL OR u.ban_until > EXTRACT(EPOCH FROM NOW()))
-           AND NOT EXISTS(SELECT 1 FROM appeals a WHERE a.user_id=b.user_id AND a.violation_type='ban'
-           AND a.violation_number=b.ban_number AND a.status<>'legacy_duplicate') ORDER BY b.id DESC LIMIT 10""", user_id,
-    )
-    for row in bans:
-        number = row['ban_number']
-        rows.append([_btn(f'({{37}}) Бан {number}', f'appeal_select_ban_{number.removeprefix("#")}')])
-    rows.append([_btn('({63}) Назад', 'menu_back')])
+    rows=[]
+    warns=await require_db().fetch("SELECT warn_number FROM warn_logs WHERE user_id=$1 AND is_active=TRUE ORDER BY id DESC",user_id)
+    for r in warns:
+        n=str(r['warn_number']).replace('#','')
+        rows.append([InlineKeyboardButton(text=f"⚠️Варн #{r['warn_number']}",callback_data=f"appeal_select_warn_{n}")])
+    ban=await require_db().fetchrow("SELECT ban_number FROM ban_logs WHERE user_id=$1 ORDER BY id DESC LIMIT 1",user_id)
+    if await is_banned(user_id) and ban:
+        n=str(ban['ban_number']).replace('#','')
+        rows.append([InlineKeyboardButton(text=f"⚠️Бан #{ban['ban_number']}",callback_data=f"appeal_select_ban_{n}")])
+    rows.append([_btn("({63}) Назад","menu_back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-async def appeal_start(msg: Message, state: FSMContext, expected_violation: str | None = None,
-                       expected_type: str | None = None):
-    if msg.chat.type != 'private' or not msg.from_user:
-        await msg.answer('({15}) Апелляция доступна в ЛС бота.')
+async def appeal_start(msg: Message, state: FSMContext, expected_violation: str|None=None, expected_type: str|None=None):
+    if msg.chat.type != 'private':
+        await msg.answer('⛔ Апелляция доступна в ЛС бота.')
         return
     await state.clear()
-    if expected_violation is not None or expected_type is not None:
-        row = await appealable_penalty(require_db(), msg.from_user.id, expected_type, expected_violation)
+    if expected_violation and expected_type:
+        n=expected_violation.replace('#','')
+        if expected_type=='warn':
+            row=await require_db().fetchrow("SELECT warn_number FROM warn_logs WHERE user_id=$1 AND warn_number=$2 AND is_active=TRUE",msg.from_user.id,expected_violation)
+        else:
+            row=await require_db().fetchrow("SELECT ban_number FROM ban_logs WHERE user_id=$1 AND ban_number=$2",msg.from_user.id,expected_violation)
         if not row:
-            await msg.answer('({14}) Это наказание не найдено, уже снято, принадлежит другому пользователю '
-                             'или истекли 24 часа для обжалования варна.')
+            await msg.answer('({14})Это наказание не найдено или оно принадлежит другому пользователю.')
             return
-        if await appeal_already_submitted(require_db(), msg.from_user.id, expected_type, expected_violation):
-            await msg.answer('({8}) Апелляция на это наказание уже отправлена.')
-            return
-        await state.update_data(appeal_violation=expected_violation, appeal_type=expected_type)
+        await state.update_data(appeal_violation=expected_violation,appeal_type=expected_type)
         await state.set_state(AppealState.waiting_text)
-        await msg.answer('({10}) Напишите причину, по которой вы считаете наказание несправедливым.\n/cancel — отмена')
+        await msg.answer('({10})Напишите причину, по которой вы считаете наказание несправедливым.')
         return
-    markup = await appeal_choices_markup(msg.from_user.id)
-    if len(markup.inline_keyboard) <= 1:
-        await msg.answer('({20}) У вас нет наказаний, доступных для обжалования.')
+    markup=await appeal_choices_markup(msg.from_user.id)
+    rows=markup.inline_keyboard
+    if len(rows)<=1:
+        await msg.answer('({20})У вас нет наказаний, доступных для обжалования.')
         return
-    await msg.answer('({10}) Выберите наказание, которое хотите обжаловать.', reply_markup=markup)
+    await msg.answer('({10})Выберите наказание, которое хотите обжаловать.',reply_markup=markup)
 
 @dp.message(Command('appeal'))
-async def appeal_cmd_new(msg: Message, state: FSMContext):
-    await appeal_start(msg, state)
+async def appeal_cmd_new(msg:Message,state:FSMContext):
+    await appeal_start(msg,state)
 
 @dp.callback_query(F.data.startswith('appeal_select_'))
-async def appeal_select_cb(cb: CallbackQuery, state: FSMContext):
-    if not await review_private_context(cb):
-        return
-    match = re.fullmatch(r'appeal_select_(warn|ban)_(-\d{5,})', cb.data or '')
-    if not match:
-        await cb.answer('Некорректная кнопка апелляции.', show_alert=True)
-        return
-    kind, raw_number = match.groups()
-    number = '#' + raw_number
-    if not await appealable_penalty(require_db(), cb.from_user.id, kind, number):
-        await cb.answer('Наказание недоступно: проверьте владельца и срок обжалования.', show_alert=True)
-        return
-    if await appeal_already_submitted(require_db(), cb.from_user.id, kind, number):
-        await cb.answer('Апелляция на это наказание уже отправлена.', show_alert=True)
-        return
-    await state.clear()
-    await state.update_data(appeal_violation=number, appeal_type=kind)
-    await state.set_state(AppealState.waiting_text)
-    await cb.message.edit_text('({10}) Напишите причину, по которой вы считаете наказание несправедливым.\n/cancel — отмена')
+async def appeal_select_cb(cb:CallbackQuery,state:FSMContext):
+    parts=(cb.data or '').split('_'); kind=parts[2] if len(parts)>2 else ''; num=parts[3] if len(parts)>3 else ''
+    violation=f'#{num}'
+    if kind=='warn':
+        row=await require_db().fetchrow("SELECT 1 FROM warn_logs WHERE user_id=$1 AND warn_number=$2 AND is_active=TRUE",cb.from_user.id,violation)
+    elif kind=='ban':
+        row=await require_db().fetchrow("SELECT 1 FROM ban_logs WHERE user_id=$1 AND ban_number=$2",cb.from_user.id,violation)
+    else: row=None
+    if not row: await cb.answer('Это наказание недоступно для вашего профиля.',show_alert=True); return
+    await state.update_data(appeal_violation=violation,appeal_type=kind); await state.set_state(AppealState.waiting_text)
+    await cb.message.edit_text('({10})Напишите причину, по которой вы считаете наказание несправедливым.')
     await cb.answer()
 
-@dp.message(AppealState.waiting_text, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def appeal_text_msg_new(msg: Message, state: FSMContext):
-    if msg.chat.type != 'private' or not msg.from_user:
-        return
-    reason = review_form_text(msg.text)
-    if reason is None:
-        await msg.answer('({8}) Напишите причину одним сообщением, до 1200 символов.\n/cancel — отмена')
-        return
-    data = await state.get_data()
-    kind, violation = data.get('appeal_type'), data.get('appeal_violation')
-    hubsup = await get_config('hubsup_id')
-    if not hubsup:
-        await msg.answer('({8}) Административный чат не подключён. Попробуйте позже.')
-        return
-    async with require_db().acquire() as conn, conn.transaction():
-        await conn.execute('INSERT INTO users(user_id) VALUES($1) ON CONFLICT DO NOTHING', msg.from_user.id)
-        await conn.fetchrow('SELECT user_id FROM users WHERE user_id=$1 FOR UPDATE', msg.from_user.id)
-        penalty = await appealable_penalty(conn, msg.from_user.id, kind, violation)
-        if not penalty:
-            response = '({14}) Наказание недоступно для обжалования. Используйте /appeal.'
-        elif await appeal_already_submitted(conn, msg.from_user.id, kind, violation):
-            response = '({8}) Апелляция на это наказание уже отправлена.'
-        else:
-            number = format_number(await next_number(conn, 'appeal_counter'))
-            row = await conn.fetchrow(
-                """INSERT INTO appeals(appeal_number,user_id,username,violation_number,violation_type,appeal_text,created_at)
-                   VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING RETURNING id""",
-                number, msg.from_user.id, msg.from_user.username, violation, kind, reason, now_ts(),
-            )
-            if not row:
-                response = '({8}) Апелляция на это наказание уже отправлена.'
-            else:
-                kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    _btn('({20}) Одобрить', f'appeal_decide_{number}_approve'),
-                    _btn('({14}) Отклонить', f'appeal_decide_{number}_reject'),
-                ]])
-                issued = datetime.fromtimestamp(int(penalty['created_at']), MSK).strftime('%d.%m.%Y %H:%M:%S')
-                title = 'Варн' if kind == 'warn' else 'Бан'
-                text = (
-                    '({40.2.36.35.41.32.42.43.32.40})\n'
-                    f'<b>Апелляция {esc(number)}</b>\n<blockquote>'
-                    f'({{44}}) Пользователь {user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)}\n'
-                    f'{esc(SEPARATOR)}\n({{10}}) Наказание: {title} {esc(violation)}\n'
-                    f'({{11}}) Время выдачи: {issued} МСК\nID: <code>{msg.from_user.id}</code>\n'
-                    f'{esc(SEPARATOR)}</blockquote>\n({{25}}) Комментарий\n<blockquote>«{esc(reason)}»</blockquote>'
-                )
-                await enqueue_delivery(conn, int(hubsup), text, message_thread_id=TOPICS['appeals'],
-                                       reply_markup=kb, dedupe_key=f'appeal:{number}')
-                response = f'({{17}}) Апелляция {esc(number)} отправлена администрации.\n({{9}}) Ожидайте решения.'
-    await state.clear()
-    await msg.answer(response)
+@dp.message(AppealState.waiting_text,F.text)
+async def appeal_text_msg_new(msg:Message,state:FSMContext):
+    data=await state.get_data(); reason=(msg.text or '').strip()
+    if not reason: await msg.answer('({8})Напишите причину апелляции.'); return
+    async with require_db().acquire() as conn:
+        number=format_number(await next_number(conn,'appeal_counter'))
+        await conn.execute("INSERT INTO appeals(appeal_number,user_id,username,violation_number,violation_type,appeal_text,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)",number,msg.from_user.id,msg.from_user.username,data['appeal_violation'],data['appeal_type'],reason,now_ts())
+    hubsup=await get_config('hubsup_id')
+    if hubsup:
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='({{20}})Одобрить',callback_data=f'appeal_decide_{number}_approve'),InlineKeyboardButton(text='({{14}})Отклонить',callback_data=f'appeal_decide_{number}_reject')]])
+        penalty_title = 'Варн' if data['appeal_type'] == 'warn' else 'Бан'
+        appeal_admin_text = (
+            '({40.2.36.35.41.32.42.43.32.40})\n'
+            f'({{44}})Пользователь {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\n'
+            f'{SEPARATOR}\n'
+            f'({{10}})Наказание: {penalty_title} #{esc(data["appeal_violation"].replace("#", ""))}\n'
+            f'({{11}}) время выдачи наказания {msk_time()} МСК\n'
+            f'ID {msg.from_user.id}\n{SEPARATOR}\n'
+            f'({{25}})Коментарий\n\"«{esc(reason)}»\"'
+        )
+        await require_bot().send_message(int(hubsup), appeal_admin_text, message_thread_id=TOPICS['appeals'], reply_markup=kb)
+    await state.clear(); await msg.answer(f'({{17}})Апелляция #{esc(number)} отправлена администрации.\n({{9}})Ожидайте решения.')
 
 @dp.callback_query(F.data.startswith('appeal_decide_'))
-async def appeal_decide_cb(cb: CallbackQuery):
-    if not await check_permission(cb.from_user.id, 2):
-        await cb.answer('Недостаточно прав.', show_alert=True)
-        return
-    if not await review_admin_context(cb):
-        return
-    match = re.fullmatch(r'appeal_decide_(#-\d{5,})_(approve|reject)', cb.data or '')
-    if not match:
-        await cb.answer('Некорректное решение.', show_alert=True)
-        return
-    number, decision = match.groups()
+async def appeal_decide_cb(cb:CallbackQuery):
+    if not await check_permission(cb.from_user.id,2): await cb.answer('Недостаточно прав.',show_alert=True); return
+    _,_,number,decision=(cb.data or '').split('_',3)
+    row=await require_db().fetchrow("SELECT * FROM appeals WHERE appeal_number=$1 AND status='pending'",number)
+    if not row: await cb.answer('Апелляция уже рассмотрена.',show_alert=True); return
+    status='approved' if decision=='approve' else 'rejected'
+    await require_db().execute("UPDATE appeals SET status=$2 WHERE appeal_number=$1",number,status)
+    if status=='approved':
+        if row['violation_type']=='warn':
+            await require_db().execute("UPDATE warn_logs SET is_active=FALSE WHERE user_id=$1 AND warn_number=$2",row['user_id'],row['violation_number'])
+            current=await get_user_warns(row['user_id']); await require_db().execute("UPDATE users SET warns=$2 WHERE user_id=$1",row['user_id'],current)
+        else:
+            await require_db().execute("UPDATE users SET banned=FALSE,ban_until=NULL WHERE user_id=$1",row['user_id'])
     try:
-        async with require_db().acquire() as conn, conn.transaction():
-            row = await conn.fetchrow('SELECT * FROM appeals WHERE appeal_number=$1 FOR UPDATE', number)
-            if not row or row['status'] != 'pending':
-                await cb.answer('Апелляция уже рассмотрена или не найдена.', show_alert=True)
-                return
-            status = 'rejected'
-            if decision == 'approve':
-                if row['violation_type'] == 'warn':
-                    penalty = await conn.fetchrow('SELECT chat_id FROM warn_logs WHERE user_id=$1 AND warn_number=$2',
-                                                  row['user_id'], row['violation_number'])
-                    changed = False
-                    if penalty:
-                        removed, _, _ = await revoke_warning(int(row['user_id']), 1, cb.from_user.id,
-                                                             int(penalty['chat_id']), warn_number=row['violation_number'], conn=conn)
-                        changed = bool(removed)
-                elif row['violation_type'] == 'ban':
-                    penalty = await conn.fetchrow('SELECT chat_id FROM ban_logs WHERE user_id=$1 AND ban_number=$2',
-                                                  row['user_id'], row['violation_number'])
-                    changed = False
-                    if penalty:
-                        changed, _ = await apply_unban(int(penalty['chat_id']), int(row['user_id']), cb.from_user.id,
-                                                       ban_number=row['violation_number'], conn=conn)
-                else:
-                    changed = False
-                status = 'approved' if changed else 'obsolete'
-            await conn.execute(
-                'UPDATE appeals SET status=$2,decided_by=$3,decided_at=$4 WHERE id=$1',
-                row['id'], status, cb.from_user.id, now_ts(),
-            )
-            result = {'approved': 'одобрена', 'rejected': 'отклонена', 'obsolete': 'закрыта: наказание уже снято'}[status]
-            emoji = 20 if status == 'approved' else 14
-            await enqueue_delivery(conn, int(row['user_id']), f'({{{emoji}}}) Апелляция {esc(number)} {result}.',
-                                   dedupe_key=f'appeal-decision:{number}')
-    except Exception:
-        LOGGER.exception('Не удалось применить решение по апелляции %s', number)
-        await cb.answer('Не удалось применить решение. Дело остаётся открытым; повторите позже.', show_alert=True)
-        return
-    await clear_review_buttons(cb)
-    await cb.answer('Решение сохранено.' if status != 'obsolete' else 'Наказание уже снято. Дело закрыто.')
+        await require_bot().send_message(int(row['user_id']),f'({{20 if status=="approved" else 14}})Апелляция #{esc(number)} {"одобрена" if status=="approved" else "отклонена"}.')
+    except Exception: pass
+    await cb.message.edit_reply_markup(reply_markup=None); await cb.answer('Решение сохранено.')
 
 @dp.message(Command('report'))
-async def report_cmd(msg: Message):
-    if not await require_group_chat(msg) or not msg.from_user:
+async def report_cmd(msg:Message):
+    if not await require_group_chat(msg): return
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        await msg.answer('({8})Репорт можно отправить только ответом на сообщение.')
         return
-    source = msg.reply_to_message
-    if not source or not source.from_user:
-        await msg.answer('({8}) Репорт можно отправить только ответом на сообщение.')
+    if msg.reply_to_message.from_user.id==msg.from_user.id:
+        await msg.answer('({14})Нельзя отправить репорт на себя.')
         return
-    if source.from_user.id == msg.from_user.id:
-        await msg.answer('({14}) Нельзя отправить репорт на себя.')
-        return
-    hubsup = await get_config('hubsup_id')
-    if not hubsup:
-        await msg.answer('({8}) Административный чат не подключён. Репорт не отправлен.')
-        return
-    reason = review_form_text(command_payload(msg) or 'Нарушение правил')
-    if reason is None:
-        await msg.answer('({8}) Укажите причину до 1200 символов или отправьте /report ответом на сообщение.')
-        return
-    async with require_db().acquire() as conn, conn.transaction():
-        number = format_number(await next_number(conn, 'report_counter'))
-        row = await conn.fetchrow(
-            """INSERT INTO reports(report_number,reporter_id,violator_id,chat_id,message_id,reason,created_at)
-               VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(chat_id,message_id) DO NOTHING RETURNING id""",
-            number, msg.from_user.id, source.from_user.id, msg.chat.id, source.message_id, reason, now_ts(),
-        )
-        if not row:
-            await msg.answer('<blockquote>Это сообщение уже отправлено на рассмотрение</blockquote>')
-            return
-        buttons = []
-        url = message_url(msg.chat.id, source.message_id)
-        if url:
-            buttons.append([_btn('({34}) Перейти к сообщению', '', url=url)])
-        buttons.append([_btn('({20}) Завершить рассмотрение', f'report_review_{number}')])
-        excerpt = esc((source.text or source.caption or '[Медиа / служебное сообщение]')[:500])
-        text = (
-            f'({{1.6.35.36.5.6.4.1}})\n<b>Репорт {esc(number)}</b>\n'
-            f'Отправил: {user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)}\n'
-            f'На пользователя: {user_mention(source.from_user.id, source.from_user.username, source.from_user.full_name)}\n'
-            f'Причина: {esc(reason)}\n<blockquote>{excerpt}</blockquote>\nСтатус: в очереди'
-        )
-        await enqueue_delivery(conn, int(hubsup), text, message_thread_id=TOPICS['reports'],
-                               reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), dedupe_key=f'report:{number}')
-    await msg.reply('({17}) Репорт отправлен администрации.\n'
-                    '<blockquote>Команда администраторов рассмотрит сообщение в ближайшее время.\n'
-                    'После рассмотрения репорта будут применены меры наказания, если есть нарушения правил.</blockquote>\n'
-                    'Статус: в очереди')
+    row=await require_db().fetchrow("SELECT report_number FROM reports WHERE chat_id=$1 AND message_id=$2",msg.chat.id,msg.reply_to_message.message_id)
+    if row:
+        await msg.answer('"Это сообщение уже отправлено на рассмотрение"'); return
+    reason=(command_payload(msg) or 'Нарушение правил').strip()
+    async with require_db().acquire() as conn:
+        number=format_number(await next_number(conn,'report_counter'))
+        await conn.execute("INSERT INTO reports(report_number,reporter_id,violator_id,chat_id,message_id,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)",number,msg.from_user.id,msg.reply_to_message.from_user.id,msg.chat.id,msg.reply_to_message.message_id,reason,now_ts())
+    hubsup=await get_config('hubsup_id')
+    if hubsup:
+        url=message_url(msg.chat.id,msg.reply_to_message.message_id)
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='({34})Перейти к сообщению',url=url)]] if url else [])
+        await require_bot().send_message(int(hubsup),f'({{1.6.35.36.5.6.4.1}})\n<b>Репорт #{esc(number)}</b>\nОтправил: {user_mention(msg.from_user.id,msg.from_user.username,msg.from_user.full_name)}\nПричина: {esc(reason)}',message_thread_id=TOPICS['reports'],reply_markup=kb)
+    await msg.reply('({17})Репорт отправлен администрации.\n"Команда администраторов рассмотрит сообщение в ближайшее время.\nПосле расмотрения репорта будут применены меры наказания если есть нарушений правил. "\nСтатус: в очереди')
 
 @dp.callback_query(F.data.startswith('report_review_'))
-async def report_review_cb(cb: CallbackQuery):
-    if not await check_permission(cb.from_user.id, 1):
-        await cb.answer('Недостаточно прав.', show_alert=True)
-        return
-    if not await review_admin_context(cb):
-        return
-    match = re.fullmatch(r'report_review_(#-\d{5,})', cb.data or '')
-    if not match:
-        await cb.answer('Некорректный номер репорта.', show_alert=True)
-        return
-    async with require_db().acquire() as conn, conn.transaction():
-        row = await conn.fetchrow('SELECT * FROM reports WHERE report_number=$1 FOR UPDATE', match[1])
-        if not row or row['status'] != 'pending':
-            await cb.answer('Репорт уже рассмотрен или не найден.', show_alert=True)
-            return
-        if row['creator_only'] and cb.from_user.id != CREATOR_ID:
-            await cb.answer('Это дело может завершить только создатель.', show_alert=True)
-            return
-        await conn.execute("UPDATE reports SET status='reviewed',reviewed_by=$2,reviewed_at=$3 WHERE id=$1",
-                           row['id'], cb.from_user.id, now_ts())
-        if row['creator_only']:
-            await conn.execute("""UPDATE admin_punishment_requests SET status='closed',decided_by=$3,decided_at=$4
-                               WHERE chat_id=$1 AND source_message_id=$2 AND status='pending'""",
-                               row['chat_id'], row['message_id'], cb.from_user.id, now_ts())
-    await clear_review_buttons(cb)
+async def report_review_cb(cb:CallbackQuery):
+    if not await check_permission(cb.from_user.id,1): await cb.answer('Недостаточно прав.',show_alert=True); return
+    number=(cb.data or '').removeprefix('report_review_')
+    await require_db().execute("UPDATE reports SET status='reviewed',reviewed_by=$2 WHERE report_number=$1",number,cb.from_user.id)
     await cb.answer('Репорт отмечен как рассмотренный.')
 
 # ========================== ЛС РАЗДЕЛЫ ==========================
@@ -4211,11 +4014,15 @@ def trade_keyboard() -> InlineKeyboardMarkup:
 
 
 def trial_keyboard() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=name, callback_data=f'trial_race_{key}')] for key, name in _APPLICATION_RACES.items()]
-    rows.extend([[_btn('({60})Вопрос | ответ', 'menu_question')], [_btn('({61})Навигация и правила', 'menu_navigation')], [_btn('({63}) Назад', 'menu_back')]])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Хуман", callback_data="trial_race_human")],
+        [InlineKeyboardButton(text="Киборг", callback_data="trial_race_cyborg")],
+        [InlineKeyboardButton(text="Ангел", callback_data="trial_race_angel")],
+        [InlineKeyboardButton(text="Шарк", callback_data="trial_race_shark")],
+        [InlineKeyboardButton(text="Гуль", callback_data="trial_race_ghoul")],
+        [InlineKeyboardButton(text="Минк", callback_data="trial_race_mink")],
+        [_btn("({63}) Назад", "menu_back")],
+    ])
 
 
 def profile_keyboard(owner: bool = True) -> InlineKeyboardMarkup:
@@ -4228,736 +4035,344 @@ def profile_keyboard(owner: bool = True) -> InlineKeyboardMarkup:
 
 
 def application_help_keyboard(app_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_btn('({45})Помочь', f'app_help_{app_id}')]])
-
-
+    return InlineKeyboardMarkup(inline_keyboard=[[_btn("({{45}})Помочь", f"app_help_{app_id}")]])
 
 
 def as_payload(value):
-    if isinstance(value, dict):
-        return value
+    if isinstance(value, dict): return value
     if isinstance(value, str):
-        try:
-            result = json.loads(value)
-            return result if isinstance(result, dict) else {}
-        except (ValueError, TypeError):
-            pass
+        try: return json.loads(value)
+        except Exception: return {}
     return {}
 
 
+async def application_message(kind: str, app_id: int, user_id: int, payload: dict) -> str:
+    known = await require_db().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", user_id)
+    mention = user_mention(user_id, known["username"] if known else None, known["full_name"] if known else None)
+    if kind == "raid":
+        fruit = payload.get("fruit_name", "не указано")
+        skills = ", ".join(payload.get("skills", [])) or "не указано"
+        balance = payload.get("balance", "не указано")
+        chip = payload.get("chip")
+        comment = payload.get("comment", "-")
+        chip_line = f"\nЧип: {'нужен' if chip else 'не нужен'}" if chip is not None else ""
+        return (f"({{69}})<b>Заявка на рейд #{app_id:05d}</b>\n"
+                f"({{44}})Автор: {mention}\n"
+                f"({{69}})Фрукт: <b>{esc(fruit)}</b>\n"
+                f"Навыки: <b>{esc(skills)}</b>\n"
+                f"({{39}})Баланс фрагментов: <b>{esc(str(balance))}</b>{chip_line}\n"
+                f"({{56}})Комментарий: {esc(comment)}")
+    if kind == "sea":
+        return (f"({{49}})<b>{esc(payload.get('event_name','Морской ивент'))}</b> #{app_id:05d}\n"
+                f"({{44}})Автор: {mention}\n"
+                f"Участников: <b>{payload.get('count', 2)}</b>\n"
+                f"({{56}})Комментарий: {esc(payload.get('comment','-'))}")
+    if kind == "trial":
+        return (f"({{71}})<b>Триал #{app_id:05d}</b>\n"
+                f"({{44}})Автор: {mention}\n"
+                f"Раса: <b>{esc(payload.get('race','не указано'))}</b>\n"
+                f"({{56}})Комментарий: {esc(payload.get('comment','-'))}")
+    return (f"({{48}})<b>Трейд #{app_id:05d}</b>\n"
+            f"({{44}})Автор: {mention}\n"
+            f"{esc(payload.get('text',''))}")
 
 
-async def application_message(kind: str, app_id: int, user_id: int, payload: dict, *, conn=None) -> str:
-    db = conn or require_db()
-    known = await db.fetchrow('SELECT username, full_name FROM known_users WHERE user_id=$1', user_id)
-    mention = user_mention(user_id, known['username'] if known else None, known['full_name'] if known else None)
-    author = f'({{44}})Автор: {mention}'
-    # Bound legacy data too: profile/application values predate input validation.
-    comment = esc(str(payload.get('comment', '-'))[:700])
-    if kind == 'raid':
-        key = payload.get('raid_fruit', '')
-        fruit = RAID_FRUITS.get(key, (payload.get('fruit_name', 'не указано'), {}))[0]
-        chosen = payload.get('selected_skills', payload.get('skills', []))
-        skills = ', '.join(str(s) for s in chosen) if isinstance(chosen, (list, tuple)) else 'не указано'
-        fruit_id = await db.fetchval('SELECT value FROM config WHERE key=$1', f'custom_emoji_fruit_{key}') if key in RAID_FRUITS else None
-        icon = f'<tg-emoji emoji-id="{fruit_id}">🍎</tg-emoji>' if fruit_id and str(fruit_id).isdigit() else '🍎'
-        chip = payload.get('chip')
-        chip_line = '\nЧип: ' + ('автор может купить' if chip else 'нужна помощь с покупкой') if chip is not None else ''
-        return (f'({{69}})<b>Заявка на рейд #{app_id:05d}</b>\n{author}\n'
-                f'{icon}Фрукт: <b>{esc(str(fruit))}</b>\nНавыки: <b>{esc(skills or "не указано")}</b>\n'
-                f'({{39}})Баланс фрагментов: <b>{esc(str(payload.get("balance", "не указано"))[:30])}</b>{chip_line}\n'
-                f'({{24}})Комментарий: {comment}')
-    if kind == 'sea':
-        event = str(payload.get('sea_event', payload.get('event_name', 'Морской ивент')))[:100]
-        return (f'({{49}})<b>{esc(event)}</b> #{app_id:05d}\n{author}\n'
-                f'Участников: <b>{_application_capacity(kind, payload)}</b> (включая автора)\n'
-                f'({{24}})Комментарий: {comment}')
-    if kind == 'trial':
-        return (f'({{71}})<b>Триал #{app_id:05d}</b>\n{author}\n'
-                f'Раса: <b>{esc(str(payload.get("race", "не указано"))[:50])}</b>\n'
-                f'Участников: <b>3</b> (включая автора)\n({{24}})Комментарий: {comment}')
-    return f'({{48}})<b>Трейд #{app_id:05d}</b>\n{author}\n{esc(str(payload.get("text", ""))[:1000])}'
-
-
-
-
-async def create_application(kind: str, user_id: int, payload: dict, *, topic_key: str, callback_button: bool = True, request_key: str | None = None):
-    if kind not in ('sea', 'raid', 'trade', 'trial') or topic_key not in TOPICS:
-        raise ValueError('Unknown application kind or topic')
-    pool = require_db()
+async def create_application(kind: str, user_id: int, payload: dict, *, topic_key: str, callback_button: bool=True):
+    pool=require_db()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "INSERT INTO applications(user_id,kind,status,payload,created_at,topic_id,request_key,publication_state) "
-            "VALUES($1,$2,'pending',$3::jsonb,$4,$5,$6,'pending') "
-            "ON CONFLICT(request_key) WHERE request_key IS NOT NULL DO UPDATE SET request_key=EXCLUDED.request_key RETURNING id",
-            user_id, kind, json.dumps(payload, ensure_ascii=False), now_ts(), TOPICS[topic_key], request_key)
-    app_id = int(row['id'])
-    return app_id, await _application_publish(app_id)
-
-
-
-
-@dp.callback_query(F.data == 'menu_sea')
-async def menu_sea_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_begin_menu(cb, state, SeaState.choosing_event):
-        return
-    await cb.message.edit_text('({49})<b>Морские ивенты</b>\n\nНа какой ивент собираемся?', reply_markup=sea_keyboard())
-    await cb.answer()
-
-
-
-@dp.callback_query(F.data == 'menu_raid')
-async def menu_raid_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_begin_menu(cb, state, RaidState.choosing_fruit):
-        return
-    await cb.message.edit_text('({69})<b>Создание рейда</b>\n\nДальше выбор фруктов.', reply_markup=await raid_fruit_keyboard_async())
-    await cb.answer()
-
-
-
-@dp.callback_query(F.data == 'menu_trade')
-async def menu_trade_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_begin_menu(cb, state, TradeState.choosing_action):
-        return
-    await cb.message.edit_text('({48})<b>Трейды</b>\n\nВыберите действие:', reply_markup=trade_keyboard())
-    await cb.answer()
-
-
-
-@dp.callback_query(F.data == 'menu_trial')
-async def menu_trial_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_begin_menu(cb, state, TrialState.waiting_race):
-        return
-    await cb.message.edit_text('({71})<b>Создание Триала</b>\n\nВыберите расу:', reply_markup=await _application_trial_keyboard())
-    await cb.answer()
-
-
-
-@dp.callback_query(F.data == 'menu_apps')
-async def menu_applications_cb(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await _application_show_list(cb)
-    await cb.answer()
-
-
-
-@dp.callback_query(F.data == 'menu_active')
-async def menu_active_cb(cb: CallbackQuery):
-    if not await review_private_context(cb):
-        return
-    rows = await require_db().fetch(
-        'SELECT warn_number,reason,chat_id,message_id FROM warn_logs WHERE user_id=$1 AND is_active=TRUE ORDER BY id DESC LIMIT 10',
-        cb.from_user.id,
-    )
-    bans = await require_db().fetch(
-        """SELECT b.* FROM ban_logs b JOIN users u ON u.user_id=b.user_id
-           WHERE b.user_id=$1 AND b.is_active=TRUE AND u.banned=TRUE
-           AND (u.ban_until IS NULL OR u.ban_until>EXTRACT(EPOCH FROM NOW())) ORDER BY b.id DESC LIMIT 3""", cb.from_user.id,
-    )
-    if not rows and not bans:
-        await cb.message.edit_text('({20}) У вас нет активных нарушений.', reply_markup=back_menu_keyboard())
-        await cb.answer()
-        return
-    text = f'({{62}}) <b>Ваши активные нарушения</b>\nВсего активных варнов: {await get_user_warns(cb.from_user.id)}/4'
-    buttons = []
-    for row in rows:
-        text += f'\n\n({{8}}) Варн {esc(row["warn_number"])}\n<blockquote>{esc(row["reason"][:180])}</blockquote>'
-        if row['message_id']:
-            url = message_url(int(row['chat_id']), int(row['message_id']))
-            if url:
-                buttons.append([_btn(f'({{26}}) Варн {row["warn_number"]}', '', url=url)])
-    for row in bans:
-        text += f'\n\n({{15}}) <b>Бан {esc(row["ban_number"])} — активен</b>\n<blockquote>{esc(row["reason"][:180])}</blockquote>'
-        if row['message_id']:
-            url = message_url(int(row['chat_id']), int(row['message_id']))
-            if url:
-                buttons.append([_btn(f'({{26}}) Бан {row["ban_number"]}', '', url=url)])
-    buttons.append([_btn('({63}) Назад', 'menu_back')])
-    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    await cb.answer()
-
-@dp.callback_query(F.data == 'menu_appeal')
-async def menu_appeal_cb_new(cb: CallbackQuery, state: FSMContext):
-    if not await review_private_context(cb):
-        return
-    await state.clear()
-    markup = await appeal_choices_markup(cb.from_user.id)
-    text = ('({10}) Выберите наказание, которое хотите обжаловать.' if len(markup.inline_keyboard) > 1
-            else '({20}) У вас нет наказаний, доступных для обжалования.')
-    await cb.message.edit_text(text, reply_markup=markup)
-    await cb.answer()
-
-@dp.callback_query(F.data == 'menu_question')
-async def menu_question_cb_new(cb: CallbackQuery, state: FSMContext):
-    if not await review_private_context(cb):
-        return
-    await state.clear()
-    await state.set_state(QuestionState.waiting_question)
-    await cb.message.edit_text('({60}) <b>Вопрос | ответ</b>\n\nНапишите ваш вопрос одним сообщением.\n/cancel — отмена',
-                               reply_markup=back_menu_keyboard())
-    await cb.answer()
-
-@dp.message(QuestionState.waiting_question, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def question_msg_new(msg: Message, state: FSMContext):
-    if msg.chat.type != 'private' or not msg.from_user:
-        return
-    question = review_form_text(msg.text)
-    if question is None:
-        await msg.answer('({8}) Напишите вопрос одним сообщением, до 1200 символов.\n/cancel — отмена')
-        return
-    hubsup = await get_config('hubsup_id')
-    if not hubsup:
-        await msg.answer('({8}) Административный чат не подключён. Попробуйте позже.')
-        return
-    async with require_db().acquire() as conn, conn.transaction():
-        number = format_number(await next_number(conn, 'question_counter'))
-        row = await conn.fetchrow(
-            """INSERT INTO questions(question_number,user_id,username,question_text,created_at,submission_key,source_chat_id,source_message_id)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING id""",
-            number, msg.from_user.id, msg.from_user.username, question, now_ts(),
-            f'{msg.chat.id}:{msg.message_id}', msg.chat.id, msg.message_id,
-        )
-        if row:
-            text = (f'({{60}}) <b>Новый вопрос {esc(number)}</b>\n'
-                    f'({{44}}) {user_mention(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)}\n'
-                    f'({{46}}) Вопрос:\n<blockquote>«{esc(question)}»</blockquote>')
-            await enqueue_delivery(conn, int(hubsup), text, message_thread_id=TOPICS['questions'],
-                                   reply_markup=question_answer_keyboard(int(row['id'])), dedupe_key=f'question:{number}')
-    await state.clear()
-    response = ('({17}) Вопрос отправлен администрации.\nОжидайте ответа в личных сообщениях бота.'
-                if row else '({8}) Этот вопрос уже отправлен администрации.')
-    await msg.answer(response)
-
-@dp.callback_query(F.data == 'menu_navigation')
-async def menu_navigation_cb_new(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    hublox = await get_config('hublox_id')
-    rows = []
-    names = [('rules', '({61})Правила'), ('raids', '({69})Рейды'), ('sea_events', '({49})Морские ивенты'), ('trades', '({48})Трейды'), ('trials', '({71})Триалы')]
-    if hublox:
-        for key, title in names:
-            url = message_url(int(hublox), TOPICS[key])
-            if url:
-                rows.append([InlineKeyboardButton(text=render_button_text(title), url=url)])
-    rows.append([_btn('({63}) Назад', 'menu_back')])
-    text = '({61})<b>Навигация и правила</b>\n\nОзнакомьтесь с правилами сообщества HuBBlox. В главном меню доступны рейды, морские ивенты, трейды, триалы, профиль, заявки, апелляции и вопросы.'
+        row=await conn.fetchrow("INSERT INTO applications(user_id,kind,status,payload,created_at) VALUES($1,$2,'active',$3::jsonb,$4) RETURNING id", user_id, kind, json.dumps(payload, ensure_ascii=False), now_ts())
+    app_id=int(row["id"])
+    hublox=await get_config("hublox_id")
     if not hublox:
-        text += '\n\nСсылки появятся после привязки сообщества администратором.'
-    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        return app_id, None
+    text=await application_message(kind,app_id,user_id,payload)
+    markup=application_help_keyboard(app_id) if callback_button else None
+    sent=await require_bot().send_message(int(hublox),text,message_thread_id=TOPICS[topic_key],reply_markup=markup)
+    await require_db().execute("UPDATE applications SET chat_message_id=$2 WHERE id=$1",app_id,sent.message_id)
+    return app_id,sent
+
+
+@dp.callback_query(F.data == "menu_sea")
+async def menu_sea_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("({49})<b>Морские ивенты</b>\n\nНа какой ивент собираемся?", reply_markup=sea_keyboard())
     await cb.answer()
 
-
-
-def sea_count_keyboard() -> InlineKeyboardMarkup:
-    rows = []
-    nums = list(range(2, 13))
-    for i in range(0, len(nums), 3):
-        rows.append([InlineKeyboardButton(text=str(n), callback_data=f"sea_count_{n}") for n in nums[i:i+3]])
-    rows.append([_btn("({63}) Назад", "menu_sea")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-@dp.callback_query(F.data.startswith('sea_event_'))
-async def sea_event_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, SeaState.choosing_event):
-        return
-    name = _APPLICATION_SEA_EVENTS.get((cb.data or '').removeprefix('sea_event_'))
-    if not name:
-        await cb.answer('Ивент не найден.', show_alert=True)
-        return
-    await state.update_data(sea_event=name)
-    await state.set_state(SeaState.waiting_count)
-    await cb.message.edit_text(f'({{49}})<b>{esc(name)}</b>\n\n<blockquote><i>Выберите количество участников.</i>\nМинимум — 2, максимум — 12, включая вас.</blockquote>', reply_markup=sea_count_keyboard())
+@dp.callback_query(F.data == "menu_raid")
+async def menu_raid_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("({69})<b>Создание рейда</b>\n\nДальше выбор фруктов.", reply_markup=await raid_fruit_keyboard_async())
     await cb.answer()
 
-
-
-@dp.callback_query(F.data.startswith('sea_count_'))
-async def sea_count_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, SeaState.waiting_count):
-        return
-    n = _application_callback_id(cb.data, 'sea_count_')
-    if n is None or not 2 <= n <= 12:
-        await cb.answer('Выберите от 2 до 12 участников.', show_alert=True)
-        return
-    await state.update_data(sea_count=n)
-    await state.set_state(SeaState.waiting_details)
-    await cb.message.edit_text(f'({{10}})<b>Участников: {n}</b>\n\nНапишите комментарий и детали (до 700 символов).\nЕсли не нужны — отправьте -.', reply_markup=back_menu_keyboard())
+@dp.callback_query(F.data == "menu_trade")
+async def menu_trade_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("({48})<b>Трейды</b>\n\nВыберите действие:", reply_markup=trade_keyboard())
     await cb.answer()
 
-
-
-@dp.message(SeaState.waiting_count, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def sea_count_msg(msg: Message, state: FSMContext):
-    raw = (msg.text or '').strip()
-    n = int(raw) if re.fullmatch(r'[0-9]{1,2}', raw) else 0
-    if not 2 <= n <= 12:
-        await msg.answer('({8})Укажите число от 2 до 12.')
-        return
-    await state.update_data(sea_count=n)
-    await state.set_state(SeaState.waiting_details)
-    await msg.answer('({10})Напишите комментарий и детали (до 700 символов).\nЕсли не нужны — отправьте -.', reply_markup=back_menu_keyboard())
-
-
-
-@dp.message(SeaState.waiting_details, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def sea_details_msg(msg: Message, state: FSMContext):
-    comment = await _application_input(msg, optional=True)
-    if comment is None:
-        return
-    data = await state.get_data()
-    if data.get('sea_event') not in _APPLICATION_SEA_EVENTS.values() or not 2 <= data.get('sea_count', 0) <= 12:
-        await msg.answer('({8})Откройте раздел «Морские ивенты» заново.', reply_markup=back_menu_keyboard())
-        return
-    await _application_submit(msg, state, 'sea', {'sea_event': data['sea_event'], 'sea_count': data['sea_count'], 'comment': comment}, 'sea_events')
-
-
-
-@dp.callback_query(F.data.startswith('raid_fruit_'))
-async def raid_fruit_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, RaidState.choosing_fruit):
-        return
-    key = (cb.data or '').removeprefix('raid_fruit_')
-    if key not in RAID_FRUITS:
-        await cb.answer('Фрукт не найден.', show_alert=True)
-        return
-    await state.update_data(raid_fruit=key, selected_skills=[])
-    await state.set_state(RaidState.waiting_skills)
-    icon = await fruit_emoji_html(key, '🍎')
-    await cb.message.edit_text(f'{icon}Выберите навыки для пробуждения.\n<blockquote>Можно выбрать от 1 до {len(RAID_FRUITS[key][1])} навыков.</blockquote>', reply_markup=raid_skill_keyboard(key, set()))
+@dp.callback_query(F.data == "menu_trial")
+async def menu_trial_cb(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("({71})<b>Создание Триала</b>\n\nВыберите расу:", reply_markup=trial_keyboard())
     await cb.answer()
 
+@dp.callback_query(F.data == "menu_apps")
+async def menu_applications_cb(cb: CallbackQuery):
+    rows=await require_db().fetch("SELECT id,kind,status,claimed_by FROM applications WHERE user_id=$1 AND status='active' ORDER BY id DESC",cb.from_user.id)
+    if not rows:
+        await cb.message.edit_text("({14})У вас нет активных заявок.",reply_markup=back_menu_keyboard()); await cb.answer(); return
+    lines=[]; buttons=[]
+    names={"raid":"({69})Рейд","sea":"({49})Морской ивент","trial":"({71})Триал","trade":"({48})Трейд"}
+    for r in rows:
+        state_text="заявка взята" if r["claimed_by"] else "активна"
+        lines.append(f'"{names.get(r["kind"],r["kind"])} #{r["id"]} — {state_text}"')
+        buttons.append([InlineKeyboardButton(text=f"Завершить заявку #{r['id']}",callback_data=f"app_finish_{r['id']}")])
+    buttons.append([_btn("({63}) Назад","menu_back")])
+    await cb.message.edit_text("({73})<b>Ваши активные заявки</b>\n\n"+"\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await cb.answer()
 
+@dp.callback_query(F.data == "menu_active")
+async def menu_active_cb(cb: CallbackQuery):
+    rows=await require_db().fetch("SELECT warn_number,reason,chat_id,message_id FROM warn_logs WHERE user_id=$1 AND is_active=TRUE ORDER BY id DESC",cb.from_user.id)
+    banned=await is_banned(cb.from_user.id)
+    if not rows and not banned:
+        await cb.message.edit_text("({20})У вас нет активных нарушений.",reply_markup=back_menu_keyboard()); await cb.answer(); return
+    text="({62})<b>Ваши активные нарушения</b>"
+    buttons=[]
+    for r in rows:
+        text+=f'\n\nВарн #{esc(r["warn_number"])} — 1/4\n"{esc(r["reason"])}"'
+        if r["message_id"]:
+            url=message_url(int(r["chat_id"]),int(r["message_id"]))
+            if url: buttons.append([InlineKeyboardButton(text="({26}) Перейти к сообщению",url=url)])
+    if banned: text+='\n\n({15})<b>Бан — активен</b>'
+    buttons.append([_btn("({63}) Назад","menu_back")])
+    await cb.message.edit_text(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await cb.answer()
 
-@dp.callback_query(F.data.startswith('raid_skill_'))
-async def raid_skill_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, RaidState.waiting_skills):
-        return
-    parts = (cb.data or '').split('_', 3)
-    key, skill = (parts[2], parts[3]) if len(parts) == 4 else ('', '')
-    data = await state.get_data()
-    if data.get('raid_fruit') != key or key not in RAID_FRUITS or skill not in RAID_FRUITS[key][1]:
-        await cb.answer('Сессия рейда истекла.', show_alert=True)
-        return
-    selected = set(data.get('selected_skills') or [])
-    selected.symmetric_difference_update({skill})
-    ordered = [key_skill for key_skill in RAID_FRUITS[key][1] if key_skill in selected]
-    await state.update_data(selected_skills=ordered)
-    await cb.message.edit_reply_markup(reply_markup=raid_skill_keyboard(key, selected))
+@dp.callback_query(F.data == "menu_appeal")
+async def menu_appeal_cb_new(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    warns=await require_db().fetch("SELECT warn_number FROM warn_logs WHERE user_id=$1 AND is_active=TRUE ORDER BY id DESC",cb.from_user.id)
+    banned=await is_banned(cb.from_user.id)
+    rows=[]
+    for r in warns: rows.append([InlineKeyboardButton(text=f"⚠️Варн #{r['warn_number']}",url=f"https://t.me/{BOT_USERNAME}?start=appeal_warn_{r['warn_number'].replace('#','')}")])
+    if banned:
+        br=await require_db().fetchrow("SELECT ban_number FROM ban_logs WHERE user_id=$1 ORDER BY id DESC LIMIT 1",cb.from_user.id)
+        if br: rows.append([InlineKeyboardButton(text=f"⚠️Бан #{br['ban_number']}",url=f"https://t.me/{BOT_USERNAME}?start=appeal_ban_{br['ban_number'].replace('#','')}")])
+    if not rows:
+        await cb.message.edit_text("({20})У вас нет наказаний, доступных для обжалования.",reply_markup=back_menu_keyboard())
+    else:
+        rows.append([_btn("({63}) Назад","menu_back")])
+        await cb.message.edit_text("({10})Выберите наказание, которое хотите обжаловать.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
 
+@dp.callback_query(F.data == "menu_question")
+async def menu_question_cb_new(cb: CallbackQuery,state:FSMContext):
+    await state.set_state(QuestionState.waiting_question)
+    await cb.message.edit_text("({60})<b>Вопрос | ответ</b>\n\nНапишите ваш вопрос одним сообщением.",reply_markup=back_menu_keyboard()); await cb.answer()
 
+@dp.message(QuestionState.waiting_question,F.text)
+async def question_msg_new(msg:Message,state:FSMContext):
+    q=(msg.text or '').strip()
+    if not q: return
+    async with require_db().acquire() as conn:
+        number=format_number(await next_number(conn,'question_counter'))
+        row=await conn.fetchrow("INSERT INTO questions(question_number,user_id,username,question_text,created_at) VALUES($1,$2,$3,$4,$5) RETURNING id",number,msg.from_user.id,msg.from_user.username,q,now_ts())
+    hubsup=await get_config('hubsup_id')
+    if hubsup:
+        await require_bot().send_message(int(hubsup),f"({{60}})<b>Новый вопрос #{esc(number)}</b>\n({{44}}) @{esc(msg.from_user.username or msg.from_user.full_name)}\n({{46}}) Вопрос:\n\"«{esc(q)}»\"",message_thread_id=TOPICS['questions'],reply_markup=question_answer_keyboard(int(row['id'])))
+    await state.clear(); await msg.answer("({17})Вопрос отправлен администрации.\nОжидайте ответа в личных сообщениях бота.")
+
+@dp.callback_query(F.data == "menu_navigation")
+async def menu_navigation_cb_new(cb:CallbackQuery):
+    await cb.message.edit_text("({61})<b>Навигация и правила</b>\n\nОзнакомьтесь с правилами сообщества HuBBlox и используйте разделы меню для рейдов, морских ивентов, трейдов, триалов, профиля, заявок и апелляций.",reply_markup=back_menu_keyboard()); await cb.answer()
+
+@dp.callback_query(F.data.startswith("sea_event_"))
+async def sea_event_cb(cb:CallbackQuery,state:FSMContext):
+    key=cb.data.removeprefix('sea_event_')
+    names={'leviathan':'Левиафан','volcano':'Вулканический остров','kitsune':'Остров Китсуне','beast':'Морской зверь','mirage':'Остров Мираж','terror':'Терроршарк','ship':'Рейд на корабль','other':'Другое'}
+    await state.update_data(sea_event=names.get(key,'Другое')); await state.set_state(SeaState.waiting_count)
+    await cb.message.edit_text(f"({{49}})<b>{esc(names.get(key,'Другое'))}</b>\n\n/Выберите количество участников./\nМинимум — 2, максимум — 12."); await cb.answer()
+
+@dp.message(SeaState.waiting_count,F.text)
+async def sea_count_msg(msg:Message,state:FSMContext):
+    try:n=int((msg.text or '').strip())
+    except ValueError:n=0
+    if n<2 or n>12: await msg.answer('({8})Укажите число от 2 до 12.'); return
+    await state.update_data(sea_count=n); await state.set_state(SeaState.waiting_details); await msg.answer('({10})Напишите комментарий и детали.\nЕсли не нужны — отправьте -.')
+
+@dp.message(SeaState.waiting_details,F.text)
+async def sea_details_msg(msg:Message,state:FSMContext):
+    d=await state.get_data(); comment='-' if (msg.text or '').strip()=='-' else (msg.text or '').strip(); d['comment']=comment
+    app_id,_=await create_application('sea',msg.from_user.id,d,topic_key='sea_events')
+    await state.clear(); await msg.answer(f'({{20}})Заявка опубликована в теме «∆Морские ивенты(https://t.me/hubblox/1232)∆».')
+
+@dp.callback_query(F.data.startswith("raid_fruit_"))
+async def raid_fruit_cb(cb:CallbackQuery,state:FSMContext):
+    key=cb.data.removeprefix('raid_fruit_')
+    if key not in RAID_FRUITS: await cb.answer('Фрукт не найден.',show_alert=True); return
+    name,skills=RAID_FRUITS[key]
+    await state.update_data(raid_fruit=key,selected_skills=[]); await state.set_state(RaidState.waiting_skills)
+    fruit_id=await get_config(f'custom_emoji_fruit_{key}')
+    icon=f'<tg-emoji emoji-id="{esc(fruit_id)}">🍎</tg-emoji>' if fruit_id else ''
+    await cb.message.edit_text(f'{icon}Выберите навыки для пробуждения.\n"Можно выбрать от 1 до {len(skills)} навыков."',reply_markup=raid_skill_keyboard(key,set())); await cb.answer()
+
+@dp.callback_query(F.data.startswith("raid_skill_"))
+async def raid_skill_cb(cb:CallbackQuery,state:FSMContext):
+    parts=(cb.data or '').split('_'); key=parts[2] if len(parts)>=3 else ''; skill='_'.join(parts[3:]) if len(parts)>=4 else ''
+    data=await state.get_data(); fruit=data.get('raid_fruit')
+    if fruit!=key or key not in RAID_FRUITS or skill not in RAID_FRUITS[key][1]: await cb.answer('Сессия рейда истекла.',show_alert=True); return
+    selected=set(data.get('selected_skills') or [])
+    maxn=len(RAID_FRUITS[key][1])
+    if skill in selected: selected.remove(skill)
+    elif len(selected)>=maxn: await cb.answer(f'Максимум {maxn} навыков.',show_alert=True); return
+    else: selected.add(skill)
+    await state.update_data(selected_skills=list(selected)); await cb.message.edit_reply_markup(reply_markup=raid_skill_keyboard(key,selected)); await cb.answer()
 
 @dp.callback_query(F.data == 'raid_back_fruits')
-async def raid_back_fruits_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, RaidState.waiting_skills):
-        return
-    await menu_raid_cb(cb, state)
-
-
+async def raid_back_fruits_cb(cb:CallbackQuery,state:FSMContext):
+    await state.clear(); await cb.message.edit_text('({69})<b>Создание рейда</b>\n\nДальше выбор фруктов.',reply_markup=await raid_fruit_keyboard_async()); await cb.answer()
 
 @dp.callback_query(F.data.startswith('raid_next_'))
-async def raid_next_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, RaidState.waiting_skills):
-        return
-    data = await state.get_data()
-    key = data.get('raid_fruit')
-    selected = data.get('selected_skills') or []
-    if key not in RAID_FRUITS or cb.data != f'raid_next_{key}' or not selected or any(s not in RAID_FRUITS[key][1] for s in selected):
-        await cb.answer('Выберите хотя бы 1 навык в текущем рейде.', show_alert=True)
-        return
+async def raid_next_cb(cb:CallbackQuery,state:FSMContext):
+    data=await state.get_data(); key=data.get('raid_fruit'); selected=data.get('selected_skills') or []
+    if key not in RAID_FRUITS or not selected: await cb.answer('Выберите хотя бы 1 навык.',show_alert=True); return
     await state.set_state(RaidState.waiting_balance)
-    await cb.message.edit_text('({24})Укажите ваш баланс фрагментов.\n<blockquote>Баланс будет округлён вниз до 1000-ых.\nОтправьте только число.</blockquote>', reply_markup=back_menu_keyboard())
-    await cb.answer()
+    await cb.message.edit_text('({24})Укажите ваш баланс фрагментов.\n"Баланс будет округлён вниз до 1000-ых.\nОтправьте только число."'); await cb.answer()
 
-
-
-@dp.message(RaidState.waiting_balance, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def raid_balance_msg(msg: Message, state: FSMContext):
-    raw = (msg.text or '').strip().replace(' ', '')
-    if not re.fullmatch(r'[0-9]{1,12}', raw):
-        await msg.answer('({8})Отправьте целое неотрицательное число, не более 12 цифр.')
-        return
-    val = (int(raw) // 1000) * 1000
-    data = await state.get_data()
-    key = data.get('raid_fruit')
-    if key not in RAID_FRUITS or not data.get('selected_skills'):
-        await msg.answer('({8})Откройте создание рейда заново.', reply_markup=back_menu_keyboard())
-        return
-    await state.update_data(balance=val)
-    if key in ('phoenix', 'dough'):
-        await state.set_state(RaidState.waiting_chip)
-        icon = await fruit_emoji_html(key, '🍎')
-        sent = await msg.answer(f'{icon}{esc(RAID_FRUITS[key][0])}\nВы можете купить специальный чип?\nХотите купить чип?', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[_btn('({20}) Да', 'raid_chip_yes'), _btn('({14}) Нет', 'raid_chip_no')]]))
-        await state.update_data(ui_message_id=sent.message_id)
+@dp.message(RaidState.waiting_balance,F.text)
+async def raid_balance_msg(msg:Message,state:FSMContext):
+    raw=(msg.text or '').strip().replace(' ','')
+    try: val=int(raw)
+    except ValueError: await msg.answer('({8})Отправьте только число.'); return
+    if val<0: await msg.answer('({8})Баланс не может быть отрицательным.'); return
+    val=(val//1000)*1000
+    data=await state.get_data(); key=data['raid_fruit']; name=RAID_FRUITS[key][0]; data['balance']=val
+    if key in ('phoenix','dough'):
+        await state.update_data(**data); await state.set_state(RaidState.waiting_chip)
+        fruit_id=await get_config(f'custom_emoji_fruit_{key}'); icon=f'<tg-emoji emoji-id="{esc(fruit_id)}">🍎</tg-emoji>' if fruit_id else ''
+        await msg.answer(f'{icon}{name}\nВы можете купить специальный чип?\nХотите купить чип?',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[ _btn('({{20}}) Да','raid_chip_yes') , _btn('({{14}})Нет','raid_chip_no') ]]))
     else:
-        await state.set_state(RaidState.waiting_comment)
-        await msg.answer('({24})Напишите комментарий к рейду (до 700 символов).\nЕсли комментарий не нужен — отправьте -.', reply_markup=back_menu_keyboard())
-
-
+        await state.update_data(**data); await state.set_state(RaidState.waiting_comment); await msg.answer('({24})Напишите комментарий к рейду.\nЕсли комментарий не нужен — отправьте > - <.')
 
 @dp.callback_query(F.data.startswith('raid_chip_'))
-async def raid_chip_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, RaidState.waiting_chip):
-        return
-    if cb.data not in ('raid_chip_yes', 'raid_chip_no'):
-        await cb.answer('Выберите «Да» или «Нет».', show_alert=True)
-        return
-    await state.update_data(chip=cb.data == 'raid_chip_yes')
-    await state.set_state(RaidState.waiting_comment)
-    await cb.message.edit_text('({24})Напишите комментарий к рейду (до 700 символов).\nЕсли комментарий не нужен — отправьте -.', reply_markup=back_menu_keyboard())
-    await cb.answer()
+async def raid_chip_cb(cb:CallbackQuery,state:FSMContext):
+    data=await state.get_data(); data['chip']=cb.data.endswith('_yes'); await state.update_data(**data); await state.set_state(RaidState.waiting_comment); await cb.message.edit_text('({24})Напишите комментарий к рейду.\nЕсли комментарий не нужен — отправьте > - <.'); await cb.answer()
 
-
-
-@dp.message(RaidState.waiting_comment, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def raid_comment_msg_new(msg: Message, state: FSMContext):
-    comment = await _application_input(msg, optional=True)
-    if comment is None:
-        return
-    data = await state.get_data()
-    key = data.get('raid_fruit')
-    if key not in RAID_FRUITS or not data.get('selected_skills') or 'balance' not in data:
-        await msg.answer('({8})Откройте создание рейда заново.', reply_markup=back_menu_keyboard())
-        return
-    payload = {k: data[k] for k in ('raid_fruit', 'selected_skills', 'balance', 'chip') if k in data}
-    payload.update(comment=comment, fruit_name=RAID_FRUITS[key][0])
-    await _application_submit(msg, state, 'raid', payload, 'raids')
-
-
+@dp.message(RaidState.waiting_comment,F.text)
+async def raid_comment_msg_new(msg:Message,state:FSMContext):
+    data=await state.get_data(); data['comment']='-' if (msg.text or '').strip() in ('-','> - <') else (msg.text or '').strip(); data['fruit_name']=RAID_FRUITS[data['raid_fruit']][0]
+    app_id,_=await create_application('raid',msg.from_user.id,data,topic_key='raids')
+    await state.clear(); await msg.answer('({20})Заявка на рейд опубликована в теме «∆Рейды(https://t.me/hubblox/17)∆».')
 
 @dp.callback_query(F.data == 'trade_create')
-async def trade_create_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, TradeState.choosing_action):
-        return
-    await state.set_state(TradeState.waiting_trade)
-    await cb.message.edit_text('({48})<b>Создание трейда</b>\n\nНапишите, что отдаёте и что хотите получить (до 1000 символов).\nНапример: «Китсуне на Дракон».', reply_markup=back_menu_keyboard())
-    await cb.answer()
+async def trade_create_cb(cb:CallbackQuery,state:FSMContext):
+    await state.set_state(TradeState.waiting_trade); await cb.message.edit_text('({48})<b>Создание трейда</b>\n\nНапишите, что отдаёте и что хотите получить.\nНапример: «Китсуне на Дракон».',reply_markup=back_menu_keyboard()); await cb.answer()
 
-
-
-@dp.message(TradeState.waiting_trade, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def trade_create_msg(msg: Message, state: FSMContext):
-    text = await _application_input(msg, limit=1000)
-    if text is not None:
-        await _application_submit(msg, state, 'trade', {'text': text}, 'trades')
-
-
+@dp.message(TradeState.waiting_trade,F.text)
+async def trade_create_msg(msg:Message,state:FSMContext):
+    payload={'text':msg.text.strip()}; app_id,_=await create_application('trade',msg.from_user.id,payload,topic_key='trades'); await state.clear(); await msg.answer('({20})Трейд опубликован в теме ∆«Трейды»(https://t.me/hubblox/8)∆.')
 
 @dp.callback_query(F.data == 'trade_find')
-async def trade_find_cb_new(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, TradeState.choosing_action):
-        return
-    await state.set_state(TradeState.waiting_fruit)
-    await cb.message.edit_text('({39})<b>Поиск трейда</b>\n\n<blockquote>Назовите фрукт/геймпасс/скин, который вы ищете.\nНапример: тесто, алмаз, свет, дрожь.</blockquote>', reply_markup=back_menu_keyboard())
-    await cb.answer()
+async def trade_find_cb_new(cb:CallbackQuery,state:FSMContext):
+    await state.set_state(TradeState.waiting_fruit); await cb.message.edit_text('({39}) <b>Поиск трейда</b>\n\n"Назовите фрукт/геймпасс/скин, который вы ищете.\nНапример: тесто, алмаз, свет, дрожь."',reply_markup=back_menu_keyboard()); await cb.answer()
 
-
-
-@dp.message(TradeState.waiting_fruit, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def trade_find_msg(msg: Message, state: FSMContext):
-    q = await _application_input(msg, limit=80)
-    if q is None:
-        return
-    rows = await require_db().fetch("SELECT a.id,a.user_id,a.payload,a.chat_id,a.chat_message_id,k.username,k.full_name FROM applications a LEFT JOIN known_users k ON k.user_id=a.user_id WHERE a.kind='trade' AND a.status='active' AND POSITION(LOWER($1) IN LOWER(a.payload->>'text'))>0 ORDER BY a.id DESC LIMIT 11", q)
-    await msg.answer(f'({{39}})Найдено трейдов: {"больше 10" if len(rows)>10 else len(rows)}.' + (' Уточните запрос для других результатов.' if len(rows)>10 else ''))
-    for row in rows[:10]:
-        text = f'({{48}})<b>Трейд #{row["id"]}</b>\n({{44}})Автор: {user_mention(row["user_id"], row["username"], row["full_name"])}\n{esc(str(as_payload(row["payload"]).get("text", ""))[:1000])}'
-        url = message_url(row['chat_id'], row['chat_message_id']) if row['chat_id'] and row['chat_message_id'] else None
-        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=render_button_text('({26})Перейти к сообщению'), url=url)]]) if url else None
-        await msg.answer(text, reply_markup=markup)
-    await state.clear()
-    await msg.answer('Выберите следующий раздел:', reply_markup=back_menu_keyboard())
-
-
+@dp.message(TradeState.waiting_fruit,F.text)
+async def trade_find_msg(msg:Message,state:FSMContext):
+    q=(msg.text or '').strip().lower(); rows=await require_db().fetch("SELECT id,user_id,payload,chat_message_id FROM applications WHERE kind='trade' AND status='active' AND payload::text ILIKE $1 ORDER BY id DESC LIMIT 20",f'%{q}%')
+    if not rows: await msg.answer('({39})Найдено трейдов: 0'); await state.clear(); return
+    text='({39})<b>Найдено трейдов:</b>\n'+SEPARATOR+'\n'; buttons=[]
+    for r in rows:
+        payload=as_payload(r['payload']); text+=f'({{48}})Трейд #{r["id"]}\n({{44}})Автор: {r["user_id"]}\n{esc(payload.get("text",""))}\n\n';
+        if r['chat_message_id']:
+            url=message_url(int(await get_config('hublox_id')),int(r['chat_message_id'])) if await get_config('hublox_id') else None
+            if url: buttons.append([InlineKeyboardButton(text='({26})Перейти к сообщению',url=url)])
+    buttons.append([_btn('({63}) Назад','menu_back')]); await msg.answer(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await state.clear()
 
 @dp.callback_query(F.data == 'trade_active')
-async def trade_active_cb(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    rows = await require_db().fetch("SELECT id,payload FROM applications WHERE kind='trade' AND status='active' AND user_id=$1 ORDER BY id DESC LIMIT 11", cb.from_user.id)
-    lines, buttons = [], []
-    for row in rows[:10]:
-        snippet = str(as_payload(row['payload']).get('text', ''))[:120]
-        lines.append(f'({{48}})Трейд #{row["id"]}\n{esc(snippet)}')
-        buttons.append([_btn(f'Завершить трейд #{row["id"]}', f'app_finish_{row["id"]}')])
-    if len(rows) > 10:
-        lines.append('Показаны 10 последних трейдов.')
-    buttons.append([_btn('({63}) Назад', 'menu_trade')])
-    await cb.message.edit_text('({62})<b>Активные трейды</b>\n\n' + ('\n\n'.join(lines) if lines else 'Нет активных трейдов.'), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    await cb.answer()
-
-
+async def trade_active_cb(cb:CallbackQuery):
+    rows=await require_db().fetch("SELECT id,payload FROM applications WHERE kind='trade' AND status='active' AND user_id=$1 ORDER BY id DESC",cb.from_user.id)
+    text='({{62}})<b>Активные трейды</b>\n\n'+('Нет активных трейдов.' if not rows else '\n'.join(f'({{48}})Трейд #{r["id"]}\n{esc(as_payload(r["payload"]).get("text",""))}' for r in rows))
+    await cb.message.edit_text(text,reply_markup=back_menu_keyboard()); await cb.answer()
 
 @dp.callback_query(F.data.startswith('trial_race_'))
-async def trial_race_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, TrialState.waiting_race):
-        return
-    key = (cb.data or '').removeprefix('trial_race_')
-    race = _APPLICATION_RACES.get(key)
-    if not race:
-        await cb.answer('Раса не найдена.', show_alert=True)
-        return
-    await state.update_data(race=race, race_key=key)
-    await state.set_state(TrialState.waiting_comment)
-    await cb.message.edit_text(f'({{71}})<b>Создание Триала</b>\n\nВыбрана раса: <b>{race}</b>\n\n({{24}})Напишите комментарий к заявке (до 700 символов). Если не нужен — отправьте -.', reply_markup=back_menu_keyboard())
-    await cb.answer()
+async def trial_race_cb(cb:CallbackQuery,state:FSMContext):
+    races={'human':'Хуман','cyborg':'Киборг','angel':'Ангел','shark':'Шарк','ghoul':'Гуль','mink':'Минк'}; key=cb.data.removeprefix('trial_race_'); race=races.get(key)
+    if not race: await cb.answer(); return
+    await state.update_data(race=race); await state.set_state(TrialState.waiting_comment); await cb.message.edit_text(f'({{71}})<b>Создание Триала</b>\n\nВыбрана раса: <b>{race}</b>\n\n({{24}})Напишите комментарий к заявке. Если не нужен — отправьте -.'); await cb.answer()
 
+@dp.message(TrialState.waiting_comment,F.text)
+async def trial_comment_msg(msg:Message,state:FSMContext):
+    data=await state.get_data(); data['comment']='-' if (msg.text or '').strip()=='-' else (msg.text or '').strip(); app_id,_=await create_application('trial',msg.from_user.id,data,topic_key='trials'); await state.clear(); await msg.answer(f'({{20}})Заявка на триал #{app_id:05d} опубликована.')
 
+@dp.callback_query(F.data.startswith('app_help_'))
+async def app_help_cb(cb:CallbackQuery,state:FSMContext):
+    app_id=int(cb.data.removeprefix('app_help_')); row=await require_db().fetchrow("SELECT user_id,status,kind FROM applications WHERE id=$1",app_id)
+    if not row or row['status']!='active': await cb.answer('Заявка уже закрыта.',show_alert=True); return
+    if row['user_id']==cb.from_user.id: await cb.answer('Нельзя помочь со своей заявкой.',show_alert=True); return
+    await state.update_data(help_app=app_id); await cb.message.answer('Вы уверены, что хотите помочь с этой заявкой({{46}})',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[_btn('({{20}}) Подтвердить',f'app_help_confirm_{app_id}'),_btn('({{14}})Отмена','app_help_cancel')]])); await cb.answer()
 
-@dp.message(TrialState.waiting_comment, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def trial_comment_msg(msg: Message, state: FSMContext):
-    comment = await _application_input(msg, optional=True)
-    if comment is None:
-        return
-    data = await state.get_data()
-    if data.get('race') not in _APPLICATION_RACES.values():
-        await msg.answer('({8})Откройте создание триала заново.', reply_markup=back_menu_keyboard())
-        return
-    await _application_submit(msg, state, 'trial', {'race': data['race'], 'race_key': data.get('race_key'), 'comment': comment}, 'trials')
-
-
-
-@dp.callback_query(F.data.regexp(r'^app_help_[1-9][0-9]{0,18}$'))
-async def app_help_cb(cb: CallbackQuery, state: FSMContext):
-    app_id = _application_callback_id(cb.data, 'app_help_')
-    if app_id is None:
-        await cb.answer('Некорректная заявка.', show_alert=True)
-        return
-    await _application_reconcile_public_callback(cb, app_id)
-    pool = require_db()
-    row = await pool.fetchrow('SELECT * FROM applications WHERE id=$1', app_id)
-    error = await _application_help_error(pool, row, cb.from_user.id)
-    if error:
-        await cb.answer(error, show_alert=True)
-        return
-    uid = cb.from_user.id
-    await cb.message.answer('Вы уверены, что хотите помочь с этой заявкой({46})', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-        _btn('({20}) Подтвердить', f'app_help_confirm_{app_id}_{uid}'), _btn('({14})Отмена', f'app_help_cancel_{uid}')]]))
-    await cb.answer()
-
-
-
-@dp.callback_query(F.data.regexp(r'^app_help_confirm_[1-9][0-9]{0,18}_[1-9][0-9]{0,18}$'))
-async def app_help_confirm_cb(cb: CallbackQuery):
-    parts = (cb.data or '').split('_')
-    app_id = _application_callback_id('app_' + parts[-2], 'app_') if len(parts) == 5 else None
-    owner_id = int(parts[-1]) if parts and parts[-1].isdigit() else 0
-    if not app_id or owner_id != cb.from_user.id:
-        await cb.answer('Это подтверждение другого пользователя.', show_alert=True)
-        return
-    async with require_db().acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow('SELECT * FROM applications WHERE id=$1 FOR UPDATE', app_id)
-            error = await _application_help_error(conn, row, cb.from_user.id)
-            if not error:
-                await conn.execute('INSERT INTO application_helpers(application_id,user_id,created_at) VALUES($1,$2,$3)', app_id, cb.from_user.id, now_ts())
-                await conn.execute('UPDATE applications SET claimed_by=COALESCE(claimed_by,$2),claimed_at=COALESCE(claimed_at,$3),render_dirty=TRUE WHERE id=$1', app_id, cb.from_user.id, now_ts())
-                helper = await conn.fetchrow('SELECT roblox_username FROM users WHERE user_id=$1', cb.from_user.id)
-                roblox = (helper['roblox_username'] if helper else None) or 'не указан'
-                payload = as_payload(row['payload'])
-                role = {'raid': payload.get('fruit_name') or RAID_FRUITS.get(payload.get('raid_fruit'), ('Рейд', {}))[0],
-                        'sea': payload.get('sea_event', 'Морской ивент'), 'trial': payload.get('race', 'Триал')}.get(row['kind'], row['kind'])
-                # The author notification commits atomically with the helper claim.
-                await enqueue_delivery(conn, row['user_id'],
-                    f'({{19}})На вашу заявку #{app_id:05d} откликнулся {user_mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)}.\nRoblox: {esc(str(roblox)[:20])}\n<blockquote>Роль/ивент: {esc(str(role))}</blockquote>',
-                    dedupe_key=f'application-helper:{app_id}:{cb.from_user.id}')
-    if error:
-        await cb.answer(error, show_alert=True)
-        return
+@dp.callback_query(F.data.startswith('app_help_confirm_'))
+async def app_help_confirm_cb(cb:CallbackQuery):
+    app_id=int(cb.data.removeprefix('app_help_confirm_')); row=await require_db().fetchrow("SELECT user_id,status,kind FROM applications WHERE id=$1",app_id)
+    if not row or row['status']!='active': await cb.answer('Заявка уже занята.',show_alert=True); return
+    await require_db().execute("UPDATE applications SET claimed_by=$2,claimed_at=$3 WHERE id=$1 AND status='active'",app_id,cb.from_user.id,now_ts())
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer(f'Заявка #{app_id:05d} взята.')
+    await require_db().execute("UPDATE applications SET status='active' WHERE id=$1",app_id)
     try:
-        await cb.answer(f'Вы взяли заявку #{app_id:05d}.')
-    except Exception:
-        LOGGER.warning('Could not acknowledge application claim %s; claim and notification are retained', app_id)
-    try:
-        await cb.message.edit_text(f'({{20}})Вы взяли заявку #{app_id:05d}.', reply_markup=None)
-    except Exception:
-        LOGGER.warning('Could not clear application confirmation %s', app_id)
-    await _application_refresh(app_id)
+        await require_bot().send_message(int(row['user_id']),f'({{19}})На вашу заявку #{app_id:05d} откликнулся @{esc(cb.from_user.username or cb.from_user.full_name)}.\nRoblox: RobloxName\n"Роль/ивент: {esc(row["kind"])}"')
+    except Exception: pass
 
+@dp.callback_query(F.data == 'app_help_cancel')
+async def app_help_cancel_cb(cb:CallbackQuery): await cb.answer('Отменено.')
 
-
-
-@dp.callback_query(F.data.regexp(r'^app_help_cancel_[1-9][0-9]{0,18}$'))
-async def app_help_cancel_cb(cb: CallbackQuery):
-    uid = _application_callback_id(cb.data, 'app_help_cancel_')
-    if uid != cb.from_user.id:
-        await cb.answer('Это подтверждение другого пользователя.', show_alert=True)
-        return
-    await cb.message.edit_text('({14})Отменено.', reply_markup=None)
-    await cb.answer()
-
-
-
-@dp.callback_query(F.data.regexp(r'^app_finish_[1-9][0-9]{0,18}$'))
-async def app_finish_cb(cb: CallbackQuery):
-    app_id = _application_callback_id(cb.data, 'app_finish_')
-    row = await require_db().fetchrow("UPDATE applications SET status='finished',render_dirty=TRUE WHERE id=$1 AND user_id=$2 AND status IN ('active','pending') RETURNING id", app_id, cb.from_user.id)
-    if not row:
-        await cb.answer('Заявка уже завершена или принадлежит другому пользователю.', show_alert=True)
-        return
-    await _application_refresh(app_id)
-    await cb.answer('Заявка завершена.')
-    await _application_show_list(cb)
-
-
+@dp.callback_query(F.data.startswith('app_finish_'))
+async def app_finish_cb(cb:CallbackQuery):
+    app_id=int(cb.data.removeprefix('app_finish_')); await require_db().execute("UPDATE applications SET status='finished' WHERE id=$1 AND user_id=$2",app_id,cb.from_user.id); await cb.answer('Заявка завершена.'); await menu_applications_cb(cb)
 
 @dp.callback_query(F.data == 'profile_edit')
-async def profile_edit_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_begin_menu(cb, state, ProfileState.choosing_field):
-        return
-    kb = InlineKeyboardMarkup(inline_keyboard=[[_btn('🏷 Тег', 'profile_set_tag')], [_btn('💬 Комментарий', 'profile_set_comment')], [_btn('🎮 Roblox', 'profile_set_roblox')], [_btn('({63}) Назад', 'menu_profile')]])
-    await cb.message.edit_text('({24})<b>Редактировать профиль</b>\nВыберите поле:', reply_markup=kb)
-    await cb.answer()
-
-
+async def profile_edit_cb(cb:CallbackQuery,state:FSMContext):
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🏷 Тег',callback_data='profile_set_tag')],[InlineKeyboardButton(text='💬 Комментарий',callback_data='profile_set_comment')],[InlineKeyboardButton(text='🎮 Roblox',callback_data='profile_set_roblox')],[_btn('({63}) Назад','menu_profile')]])
+    await cb.message.edit_text('({24})<b>Редактировать профиль</b>\nВыберите поле:',reply_markup=kb); await cb.answer()
 
 @dp.callback_query(F.data.startswith('profile_set_'))
-async def profile_set_cb(cb: CallbackQuery, state: FSMContext):
-    if not await _application_require_state(cb, state, ProfileState.choosing_field):
-        return
-    field = (cb.data or '').removeprefix('profile_set_')
-    options = {'tag': (ProfileState.waiting_tag, 'тег (1–64 символа)'), 'comment': (ProfileState.waiting_comment, 'комментарий (1–500 символов)'), 'roblox': (ProfileState.waiting_roblox, 'ник Roblox (3–20 латинских букв/цифр, не более одного подчёркивания внутри)')}
-    if field not in options:
-        await cb.answer('Поле не найдено.', show_alert=True)
-        return
-    target, label = options[field]
-    await state.set_state(target)
-    await cb.message.edit_text(f'Отправьте {label} одним сообщением.\n/cancel — отмена', reply_markup=back_menu_keyboard())
-    await cb.answer()
+async def profile_set_cb(cb:CallbackQuery,state:FSMContext):
+    what=cb.data.removeprefix('profile_set_'); states={'tag':ProfileState.waiting_tag,'comment':ProfileState.waiting_comment,'roblox':ProfileState.waiting_roblox}
+    st=states.get(what)
+    if not st: return
+    await state.set_state(st); await cb.message.edit_text('Отправьте новое значение одним сообщением.\n/cancel — отмена'); await cb.answer()
 
+@dp.message(ProfileState.waiting_tag,F.text)
+async def profile_tag_msg(msg:Message,state:FSMContext): await require_db().execute('UPDATE users SET profile_tag=$2 WHERE user_id=$1',msg.from_user.id,msg.text.strip()); await state.clear(); await msg.answer('({20})Тег профиля обновлён.')
+@dp.message(ProfileState.waiting_comment,F.text)
+async def profile_comment_msg(msg:Message,state:FSMContext): await require_db().execute('UPDATE users SET profile_comment=$2 WHERE user_id=$1',msg.from_user.id,msg.text.strip()); await state.clear(); await msg.answer('({20})Комментарий профиля обновлён.')
+@dp.message(ProfileState.waiting_roblox,F.text)
+async def profile_roblox_msg(msg:Message,state:FSMContext): await require_db().execute('UPDATE users SET roblox_username=$2 WHERE user_id=$1',msg.from_user.id,msg.text.strip()); await state.clear(); await msg.answer('({20})Ник Roblox обновлён.')
 
-
-@dp.message(ProfileState.waiting_tag, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def profile_tag_msg(msg: Message, state: FSMContext):
-    value = await _application_input(msg, limit=64)
-    if value is not None:
-        await _application_save_profile(msg, state, 'profile_tag', value)
-
-
-@dp.message(ProfileState.waiting_comment, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def profile_comment_msg(msg: Message, state: FSMContext):
-    value = await _application_input(msg, limit=500)
-    if value is not None:
-        await _application_save_profile(msg, state, 'profile_comment', value)
-
-
-@dp.message(ProfileState.waiting_roblox, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def profile_roblox_msg(msg: Message, state: FSMContext):
-    value = (msg.text or '').strip()
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_]{1,18}[A-Za-z0-9]', value) or value.count('_') > 1:
-        await msg.answer('({8})Ник Roblox: 3–20 латинских букв/цифр; допускается одно подчёркивание внутри.')
-        return
-    await _application_save_profile(msg, state, 'roblox_username', value)
-
-
-
-@dp.callback_query(F.data.startswith('verify_user_'))
+@dp.callback_query(F.data.startswith("verify_user_"))
 async def verify_user_cb(cb: CallbackQuery):
-    raw = (cb.data or '').removeprefix('verify_user_')
-    if not raw.isdigit() or int(raw) != cb.from_user.id:
-        await cb.answer('Эта кнопка предназначена другому пользователю.',show_alert=True)
+    try:
+        target = int((cb.data or "").removeprefix("verify_user_"))
+    except ValueError:
+        target = -1
+    if not cb.from_user or cb.from_user.id != target:
+        await cb.answer("Эта кнопка предназначена другому пользователю.", show_alert=True)
         return
-    async with require_db().acquire() as conn, conn.transaction():
-        row = await conn.fetchrow('SELECT * FROM users WHERE user_id=$1 FOR UPDATE', cb.from_user.id)
-        pending = await conn.fetchrow('SELECT * FROM captcha_pending WHERE user_id=$1',cb.from_user.id)
-        if not pending or not cb.message or pending['chat_id'] != cb.message.chat.id:
-            await cb.answer('Проверка уже завершена или кнопка устарела.',show_alert=True)
-            return
-        if not row['banned']:
-            if row['mute_until'] and row['mute_until'] > now_ts()+30:
-                await require_bot().restrict_chat_member(pending['chat_id'],cb.from_user.id,
-                    permissions=ChatPermissions(can_send_messages=False),until_date=row['mute_until'])
-            else:
-                await clear_restrictions(pending['chat_id'],cb.from_user.id)
-        await conn.execute('UPDATE users SET verified=TRUE,roblox_prompt_pending=(roblox_username IS NULL) WHERE user_id=$1',cb.from_user.id)
-        await conn.execute('DELETE FROM captcha_pending WHERE user_id=$1',cb.from_user.id)
-    await cb.answer('Проверка пройдена.')
-    await cb.message.edit_text(
-        f'👋 Добро пожаловать, {user_mention(cb.from_user.id,cb.from_user.username)}\n'
-        'Статус профиля: ({20}) Верифицирован\n'
-        '<blockquote>({73}) Незнание правил не освобождает от наказания.\n'
-        '({61}) В ЛС DuoSup доступны: рейды, морские ивенты, трейды, триалы, профиль, заявки, апелляции и вопросы.\n'
-        'Ознакомьтесь с правилами в теме «Правила».</blockquote>',
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Открыть DuoSup',url=f'https://t.me/{BOT_USERNAME}?start=profile_setup')]]))
-    if not row['roblox_username']:
-        context = dp.fsm.get_context(bot=require_bot(),chat_id=cb.from_user.id,user_id=cb.from_user.id)
-        # Do not overwrite a draft started before verification.
-        if await context.get_state() is None:
-            await context.set_state(ProfileState.waiting_roblox)
-            try:
-                await require_bot().send_message(cb.from_user.id,'({24}) Укажите ваш ник в Roblox.')
-            except Exception:
-                LOGGER.info('User must open bot to complete Roblox profile: %s',cb.from_user.id)
+    await cb.answer("Проверка пройдена.", show_alert=True)
 
 
-@dp.callback_query(F.data.startswith('question_answer_'))
+@dp.callback_query(F.data.startswith("question_answer_"))
 async def question_answer_cb_fallback(cb: CallbackQuery, state: FSMContext):
-    if not await check_permission(cb.from_user.id, 2):
-        await cb.answer('Недостаточно прав.', show_alert=True)
-        return
-    if not await review_admin_context(cb):
-        return
-    match = re.fullmatch(r'question_answer_(\d+)', cb.data or '')
-    if not match:
-        await cb.answer('Некорректный номер вопроса.', show_alert=True)
-        return
-    row = await require_db().fetchrow('SELECT id,status FROM questions WHERE id=$1', int(match[1]))
-    if not row or row['status'] != 'pending':
-        await cb.answer('На этот вопрос уже ответили или он не найден.', show_alert=True)
-        return
-    await state.clear()
-    await state.update_data(question_id=int(row['id']), question_answer_chat=cb.message.chat.id,
-                            question_answer_thread=cb.message.message_thread_id)
-    await state.set_state(AdminQuestionState.waiting_answer)
-    await cb.message.answer('({60}) Пришлите готовый ответ одним сообщением, до 1200 символов.\n'
-                            'Он будет отправлен участнику в ЛС.\n/cancel — отмена',
-                            message_thread_id=cb.message.message_thread_id)
-    await cb.answer()
+    await cb.answer("Ответ на вопрос можно отправить сообщением администрации.", show_alert=True)
 
 
-@dp.callback_query(F.data.startswith('adminreq_reject_'))
+@dp.callback_query(F.data.startswith("adminreq_reject_"))
 async def adminreq_reject_cb_fallback(cb: CallbackQuery):
-    if cb.from_user.id != CREATOR_ID:
-        await cb.answer('Это дело может завершить только создатель.', show_alert=True)
-        return
-    if not await review_admin_context(cb):
-        return
-    match = re.fullmatch(r'adminreq_reject_(\d+)', cb.data or '')
-    if not match:
-        await cb.answer('Некорректный номер дела.', show_alert=True)
-        return
-    async with require_db().acquire() as conn, conn.transaction():
-        source = await conn.fetchrow('SELECT chat_id,source_message_id FROM admin_punishment_requests WHERE id=$1', int(match[1]))
-        if source:
-            # All closures lock report before request to avoid cross-button deadlocks.
-            await conn.fetchrow('SELECT id FROM reports WHERE chat_id=$1 AND message_id=$2 FOR UPDATE',
-                                source['chat_id'], source['source_message_id'])
-        row = await conn.fetchrow('SELECT * FROM admin_punishment_requests WHERE id=$1 FOR UPDATE', int(match[1]))
-        if not row or row['status'] != 'pending':
-            await cb.answer('Дело уже завершено или не найдено.', show_alert=True)
-            return
-        await conn.execute("UPDATE admin_punishment_requests SET status='closed',decided_by=$2,decided_at=$3 WHERE id=$1",
-                           row['id'], cb.from_user.id, now_ts())
-        await conn.execute("""UPDATE reports SET status='reviewed',reviewed_by=$3,reviewed_at=$4
-                           WHERE chat_id=$1 AND message_id=$2 AND creator_only=TRUE AND status='pending'""",
-                           row['chat_id'], row['source_message_id'], cb.from_user.id, now_ts())
-    await clear_review_buttons(cb)
-    await cb.answer('Дело завершено.')
+    await cb.answer("Дело завершено.", show_alert=True)
 
 
-@dp.callback_query(F.data.startswith('emoji_slot_'))
+@dp.callback_query(F.data.startswith("emoji_slot_"))
 async def emoji_slot_cb_fallback(cb: CallbackQuery, state: FSMContext):
-    if not cb.from_user or cb.from_user.id != CREATOR_ID:
-        await cb.answer('Только создатель.', show_alert=True)
-        return
-    slot = (cb.data or '').removeprefix('emoji_slot_')
-    if slot not in EMOJI_SLOTS:
-        await cb.answer('Неизвестный раздел.', show_alert=True)
-        return
-    await state.clear()
-    await state.update_data(emoji_slot=slot)
-    await state.set_state(EmojiState.waiting_emoji)
-    await cb.message.edit_text(f'Отправьте один Premium Emoji для раздела <b>{esc(EMOJI_SLOTS[slot])}</b>.\nДля отмены: /cancel')
-    await cb.answer()
+    await cb.answer("Настройка этого эмодзи доступна через раздел настройки эмодзи.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("raid_skill_"))
@@ -4975,713 +4390,6 @@ async def raid_back_fruits_cb_fallback(cb: CallbackQuery):
     await cb.answer("Возврат к выбору фрукта.", show_alert=False)
 
 
-def review_form_text(value: str | None) -> str | None:
-    """Bound free-form text before embedding it in Telegram HTML messages."""
-    text = (value or '').strip()
-    if not text or text.startswith('/') or len(text) > 1200 or len(esc(text)) > 2000:
-        return None
-    return text
-
-async def enqueue_delivery(conn, chat_id: int, text: str, *, message_thread_id: int | None = None,
-                           reply_markup: InlineKeyboardMarkup | None = None,
-                           dedupe_key: str | None = None, reply_to_message_id: int | None = None) -> None:
-    """Persist a notification in the same transaction as its business record."""
-    await conn.execute(
-        """INSERT INTO admin_delivery_jobs
-           (dedupe_key,chat_id,message_thread_id,text,reply_markup,created_at,next_attempt_at,reply_to_message_id)
-           VALUES($1,$2,$3,$4,$5::jsonb,$6,$6,$7) ON CONFLICT(dedupe_key) DO NOTHING""",
-        dedupe_key, int(chat_id), message_thread_id, text,
-        reply_markup.model_dump_json(exclude_none=True) if reply_markup else None, now_ts(), reply_to_message_id,
-    )
-
-async def deliver_pending_jobs(limit: int = 20) -> int:
-    """Deliver queued notifications. Telegram delivery is necessarily at least once."""
-    delivered = 0
-    for _ in range(max(0, min(limit, 100))):
-        async with require_db().acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
-                """SELECT * FROM admin_delivery_jobs WHERE delivered_at IS NULL
-                   AND next_attempt_at <= $1 ORDER BY next_attempt_at, id FOR UPDATE SKIP LOCKED LIMIT 1""", now_ts(),
-            )
-            if not row:
-                break
-            try:
-                markup_data = row['reply_markup']
-                if isinstance(markup_data, str):
-                    markup_data = json.loads(markup_data)
-                markup = InlineKeyboardMarkup.model_validate(markup_data) if markup_data else None
-                await asyncio.wait_for(require_bot().send_message(
-                    int(row['chat_id']), row['text'], message_thread_id=row['message_thread_id'],
-                    reply_markup=markup,
-                    reply_parameters=ReplyParameters(message_id=row['reply_to_message_id'],allow_sending_without_reply=True) if row['reply_to_message_id'] else None,
-                ), timeout=20)
-            except Exception as exc:
-                attempt = int(row['attempts']) + 1
-                retry_after = max(30, min(3600, 15 * 2 ** min(attempt, 8)))
-                retry_after = max(retry_after, int(getattr(exc, 'retry_after', 0) or 0))
-                await conn.execute(
-                    """UPDATE admin_delivery_jobs SET attempts=$2,next_attempt_at=$3,last_error=$4
-                       WHERE id=$1""", row['id'], attempt, now_ts() + retry_after,
-                    f'{type(exc).__name__}: {str(exc)[:500]}',
-                )
-                LOGGER.warning('Notification delivery deferred: job=%s attempt=%s error=%s',
-                               row['id'], attempt, type(exc).__name__)
-            else:
-                await conn.execute(
-                    "UPDATE admin_delivery_jobs SET delivered_at=$2,attempts=attempts+1,last_error=NULL WHERE id=$1",
-                    row['id'], now_ts(),
-                )
-                delivered += 1
-    return delivered
-
-async def delivery_worker() -> None:
-    while True:
-        try:
-            await deliver_pending_jobs()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            LOGGER.exception('Ошибка обработки очереди уведомлений')
-        await asyncio.sleep(5)
-
-async def review_admin_context(cb: CallbackQuery) -> bool:
-    hubsup = await get_config('hubsup_id')
-    if not cb.message or not hubsup or cb.message.chat.id != int(hubsup):
-        await cb.answer('Рассмотрение доступно только в административном чате.', show_alert=True)
-        return False
-    return True
-
-async def review_private_context(cb: CallbackQuery) -> bool:
-    if not cb.message or cb.message.chat.type != 'private' or cb.message.chat.id != cb.from_user.id:
-        await cb.answer('Этот раздел доступен в личных сообщениях бота.', show_alert=True)
-        return False
-    return True
-
-async def clear_review_buttons(cb: CallbackQuery) -> None:
-    if cb.message:
-        try:
-            await cb.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            LOGGER.info('Не удалось обновить кнопки рассмотренного дела', exc_info=True)
-
-async def appealable_penalty(conn, user_id: int, kind: str, number: str):
-    if kind not in {'warn', 'ban'} or not re.fullmatch(r'#-\d{5,}', number or ''):
-        return None
-    if kind == 'warn':
-        return await conn.fetchrow(
-            """SELECT * FROM warn_logs WHERE user_id=$1 AND warn_number=$2
-               AND is_active=TRUE AND created_at >= $3""", user_id, number, now_ts() - 86400,
-        )
-    return await conn.fetchrow(
-        """SELECT b.* FROM ban_logs b JOIN users u ON u.user_id=b.user_id
-           WHERE b.user_id=$1 AND b.ban_number=$2 AND b.is_active=TRUE AND u.banned=TRUE
-           AND (u.ban_until IS NULL OR u.ban_until > EXTRACT(EPOCH FROM NOW()))""", user_id, number,
-    )
-
-async def appeal_already_submitted(conn, user_id: int, kind: str, number: str) -> bool:
-    return bool(await conn.fetchval(
-        """SELECT EXISTS(SELECT 1 FROM appeals WHERE user_id=$1 AND violation_type=$2
-           AND violation_number=$3 AND status<>'legacy_duplicate')""", user_id, kind, number,
-    ))
-
-@dp.message(AdminQuestionState.waiting_answer, F.text, lambda message: not (message.text or '').lstrip().startswith('/'))
-async def question_answer_msg(msg: Message, state: FSMContext):
-    if not msg.from_user or not await check_permission(msg.from_user.id, 2):
-        await state.clear()
-        await msg.answer('({15}) У вас недостаточно прав для ответа на вопросы.')
-        return
-    data = await state.get_data()
-    hubsup = await get_config('hubsup_id')
-    if not hubsup or msg.chat.id != int(hubsup) or msg.chat.id != data.get('question_answer_chat'):
-        await msg.answer('({15}) Ответьте в административном чате, где был выбран вопрос.')
-        return
-    if msg.message_thread_id != data.get('question_answer_thread'):
-        await msg.answer('({8}) Ответьте в теме, где был выбран вопрос.')
-        return
-    answer = review_form_text(msg.text)
-    if answer is None:
-        await msg.answer('({8}) Напишите ответ одним сообщением, до 1200 символов.\n/cancel — отмена')
-        return
-    question_id = data.get('question_id')
-    if not isinstance(question_id, int):
-        await state.clear()
-        await msg.answer('({8}) Сначала выберите вопрос кнопкой «Ответить».')
-        return
-    async with require_db().acquire() as conn, conn.transaction():
-        row = await conn.fetchrow('SELECT * FROM questions WHERE id=$1 FOR UPDATE', question_id)
-        can_answer = bool(row and row['status'] == 'pending')
-        if can_answer:
-            await conn.execute("UPDATE questions SET status='answered',answered_by=$2,answer_text=$3,answered_at=$4 WHERE id=$1",
-                               question_id, msg.from_user.id, answer, now_ts())
-            text = (f'({{60}}) <b>Ответ на вопрос {esc(row["question_number"])}</b>\n'
-                    f'<blockquote>{esc(answer)}</blockquote>')
-            await enqueue_delivery(conn, int(row['user_id']), text, dedupe_key=f'question-answer:{question_id}')
-    await state.clear()
-    response = ('({20}) Ответ сохранён и направлен участнику.' if can_answer
-                else '({8}) На этот вопрос уже ответили или он не найден.')
-    await msg.answer(response)
-
-async def can_issue_ban(user_id: int, conn=None) -> bool:
-    if user_id == CREATOR_ID or user_id == require_bot().id:
-        return True
-    if not await check_permission(user_id, 1, conn):
-        return False
-    value = await (conn or require_db()).fetchval("SELECT can_ban FROM moderators WHERE user_id=$1", user_id)
-    return bool(value) if value is not None else False
-
-
-
-
-
-async def _locked_moderation_user(conn, user_id: int):
-    await conn.execute("INSERT INTO users(user_id) VALUES($1) ON CONFLICT(user_id) DO NOTHING", user_id)
-    return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1 FOR UPDATE", user_id)
-
-
-
-
-
-async def _set_warning_restriction(chat_id: int, user_id: int, count: int, *, until: int | None = None):
-    if count >= 4:
-        await require_bot().restrict_chat_member(chat_id,user_id,permissions=ChatPermissions(can_send_messages=False),until_date=0)
-        return None
-    if count >= 2:
-        deadline = until if until is not None else now_ts() + (300 if count == 2 else 86400)
-        if deadline > now_ts() + 30:
-            await require_bot().restrict_chat_member(chat_id,user_id,permissions=ChatPermissions(can_send_messages=False),until_date=deadline)
-            return deadline
-    await clear_restrictions(chat_id,user_id)
-    return None
-
-
-
-
-
-async def issue_warnings_batch(chat_id: int, user_id: int, reason: str, admin_id: int,
-                               source_message_id: int | None = None, count: int = 1, conn=None):
-    empty = {'issued': False, 'count': None, 'numbers': [], 'error': None, 'ban_number': None}
-    if count not in range(1,5) or validate_reason(reason):
-        return dict(empty,error=validate_reason(reason) or 'Количество варнов должно быть от 1 до 4.')
-    automated = admin_id == require_bot().id
-    if user_id == CREATOR_ID or user_id == admin_id:
-        return dict(empty,error='Нельзя наказать создателя или самого себя.')
-    if not automated:
-        if conn is None:
-            allowed,error,_,_=await can_punish(admin_id,user_id)
-        else:
-            actor_level=await get_moderator_level(admin_id,conn)
-            target_level=await get_moderator_level(user_id,conn)
-            allowed=await check_permission(admin_id,1,conn) and actor_level>target_level
-            error='Недостаточно прав для наказания этого пользователя.'
-        if not allowed:
-            return dict(empty,error=error)
-    try:
-        if conn is None:
-            async with get_warn_lock(chat_id,user_id), require_db().acquire() as connection:
-                async with connection.transaction():
-                    return await _issue_warnings_on_connection(connection,chat_id,user_id,reason,admin_id,source_message_id,count)
-        # A savepoint ensures a caught Telegram/API error rolls back warning writes
-        # even when an outer transaction also owns an auto-warning deduplication row.
-        async with conn.transaction():
-            return await _issue_warnings_on_connection(conn,chat_id,user_id,reason,admin_id,source_message_id,count)
-    except Exception as exc:
-        LOGGER.exception('Не удалось выдать варны пользователю %s',user_id)
-        return dict(empty,error=str(exc))
-
-
-
-
-
-async def _reconcile_warning_restriction(conn, chat_id: int, user_id: int, previous_count: int):
-    remaining = int(await conn.fetchval("SELECT COUNT(*) FROM warn_logs WHERE user_id=$1 AND is_active=TRUE",user_id))
-    if remaining < 4:
-        await conn.execute("UPDATE ban_logs SET is_active=FALSE WHERE user_id=$1 AND is_active=TRUE AND source_warn_number IS NOT NULL",user_id)
-    active_ban = bool(await conn.fetchval("SELECT EXISTS(SELECT 1 FROM ban_logs WHERE user_id=$1 AND is_active=TRUE)",user_id))
-    deadline = await conn.fetchval("SELECT mute_until FROM users WHERE user_id=$1",user_id)
-    if not active_ban:
-        if remaining >= 2:
-            latest = await conn.fetchval("SELECT MAX(created_at) FROM warn_logs WHERE user_id=$1 AND is_active=TRUE",user_id)
-            candidate = int(latest or now_ts()) + (300 if remaining == 2 else 86400)
-            # Reversal never extends an existing mute. A reversed auto-ban uses the
-            # surviving warning's original timestamp rather than starting a new day.
-            deadline = min(int(deadline),candidate) if deadline else candidate
-        else:
-            deadline = None
-        deadline = await _set_warning_restriction(chat_id,user_id,remaining,until=deadline)
-    await conn.execute("UPDATE users SET warns=$2,banned=$3,ban_until=NULL,mute_until=$4 WHERE user_id=$1",user_id,remaining,active_ban,deadline)
-    return remaining
-
-
-
-
-
-async def revoke_warning(user_id: int, count: int, moderator_id: int, chat_id: int,
-                         warn_number: str | None = None, conn=None, *, reconcile: bool = True):
-    if count not in range(1,5):
-        raise ValueError('Количество снимаемых варнов должно быть от 1 до 4.')
-    if conn is None:
-        async with get_warn_lock(chat_id,user_id), require_db().acquire() as connection, connection.transaction():
-            return await revoke_warning(user_id,count,moderator_id,chat_id,warn_number,connection,reconcile=reconcile)
-    await _locked_moderation_user(conn,user_id)
-    if not await check_permission(moderator_id,2,conn):
-        raise PermissionError('Недостаточно прав для снятия наказания.')
-    current = int(await conn.fetchval("SELECT COUNT(*) FROM warn_logs WHERE user_id=$1 AND is_active=TRUE",user_id))
-    rows = await conn.fetch("SELECT id FROM warn_logs WHERE user_id=$1 AND is_active=TRUE AND ($3::TEXT IS NULL OR warn_number=$3) ORDER BY id DESC LIMIT $2",user_id,count,warn_number)
-    if len(rows) != count:
-        return 0,current,None
-    await conn.execute("UPDATE warn_logs SET is_active=FALSE WHERE id=ANY($1::BIGINT[])",[r['id'] for r in rows])
-    if reconcile:
-        remaining = await _reconcile_warning_restriction(conn,chat_id,user_id,current)
-    else:
-        remaining = current-len(rows)
-        await conn.execute('UPDATE users SET warns=$2 WHERE user_id=$1',user_id,remaining)
-    number = format_number(await next_number(conn,'unwarn_counter'))
-    await conn.execute("INSERT INTO unwarn_logs(user_id,unwarn_number,moderator_id,chat_id,created_at,removed_count,remaining_count) VALUES($1,$2,$3,$4,$5,$6,$7)",user_id,number,moderator_id,chat_id,now_ts(),len(rows),remaining)
-    return len(rows),remaining,number
-
-
-
-
-
-def _moderation_usage(command: str) -> str:
-    titles = {'warn':'выдачи варна','ban':'выдачи бана','unwarn':'снятия варна','unban':'снятия бана'}
-    amount = ' (n)' if command in ('warn','unwarn') else ''
-    reason = ' &lt;причина&gt;' if command in ('warn','ban') else ''
-    details = '• Ответьте на сообщение пользователя либо укажите известный боту @username или ID.\n'
-    if amount:
-        details += '• Укажите количество от 1 до 4.\n'
-    if reason:
-        details += '• Укажите причину наказания.\n'
-    if command=='unwarn':
-        details += '• У пользователя должны быть активные варны.\n'
-    if command=='unban':
-        details += '• Пользователь должен быть забанен.\n'
-    return (f'({{8}})<b>Ошибка {titles[command]}</b>\n<blockquote><b>Возможные причины</b>\n'
-            f'{details}Пример применения команды:\n• С ответом: <code>/{command}{amount}{reason}</code>\n'
-            f'• Без ответа: <code>/{command}{amount} @username{reason}</code></blockquote>\n'
-            '({19})Если нашли ошибки в команде, свяжитесь с нами.\n<a href="https://t.me/duosup_bot">Contact Us</a>')
-
-
-
-
-
-async def _moderation_target_allowed(msg: Message, target_id: int, username, action: str, reason: str) -> bool:
-    allowed,error,mod_level,target_level = await can_punish(msg.from_user.id,target_id)
-    if allowed:
-        return True
-    await log_forbidden_attempt(action,msg.from_user,target_id,username,mod_level,target_level,error)
-    if target_level>0 and msg.from_user.id!=CREATOR_ID and target_id!=msg.from_user.id:
-        await request_creator_admin_punishment(msg,target_id,action,reason)
-    else:
-        await msg.answer(error)
-    return False
-
-
-
-
-
-_APPLICATION_SEA_EVENTS = {
-    'leviathan': 'Левиафан', 'volcano': 'Вулканический остров',
-    'kitsune': 'Остров Китсуне', 'beast': 'Морской зверь',
-    'mirage': 'Остров Мираж', 'terror': 'Терроршарк',
-    'ship': 'Рейд на корабль', 'other': 'Другое',
-}
-
-
-_APPLICATION_RACES = {'human': 'Хуман', 'cyborg': 'Киборг', 'angel': 'Ангел', 'shark': 'Шарк', 'ghoul': 'Гуль', 'mink': 'Минк'}
-
-
-def _application_capacity(kind: str, payload: dict) -> int:
-    """Party size includes the author; a raid allows four players, trial three."""
-    if kind == 'sea':
-        try:
-            return max(2, min(12, int(payload.get('sea_count', payload.get('count', 2)))))
-        except (ValueError, TypeError):
-            return 2
-    return {'raid': 4, 'trial': 3, 'trade': 1}.get(kind, 1)
-
-
-
-def _application_callback_id(data: str | None, prefix: str) -> int | None:
-    match = re.fullmatch(re.escape(prefix) + r'([1-9][0-9]{0,18})', data or '')
-    if not match:
-        return None
-    value = int(match.group(1))
-    return value if value <= 9223372036854775807 else None
-
-
-
-async def _application_require_state(cb, state, expected) -> bool:
-    expected_name = getattr(expected, 'state', expected)
-    if await state.get_state() != expected_name:
-        await cb.answer('Это старое меню. Откройте раздел заново.', show_alert=True)
-        return False
-    data = await state.get_data()
-    message = getattr(cb, 'message', None)
-    if not message or (data.get('ui_message_id') is not None and data['ui_message_id'] != message.message_id):
-        await cb.answer('Это старое меню. Используйте последнее сообщение.', show_alert=True)
-        return False
-    return True
-
-
-
-async def _application_begin_menu(cb, state, target):
-    if not cb.message or cb.message.chat.type != 'private':
-        await cb.answer('Откройте меню в личных сообщениях бота.', show_alert=True)
-        return False
-    await state.clear()
-    await state.set_state(target)
-    await state.update_data(ui_message_id=cb.message.message_id)
-    return True
-
-
-
-async def _application_input(msg, *, limit=700, optional=False):
-    text = (msg.text or '').strip()
-    if optional and text in ('-', '> - <'):
-        return '-'
-    if not text or len(text) > limit:
-        await msg.answer(f'({{8}})Введите текст от 1 до {limit} символов.' + (' Для пропуска отправьте -.' if optional else ''))
-        return None
-    return text
-
-
-
-async def _application_card(row, *, conn=None):
-    db = conn or require_db()
-    helpers = await db.fetch(
-        'SELECT h.user_id,k.username,k.full_name FROM application_helpers h '
-        'LEFT JOIN known_users k ON k.user_id=h.user_id WHERE h.application_id=$1 ORDER BY h.created_at,h.user_id', row['id'])
-    text = await application_message(row['kind'], row['id'], row['user_id'], as_payload(row['payload']), conn=conn)
-    capacity = _application_capacity(row['kind'], as_payload(row['payload']))
-    if row['status'] == 'finished':
-        text += '\n\n({20})<b>Заявка завершена.</b>'
-        markup = None
-    else:
-        full = len(helpers) >= capacity - 1
-        if row['kind'] != 'trade':
-            text += f'\n\nПомощников: {len(helpers)}/{capacity - 1}.'
-            text += '\n({20})<b>Команда собрана.</b>' if full else '\n({62})<b>Набор открыт.</b>'
-        markup = application_help_keyboard(row['id']) if not full and row['kind'] != 'trade' else None
-    if helpers:
-        text += '\n' + ', '.join(user_mention(h['user_id'], (h['username'] or '')[:32] or None, (h['full_name'] or '')[:40] or None) for h in helpers)
-    if row['publication_state'] != 'published':
-        markup = InlineKeyboardMarkup(inline_keyboard=[[_btn('({20})Подтвердить публикацию', f'app_recover_{row["id"]}')]])
-    return text, markup
-
-
-
-async def _application_refresh(app_id: int) -> bool:
-    # Serialise edits with claims/finishes so a slower old edit cannot reopen a card.
-    async with require_db().acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow('SELECT * FROM applications WHERE id=$1 FOR UPDATE', app_id)
-            if not row or not row['chat_id'] or not row['chat_message_id']:
-                return False
-            try:
-                text, markup = await _application_card(row, conn=conn)
-                await asyncio.wait_for(require_bot().edit_message_text(chat_id=row['chat_id'], message_id=row['chat_message_id'], text=text, reply_markup=markup), timeout=45)
-            except Exception as exc:
-                if 'message is not modified' not in str(exc).lower():
-                    await conn.execute('UPDATE applications SET render_dirty=TRUE WHERE id=$1', app_id)
-                    LOGGER.warning('Could not refresh application %s: %s', app_id, type(exc).__name__)
-                    return False
-            await conn.execute('UPDATE applications SET render_dirty=FALSE WHERE id=$1', app_id)
-            return True
-
-
-
-async def recover_applications():
-    rows = await require_db().fetch('SELECT id FROM applications WHERE render_dirty=TRUE AND chat_message_id IS NOT NULL ORDER BY id LIMIT 50')
-    for row in rows:
-        await _application_refresh(int(row['id']))
-
-
-
-async def application_recovery_loop():
-    while True:
-        try:
-            await recover_applications()
-        except Exception:
-            LOGGER.exception('Application card recovery failed')
-        await asyncio.sleep(45)
-
-
-
-async def _application_publish(app_id: int):
-    pool = require_db()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow('SELECT * FROM applications WHERE id=$1 FOR UPDATE', app_id)
-            if not row or row['status'] == 'finished':
-                return None
-            if row['publication_state'] == 'published':
-                return row['chat_message_id']
-            # A crashed send is ambiguous: do not blindly publish a duplicate.
-            if row['publication_state'] == 'sending':
-                return None
-            hublox = await conn.fetchval("SELECT value FROM config WHERE key='hublox_id'")
-            if not hublox:
-                await conn.execute("UPDATE applications SET publication_state='failed',publication_error='Основной чат не настроен' WHERE id=$1", app_id)
-                return None
-            await conn.execute("UPDATE applications SET publication_state='sending',publication_error=NULL,chat_id=$2,publication_started_at=$3 WHERE id=$1", app_id, int(hublox), now_ts())
-    try:
-        text, markup = await _application_card(row)
-        sent = await asyncio.wait_for(require_bot().send_message(int(hublox), text, message_thread_id=row['topic_id'], reply_markup=markup), timeout=45)
-    except Exception as exc:
-        # Telegram rejects these requests before delivery; network timeouts are ambiguous.
-        definite = type(exc).__name__ in ('TelegramBadRequest', 'TelegramForbiddenError', 'TelegramNotFound', 'TelegramRetryAfter')
-        await pool.execute('UPDATE applications SET publication_state=$2,publication_error=$3 WHERE id=$1', app_id,
-                           'failed' if definite else 'sending', type(exc).__name__)
-        LOGGER.warning('Application %s publication failed: %s', app_id, type(exc).__name__)
-        return None
-    try:
-        await pool.execute("UPDATE applications SET status=CASE WHEN status='finished' THEN 'finished' ELSE 'active' END,publication_state='published',chat_message_id=$2,publication_error=NULL,render_dirty=TRUE WHERE id=$1", app_id, sent.message_id)
-    except Exception:
-        # The durable sending row can be linked back via its public recovery button.
-        LOGGER.exception('Application %s sent as message %s but recording delivery failed', app_id, sent.message_id)
-        return None
-    await _application_refresh(app_id)
-    return sent.message_id
-
-
-
-async def _application_submit(msg, state, kind, payload, topic_key):
-    data = await state.get_data()
-    pending = data.get('pending_application_id')
-    if pending:
-        row = await require_db().fetchrow('SELECT user_id,kind,status FROM applications WHERE id=$1', int(pending))
-        if row and row['user_id'] == msg.from_user.id and row['kind'] == kind:
-            app_id, published = int(pending), await _application_publish(int(pending))
-        else:
-            pending = None
-    if not pending:
-        key = f'{kind}:{msg.from_user.id}:{msg.chat.id}:{msg.message_id}'
-        try:
-            app_id, published = await create_application(kind, msg.from_user.id, payload, topic_key=topic_key, request_key=key)
-        except Exception:
-            LOGGER.exception('Application creation failed for %s', msg.from_user.id)
-            await msg.answer('({14})Не удалось сохранить заявку. Данные сохранены в диалоге; попробуйте ещё раз.')
-            return
-    if not published:
-        await state.update_data(pending_application_id=app_id)
-        await msg.answer(f'({{8}})Заявка #{app_id:05d} сохранена, но публикация пока не подтверждена. Откройте «Мои заявки», чтобы повторить отправку или восстановить сообщение.', reply_markup=back_menu_keyboard())
-        return
-    await state.clear()
-    row = await require_db().fetchrow('SELECT chat_id,chat_message_id FROM applications WHERE id=$1', app_id)
-    url = message_url(row['chat_id'], row['chat_message_id']) if row else None
-    names = {'sea': 'Морские ивенты', 'raid': 'Рейды', 'trade': 'Трейды', 'trial': 'Триалы'}
-    link = f'<a href="{esc(url)}">{names[kind]}</a>' if url else names[kind]
-    await msg.answer(f'({{20}})Заявка #{app_id:05d} опубликована в теме «{link}».', reply_markup=back_menu_keyboard())
-
-
-
-async def _application_reconcile_public_callback(cb, app_id):
-    """Recover the message id after Telegram succeeded but the DB acknowledgement failed."""
-    if not cb.message:
-        return
-    await require_db().execute(
-        "UPDATE applications SET chat_message_id=$2,publication_state='published',status=CASE WHEN status='finished' THEN 'finished' ELSE 'active' END,publication_error=NULL "
-        "WHERE id=$1 AND chat_id=$3 AND publication_state='sending' AND status IN ('pending','finished') AND chat_message_id IS NULL",
-        app_id, cb.message.message_id, cb.message.chat.id)
-
-
-
-async def _application_help_error(conn, row, helper_id):
-    if not row or row['status'] != 'active' or row['publication_state'] != 'published':
-        return 'Заявка уже закрыта или ещё не опубликована.'
-    if row['user_id'] == helper_id:
-        return 'Нельзя помочь со своей заявкой.'
-    if row['kind'] == 'trade':
-        return 'Для трейдов используйте контакт автора.'
-    if await conn.fetchval('SELECT 1 FROM application_helpers WHERE application_id=$1 AND user_id=$2', row['id'], helper_id):
-        return 'Вы уже помогаете с этой заявкой.'
-    count = await conn.fetchval('SELECT COUNT(*) FROM application_helpers WHERE application_id=$1', row['id'])
-    if count >= _application_capacity(row['kind'], as_payload(row['payload'])) - 1:
-        return 'Команда уже собрана.'
-    return None
-
-
-
-@dp.callback_query(F.data.regexp(r'^app_retry_[1-9][0-9]{0,18}$'))
-async def application_retry_cb(cb: CallbackQuery):
-    app_id = _application_callback_id(cb.data, 'app_retry_')
-    row = await require_db().fetchrow('SELECT * FROM applications WHERE id=$1 AND user_id=$2', app_id, cb.from_user.id)
-    if not row or row['status'] == 'finished':
-        await cb.answer('Заявка недоступна.', show_alert=True)
-        return
-    if row['publication_state'] == 'sending':
-        await cb.message.edit_text(f'({{8}})Доставка заявки #{app_id:05d} не подтверждена. Проверьте тему: если заявка есть, нажмите «Подтвердить публикацию» под ней — это восстановит её. Если её нет, можно отправить заново.', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[_btn('Опубликовать заново', f'app_republish_{app_id}')], [_btn('({63}) Назад', 'menu_apps')]]))
-        await cb.answer()
-        return
-    published = await _application_publish(app_id)
-    await cb.answer('Заявка опубликована.' if published else 'Отправка пока не подтверждена.', show_alert=not bool(published))
-    await _application_show_list(cb)
-
-
-
-@dp.callback_query(F.data.regexp(r'^app_republish_[1-9][0-9]{0,18}$'))
-async def application_republish_cb(cb: CallbackQuery):
-    app_id = _application_callback_id(cb.data, 'app_republish_')
-    row = await require_db().fetchrow("UPDATE applications SET publication_state='pending' WHERE id=$1 AND user_id=$2 AND status='pending' AND publication_state='sending' AND COALESCE(publication_started_at,0)<=$3 RETURNING id", app_id, cb.from_user.id, now_ts() - 120)
-    if not row:
-        await cb.answer('Заявка недоступна либо отправка ещё выполняется. Повторите через 2 минуты.', show_alert=True)
-        return
-    published = await _application_publish(app_id)
-    await cb.answer('Заявка опубликована.' if published else 'Отправка пока не подтверждена.', show_alert=not bool(published))
-    await _application_show_list(cb)
-
-
-
-async def _application_show_list(cb, offset=0):
-    rows = await require_db().fetch("SELECT * FROM applications WHERE user_id=$1 AND status IN ('active','pending') ORDER BY id DESC LIMIT 4 OFFSET $2", cb.from_user.id, offset)
-    if not rows:
-        await cb.message.edit_text('({14})У вас нет активных заявок.', reply_markup=back_menu_keyboard())
-        return
-    lines, buttons = [], []
-    names = {'raid': '({69})Рейд', 'sea': '({49})Морской ивент', 'trial': '({71})Триал', 'trade': '({48})Трейд'}
-    for row in rows[:3]:
-        payload = as_payload(row['payload'])
-        title = esc(str(payload.get('sea_event', 'Морской ивент'))) if row['kind'] == 'sea' else names.get(row['kind'], 'Заявка')
-        status = 'активна({62})' if row['status'] == 'active' else 'ожидает публикации({8})'
-        helpers = await require_db().fetch('SELECT h.user_id,k.username,k.full_name FROM application_helpers h LEFT JOIN known_users k ON h.user_id=k.user_id WHERE application_id=$1 ORDER BY h.created_at,h.user_id', row['id'])
-        if helpers:
-            status = f'заявка взята, помощников {len(helpers)}/{_application_capacity(row["kind"], payload)-1}'
-        lines.append(f'{title} #{row["id"]} — {status}' + ('\n' + ', '.join(user_mention(h['user_id'], (h['username'] or '')[:32] or None, (h['full_name'] or '')[:40] or None) for h in helpers) if helpers else ''))
-        if row['status'] == 'pending':
-            buttons.append([_btn(f'Повторить публикацию #{row["id"]}', f'app_retry_{row["id"]}')])
-        buttons.append([_btn(f'Завершить заявку #{row["id"]}', f'app_finish_{row["id"]}')])
-    pagination = []
-    if offset:
-        pagination.append(_btn('← Ранее', f'app_page_{max(0, offset-3)}'))
-    if len(rows) > 3:
-        pagination.append(_btn('Далее →', f'app_page_{offset+3}'))
-    if pagination:
-        buttons.append(pagination)
-    buttons.append([_btn('({63}) Назад', 'menu_back')])
-    await cb.message.edit_text('({73})<b>Ваши активные заявки</b>\n\n' + '\n\n'.join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-
-
-async def _application_trial_keyboard():
-    markup = trial_keyboard()
-    for row in markup.inline_keyboard:
-        for button in row:
-            if button.callback_data and button.callback_data.startswith('trial_race_'):
-                key = button.callback_data.removeprefix('trial_race_')
-                emoji_id = await get_config(f'custom_emoji_race_{key}')
-                if emoji_id and emoji_id.isdigit():
-                    button.icon_custom_emoji_id = emoji_id
-    return markup
-
-
-
-async def _application_save_profile(msg, state, field, value):
-    columns = {'profile_tag', 'profile_comment', 'roblox_username'}
-    if field not in columns:
-        raise ValueError('Unknown profile field')
-    extra = ',roblox_prompt_pending=FALSE' if field == 'roblox_username' else ''
-    await require_db().execute(f'INSERT INTO users(user_id,{field}) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET {field}=EXCLUDED.{field}{extra}', msg.from_user.id, value)
-    await state.clear()
-    await msg.answer('({20})Профиль обновлён.', reply_markup=profile_keyboard())
-
-
-
-async def _issue_warnings_on_connection(conn, chat_id, user_id, reason, admin_id, source_message_id, count):
-    empty = {'issued': False, 'count': None, 'numbers': [], 'error': None, 'ban_number': None}
-    user = await _locked_moderation_user(conn,user_id)
-    if admin_id != require_bot().id:
-        allowed,error,_,_=await can_punish(admin_id,user_id,conn)
-        if not allowed:
-            return dict(empty,error=error)
-    current = int(await conn.fetchval("SELECT COUNT(*) FROM warn_logs WHERE user_id=$1 AND is_active=TRUE",user_id))
-    if user['banned'] or current >= 4:
-        return empty
-    maximum = 4 if await can_issue_ban(admin_id,conn) else 3
-    if current + count > maximum:
-        return dict(empty,error='({15})Недостаточно прав для четвёртого варна либо превышен лимит 4/4.')
-    final = current + count
-    numbers = []
-    for _ in range(count):
-        number = format_number(await next_number(conn,'warn_counter'))
-        await conn.execute("INSERT INTO warn_logs(user_id,warn_number,reason,moderator_id,chat_id,message_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)",user_id,number,reason.strip(),admin_id,chat_id,source_message_id,now_ts())
-        numbers.append(number)
-    ban_number = None
-    if final >= 4:
-        ban_number = format_number(await next_number(conn,'ban_counter'))
-        await conn.execute("INSERT INTO ban_logs(user_id,ban_number,reason,moderator_id,chat_id,message_id,created_at,source_warn_number) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",user_id,ban_number,'Достигнут лимит варнов (4/4): '+reason.strip(),admin_id,chat_id,source_message_id,now_ts(),numbers[-1])
-    deadline = None
-    if final >= 2:
-        if await get_moderator_level(user_id,conn) > 0:
-            await strip_telegram_admin_status(user_id,conn)
-        deadline = await _set_warning_restriction(chat_id,user_id,final)
-    await conn.execute("UPDATE users SET warns=$2,banned=$3,ban_until=NULL,mute_until=$4 WHERE user_id=$1",user_id,final,final>=4,deadline)
-    return dict(issued=True,count=final,numbers=numbers,error=None,ban_number=ban_number)
-
-
-
-
-
-
-_APPLICATION_SEA_EVENTS = {
-    'leviathan': 'Левиафан', 'volcano': 'Вулканический остров',
-    'kitsune': 'Остров Китсуне', 'beast': 'Морской зверь',
-    'mirage': 'Остров Мираж', 'terror': 'Терроршарк',
-    'ship': 'Рейд на корабль', 'other': 'Другое',
-}
-
-
-_APPLICATION_RACES = {'human': 'Хуман', 'cyborg': 'Киборг', 'angel': 'Ангел', 'shark': 'Шарк', 'ghoul': 'Гуль', 'mink': 'Минк'}
-
-
-@dp.callback_query(F.data.regexp(r'^app_page_[0-9]{1,9}$'))
-async def application_page_cb(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    offset = int((cb.data or '').removeprefix('app_page_'))
-    await _application_show_list(cb, offset=min(offset, 1000000))
-    await cb.answer()
-
-
-@dp.callback_query(F.data.regexp(r'^app_recover_[1-9][0-9]{0,18}$'))
-async def application_recover_cb(cb: CallbackQuery):
-    app_id = _application_callback_id(cb.data, 'app_recover_')
-    row = await require_db().fetchrow('SELECT user_id FROM applications WHERE id=$1', app_id)
-    if not row or row['user_id'] != cb.from_user.id:
-        await cb.answer('Подтвердить публикацию может только автор.', show_alert=True)
-        return
-    await _application_reconcile_public_callback(cb, app_id)
-    await _application_refresh(app_id)
-    await cb.answer('Состояние публикации обновлено.')
-
-
-
-
-
-
-async def drain_polling_updates(timeout: float = 60.0) -> None:
-    """Finish accepted updates before closing the shared database and Telegram session."""
-    # aiogram 3.31 stops polling without awaiting its concurrently handled updates.
-    updates = tuple(task for task in dp._handle_update_tasks if not task.done())
-    if not updates:
-        return
-    _, pending = await asyncio.wait(updates, timeout=timeout)
-    if pending:
-        LOGGER.warning('Shutdown deadline reached; cancelling %s unfinished updates', len(pending))
-        for task in pending:
-            task.cancel()
-    await asyncio.gather(*updates, return_exceptions=True)
-
-
-
-async def admin_has_active_punishment(user_id: int, conn=None) -> bool:
-    row = await (conn or require_db()).fetchrow(
-        'SELECT banned,ban_until,mute_until FROM users WHERE user_id=$1', user_id)
-    if not row:
-        return False
-    return bool((row.get('banned') and (row.get('ban_until') is None or int(row['ban_until']) > now_ts()))
-                or (row.get('mute_until') and int(row['mute_until']) > now_ts()))
-
-
 @dp.callback_query()
 async def unknown_callback_cb(cb: CallbackQuery):
     """Последний предохранитель: Telegram никогда не оставляет кнопку во "вечном" состоянии загрузки."""
@@ -5689,149 +4397,55 @@ async def unknown_callback_cb(cb: CallbackQuery):
     await cb.answer("⚠️ Эта кнопка ещё не подключена.", show_alert=True)
 
 
-@dp.message(Command('delete', 'del'))
-async def delete_prohibited_message_cmd(msg: Message):
-    if not msg.from_user or not await check_permission(msg.from_user.id, 2):
-        await msg.answer('({15})У вас недостаточно прав.')
-        return
-    if not msg.reply_to_message or msg.chat.type == 'private':
-        await msg.answer('({8})Ответьте командой /delete на сообщение, которое нужно удалить.')
-        return
-    chat_id = await get_config('hublox_id')
-    admin_chat = await get_config('hubsup_id')
-    if str(msg.chat.id) not in {str(chat_id), str(admin_chat)}:
-        await msg.answer('({15})Команда доступна только в подключённых чатах.')
-        return
-    try:
-        await require_bot().delete_message(msg.chat.id, msg.reply_to_message.message_id)
-    except Exception as exc:
-        await msg.answer(f'({8})Telegram не удалил сообщение: {esc(exc)}')
-        return
-    await msg.answer('({20})Сообщение удалено.')
-
 @dp.chat_member()
 async def admin_promotion_watch(update: ChatMemberUpdated):
-    await handle_membership_event(update)
-    primary = await get_config('hublox_id')
-    admin_chat = await get_config('hubsup_id')
-    if str(update.chat.id) not in {str(primary), str(admin_chat)}:
-        return
-    member = update.new_chat_member
-    old_status = update.old_chat_member.status
-    uid = member.user.id
-    if uid == CREATOR_ID or member.user.is_bot:
-        return
-    level = await get_moderator_level(uid)
-    promoted = member.status == 'administrator' and old_status not in ('administrator', 'creator')
-    creator_action = bool(update.from_user and update.from_user.id == CREATOR_ID)
-    if member.status == 'administrator' and await admin_has_active_punishment(uid):
-        # A manual Telegram promotion removes restrictions too. Reapply the saved
-        # punishment, even when its event arrives after an outstanding invite.
-        async with get_warn_lock(update.chat.id,uid), require_db().acquire() as conn, conn.transaction():
-            user = await _locked_moderation_user(conn,uid)
-            if await admin_has_active_punishment(uid,conn):
-                await strip_telegram_admin_status(uid,conn)
-                if primary:
-                    permanent = user['banned'] and user['ban_until'] is None
-                    deadline = max(int(user['ban_until'] or 0) if user['banned'] else 0,
-                                   int(user['mute_until'] or 0))
-                    # Recheck time after the awaited demotion. Telegram interprets
-                    # a restriction shorter than 30 seconds as permanent.
-                    if permanent or deadline > now_ts() + 30:
-                        await require_bot().restrict_chat_member(int(primary),uid,
-                            permissions=ChatPermissions(can_send_messages=False),
-                            until_date=0 if permanent else deadline)
-                    else:
-                        await clear_restrictions(int(primary),uid)
-        await require_bot().send_message(CREATOR_ID,
-            '({8})Права администратора не восстановлены: у участника действует бан или мут. Сначала снимите наказание.')
-        return
-    if promoted and level == 0 and not creator_action:
-        await require_bot().send_message(CREATOR_ID,
-            f'({8})В Telegram назначен администратор {user_mention(uid, member.user.username)}. '
-            'Ранг и доступ к админ-чату не выданы. Для подтверждения используйте /upmod или /premmod.')
-        return
-    if creator_action and member.status == 'administrator' and (level > 0 or promoted):
-        if level == 0:
-            level = 1
-            await set_moderator_level(uid, level, member.user.username)
-        # Creator edits to existing Telegram admins are authoritative too.
-        api_rights = {'change_info':'can_change_info', 'delete_messages':'can_delete_messages',
-                      'restrict_members':'can_restrict_members', 'invite_users':'can_invite_users',
-                      'pin_messages':'can_pin_messages', 'change_tags':'can_manage_tags',
-                      'manage_video':'can_manage_video_chats', 'promote_members':'can_promote_members',
-                      'manage_topics':'can_manage_topics'}
-        rights = {key: bool(getattr(member, attr, False)) for key, attr in api_rights.items()}
-        role = getattr(member, 'custom_title', None) or get_role_name(level)
-        await require_db().execute('UPDATE moderators SET custom_rights=$2::jsonb,can_ban=$3,role=$4 WHERE user_id=$1',
-                                   uid, json.dumps(rights), rights['restrict_members'], role)
-        failures = await sync_admin_everywhere(uid, level)
-        failures.extend(await send_admin_invitation(uid, role))
-        failures.extend(await update_admin_list())
-        if failures:
-            await require_bot().send_message(CREATOR_ID, '({8})' + '\n'.join(esc(x) for x in failures))
-    elif creator_action and str(update.chat.id) == str(primary) and old_status == 'administrator' and member.status != 'administrator':
-        await set_moderator_level(uid, 0, member.user.username)
-        failures = await sync_admin_everywhere(uid, 0)
-        failures.extend(await update_admin_list())
-        if failures:
-            await require_bot().send_message(CREATOR_ID, '({8})' + '\n'.join(esc(x) for x in failures))
-    elif level > 0 and member.status == 'member' and old_status in ('left', 'kicked'):
-        try:
-            await sync_telegram_admin(update.chat.id, uid, level)
-        except Exception as exc:
-            await require_bot().send_message(CREATOR_ID, f'({8})Не удалось восстановить права вступившего администратора: {esc(exc)}')
-
-
-@dp.message(F.text, lambda message: (message.text or '').lstrip().startswith('/'))
-async def unknown_command_msg(msg: Message, state: FSMContext):
-    if msg.chat.type != 'private':
-        return
-    current = await state.get_state()
-    if current:
-        await msg.answer('({8})Неизвестная команда. Продолжите текущее действие или используйте /cancel для отмены.')
-    else:
-        await msg.answer('({8})Неизвестная команда. Используйте /start, чтобы открыть меню.')
+    """Синхронизирует повышение в Telegram: новый админ получает роль 1, список обновляется, ссылка в админ-чат отправляется один раз."""
+    chat_id=update.chat.id
+    linked=await get_config('hublox_id')
+    linked_admin=await get_config('hubsup_id')
+    if str(chat_id) not in {str(linked or ''),str(linked_admin or '')}: return
+    member=update.new_chat_member
+    if member.status not in ('administrator','creator'): return
+    uid=member.user.id
+    if uid==CREATOR_ID: return
+    existing=await get_moderator_level(uid)
+    if existing==0:
+        await set_moderator_level(uid,1,member.user.username)
+        await update_admin_list()
+        admin_chat=await get_config('hubsup_id')
+        if admin_chat:
+            try:
+                link=await require_bot().create_chat_invite_link(int(admin_chat),member_limit=1)
+                await require_bot().send_message(uid,f'Вас обнаружили как нового администратора HuBBlox.\nВступите в чат администрации по одноразовой ссылке:\n{esc(link.invite_link)}')
+            except Exception:
+                LOGGER.info('Не удалось отправить ссылку новому админу',exc_info=True)
 
 
 async def main() -> None:
-    global bot, BOT_USERNAME
+    global bot
+
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN не задан в Variables")
+        raise RuntimeError("BOT_TOKEN не задан в Railway Variables")
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL не задан в Variables")
+        raise RuntimeError("DATABASE_URL не задан в Railway Variables")
+
     validate_premium_emoji_config()
-    bot=Bot(token=BOT_TOKEN,default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    install_premium_rendering(bot)
-    tasks=[]
-    singleton=None
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+
     try:
         await init_db()
-        await load_custom_emoji_overrides()
-        me=await bot.get_me()
-        BOT_USERNAME=me.username or BOT_USERNAME
-        singleton=await require_db().acquire()
-        if not await singleton.fetchval('SELECT pg_try_advisory_lock($1)',me.id):
-            raise RuntimeError('Этот бот уже запущен: оставьте одну реплику сервиса.')
-        tasks=[asyncio.create_task(delivery_worker(),name='delivery'),
-               asyncio.create_task(application_recovery_loop(),name='application-recovery')]
-        LOGGER.info('DuoSup %s started as @%s',BOT_VERSION,BOT_USERNAME)
-        await dp.start_polling(bot,allowed_updates=dp.resolve_used_update_types(),tasks_concurrency_limit=32,
-                               close_bot_session=False)
+        me = await bot.get_me()
+        global BOT_USERNAME
+        BOT_USERNAME = me.username or BOT_USERNAME
+        LOGGER.info("DuoSup %s запущен как @%s (id=%s)", BOT_VERSION, BOT_USERNAME, me.id)
+        await dp.start_polling(bot)
     finally:
-        await drain_polling_updates()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks,return_exceptions=True)
-        if singleton is not None:
-            with suppress(Exception):
-                await singleton.execute('SELECT pg_advisory_unlock_all()')
-                await require_db().release(singleton)
         if db is not None:
             await db.close()
         await bot.session.close()
-
 
 
 if __name__ == "__main__":
