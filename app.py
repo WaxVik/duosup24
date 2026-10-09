@@ -850,7 +850,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.22.1"
+BOT_VERSION = "2.22.2"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -1088,51 +1088,79 @@ def editable_text(text: str | None) -> str | None:
 
 
 def format_user_markup(text: str) -> str:
-    """DuoSup markup -> Telegram HTML, with nested formatting inside quotes/links."""
+    """Преобразует единый синтаксис DuoSup во вложенный Telegram HTML.
+
+    **текст** — жирный; /текст/ — курсив; _текст_ и >текст< — подчёркивание;
+    "текст" — цитата; ∆текст(https://...)∆ — ссылка.
+    Маркеры обрабатываются до HTML-экранирования и поддерживают вложенность.
+    Уже готовые HTML-теги, созданные кодом, сохраняются.
+    """
     if not isinstance(text, str):
         return text
 
-    # Escape user-supplied HTML first; preserve only our markup tokens.
-    # Placeholders protect quote/link blocks while nested inline markup is converted.
     protected: list[str] = []
+
     def hold(value: str) -> str:
         protected.append(value)
         return f"\x00DUOSUP{len(protected)-1}\x00"
 
-    # Convert links first and format their labels recursively.
+    # Защищаем пользовательские ссылки и цитаты до обработки внешних маркеров.
     def link_repl(m):
         label = format_inline(m.group(1))
-        url = esc(m.group(2), quote=True)
+        url = html.escape(m.group(2), quote=True)
         return hold(f'<a href="{url}">{label}</a>')
 
     text = re.sub(r'∆([^∆]+?)\((https?://[^)\s]+)\)∆', link_repl, text)
 
-    # Quotes can span lines; recursively format their contents so bold/italic/underline
-    # and Premium Emoji work inside Telegram blockquotes too.
     def quote_repl(m):
         inner = format_user_markup(m.group(1))
         return hold(f'<blockquote>{inner}</blockquote>')
-    text = re.sub(r'"(.*?)"', quote_repl, text, flags=re.S)
 
+    text = re.sub(r'"(.*?)"', quote_repl, text, flags=re.S)
     text = format_inline(text)
+
     for i, value in enumerate(protected):
         text = text.replace(f"\x00DUOSUP{i}\x00", value)
     return text
 
 
 def format_inline(value: str) -> str:
-    """Convert DuoSup inline syntax without touching generated HTML tags."""
-    parts = re.split(r'(<[^>]+>)', value)
-    for i in range(0, len(parts), 2):
-        part = parts[i]
-        # Escape literal angle brackets in user-authored text.
-        part = esc(part, quote=False)
-        part = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', part, flags=re.S)
-        part = re.sub(r'(?<!/) /([^/\n]+?) / (?!/)', r'<i>\1</i>', part) if False else part
-        part = re.sub(r'(?<!/)/([^/\n]+?)/(?!/)', r'<i>\1</i>', part)
-        part = re.sub(r'(?<!_)_(.+?)_(?!_)', r'<u>\1</u>', part, flags=re.S)
-        parts[i] = part
-    return ''.join(parts)
+    """Преобразует inline-маркеры с поддержкой вложенности."""
+    protected: list[str] = []
+
+    def hold(rendered: str) -> str:
+        protected.append(rendered)
+        return f"\x00DUSP{len(protected)-1}\x00"
+
+    def render(source: str) -> str:
+        chunks = re.split(r'(<[^>]+>)', source)
+        output = []
+        for chunk_index, chunk in enumerate(chunks):
+            if chunk_index % 2:
+                output.append(chunk)
+                continue
+            patterns = [
+                (r'\*\*(.+?)\*\*', 'b', re.S),
+                (r'(?<!/)/([^/\n]+?)/(?!/)', 'i', 0),
+                (r'(?<!_)_(.+?)_(?!_)', 'u', re.S),
+                (r'>([^<>\n]+?)<', 'u', 0),
+            ]
+            for pattern, tag, flags in patterns:
+                chunk = re.sub(
+                    pattern,
+                    lambda m, tag=tag: hold(f'<{tag}>{render(m.group(1))}</{tag}>'),
+                    chunk,
+                    flags=flags,
+                )
+            # Сначала снимаем возможное предварительное HTML-экранирование
+            # динамических значений (например, причины варна), затем экранируем один раз.
+            output.append(esc(html.unescape(chunk)))
+        return ''.join(output)
+
+    result = render(value)
+    for i in range(len(protected) - 1, -1, -1):
+        result = result.replace(f"\x00DUSP{i}\x00", protected[i])
+    return result
 
 
 def render_premium_placeholders(text: str | None) -> str | None:
