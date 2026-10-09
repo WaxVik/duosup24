@@ -850,7 +850,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.22.0"
+BOT_VERSION = "2.22.1"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -1046,13 +1046,24 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+PREMIUM_EMOJI_FALLBACK = {
+    1:"☀",2:"А",3:"В",4:"Т",5:"О",6:"Р",7:"Н",8:"⚠️",9:"⏳",10:"📝",
+    11:"🕐",12:"Ы",13:"Д",14:"❌",15:"⛔",16:"🚫",17:"✉️",18:"Б",19:"❗",20:"✅",
+    21:"⚙️",22:"🔼",23:"▶️",24:"✏️",25:"📌",26:"🔗",27:"🗑",28:"⭐",29:"👑",30:"✨",
+    31:"С",32:"Я",33:"❤",34:"➡️",35:"Е",36:"П",37:"⚠️",38:"⏬",39:"🔍",40:"⚖️",
+    41:"Л",42:"Ц",43:"И",44:"👤",45:"🤝",46:"❓",47:"🔴",48:"😔",49:"🧭",50:"⚓",
+    51:"🏝",52:"🌊",53:"👼",54:"🦈",55:"🙍‍♂️",56:"🤖",57:"👻",58:"🐇",59:"⚔️",60:"💬",
+    61:"🧭",62:"🟢",63:"🔙",64:"🗓",65:"🔥",66:"🌋",67:"💙",68:"🪙",69:"💾",70:"💾",
+    71:"⚙️",72:"🏆",73:"🖥",
+}
+
 def custom_emoji_position(position: int, fallback: str = "") -> str:
-    """Рендерит одну позицию из ручного PREMIUM_EMOJI."""
+    """Рендерит Premium Emoji как Telegram custom emoji entity."""
     emoji_id = user_custom_emoji_id(position)
     if emoji_id:
-        return f'<tg-emoji emoji-id="{esc(emoji_id)}">{fallback}</tg-emoji>'
-    # Если ID ещё не добавлен, ничего не показываем.
-    # Это важно: служебная запись ({N}) никогда не должна утечь пользователю.
+        glyph = fallback or PREMIUM_EMOJI_FALLBACK.get(position, "▫️")
+        return f'<tg-emoji emoji-id="{esc(emoji_id)}">{glyph}</tg-emoji>'
+    # Служебная запись не показывается, если ID не настроен.
     return ""
 
 
@@ -1077,37 +1088,50 @@ def editable_text(text: str | None) -> str | None:
 
 
 def format_user_markup(text: str) -> str:
-    """DuoSup syntax -> Telegram HTML.
-
-    **bold**, /italic/, _underline_, "quote" and ∆label(url)∆ are supported.
-    Quotes may span multiple lines and formatting inside quotes is preserved.
-    """
+    """DuoSup markup -> Telegram HTML, with nested formatting inside quotes/links."""
     if not isinstance(text, str):
         return text
 
-    # Protect nothing permanently here: quote/link parsing happens before
-    # HTML tags are introduced, so quotes can safely contain Premium Emoji placeholders.
-    def inline(value: str) -> str:
-        value = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', value, flags=re.S)
-        value = re.sub(r'(?<!/)/([^/\n]+?)/(?!/)', r'<i>\1</i>', value)
-        value = re.sub(r'(?<!_)_(.+?)_(?!_)', r'<u>\1</u>', value, flags=re.S)
-        return value
+    # Escape user-supplied HTML first; preserve only our markup tokens.
+    # Placeholders protect quote/link blocks while nested inline markup is converted.
+    protected: list[str] = []
+    def hold(value: str) -> str:
+        protected.append(value)
+        return f"\x00DUOSUP{len(protected)-1}\x00"
 
-    # First convert quotes, including multiline quotes. A quote is everything
-    # between a pair of literal double quotes.
-    text = re.sub(r'"(.*?)"', lambda m: '<blockquote>' + m.group(1) + '</blockquote>', text, flags=re.S)
+    # Convert links first and format their labels recursively.
+    def link_repl(m):
+        label = format_inline(m.group(1))
+        url = esc(m.group(2), quote=True)
+        return hold(f'<a href="{url}">{label}</a>')
 
-    # Then links. This also works inside blockquotes.
-    text = re.sub(
-        r'∆([^∆]+?)\((https?://[^)\s]+)\)∆',
-        lambda m: f'<a href="{esc(m.group(2))}">{m.group(1)}</a>',
-        text,
-    )
+    text = re.sub(r'∆([^∆]+?)\((https?://[^)\s]+)\)∆', link_repl, text)
 
-    # Apply inline formatting only outside already-created HTML tags.
-    parts = re.split(r'(<[^>]+>)', text)
+    # Quotes can span lines; recursively format their contents so bold/italic/underline
+    # and Premium Emoji work inside Telegram blockquotes too.
+    def quote_repl(m):
+        inner = format_user_markup(m.group(1))
+        return hold(f'<blockquote>{inner}</blockquote>')
+    text = re.sub(r'"(.*?)"', quote_repl, text, flags=re.S)
+
+    text = format_inline(text)
+    for i, value in enumerate(protected):
+        text = text.replace(f"\x00DUOSUP{i}\x00", value)
+    return text
+
+
+def format_inline(value: str) -> str:
+    """Convert DuoSup inline syntax without touching generated HTML tags."""
+    parts = re.split(r'(<[^>]+>)', value)
     for i in range(0, len(parts), 2):
-        parts[i] = inline(parts[i])
+        part = parts[i]
+        # Escape literal angle brackets in user-authored text.
+        part = esc(part, quote=False)
+        part = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', part, flags=re.S)
+        part = re.sub(r'(?<!/) /([^/\n]+?) / (?!/)', r'<i>\1</i>', part) if False else part
+        part = re.sub(r'(?<!/)/([^/\n]+?)/(?!/)', r'<i>\1</i>', part)
+        part = re.sub(r'(?<!_)_(.+?)_(?!_)', r'<u>\1</u>', part, flags=re.S)
+        parts[i] = part
     return ''.join(parts)
 
 
@@ -4185,12 +4209,34 @@ async def question_msg_new(msg:Message,state:FSMContext):
 async def menu_navigation_cb_new(cb:CallbackQuery):
     await cb.message.edit_text("({61})<b>Навигация и правила</b>\n\nОзнакомьтесь с правилами сообщества HuBBlox и используйте разделы меню для рейдов, морских ивентов, трейдов, триалов, профиля, заявок и апелляций.",reply_markup=back_menu_keyboard()); await cb.answer()
 
+def sea_count_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    nums = list(range(2, 13))
+    for i in range(0, len(nums), 3):
+        rows.append([InlineKeyboardButton(text=str(n), callback_data=f"sea_count_{n}") for n in nums[i:i+3]])
+    rows.append([_btn("({63}) Назад", "menu_sea")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 @dp.callback_query(F.data.startswith("sea_event_"))
 async def sea_event_cb(cb:CallbackQuery,state:FSMContext):
     key=cb.data.removeprefix('sea_event_')
     names={'leviathan':'Левиафан','volcano':'Вулканический остров','kitsune':'Остров Китсуне','beast':'Морской зверь','mirage':'Остров Мираж','terror':'Терроршарк','ship':'Рейд на корабль','other':'Другое'}
     await state.update_data(sea_event=names.get(key,'Другое')); await state.set_state(SeaState.waiting_count)
-    await cb.message.edit_text(f"({{49}})<b>{esc(names.get(key,'Другое'))}</b>\n\n/Выберите количество участников./\nМинимум — 2, максимум — 12."); await cb.answer()
+    await cb.message.edit_text(f"({{49}})**{esc(names.get(key,'Другое'))}**\n\n/Выберите количество участников./\nМинимум — 2, максимум — 12.", reply_markup=sea_count_keyboard()); await cb.answer()
+
+@dp.callback_query(F.data.startswith("sea_count_"))
+async def sea_count_cb(cb: CallbackQuery, state: FSMContext):
+    try:
+        n = int((cb.data or '').removeprefix('sea_count_'))
+    except ValueError:
+        n = 0
+    if n < 2 or n > 12:
+        await cb.answer("Выберите от 2 до 12 участников.", show_alert=True)
+        return
+    await state.update_data(sea_count=n)
+    await state.set_state(SeaState.waiting_details)
+    await cb.message.edit_text(f"({{10}})**Участников: {n}**\n\n/Напишите комментарий и детали./\nЕсли не нужны — отправьте -.")
+    await cb.answer()
 
 @dp.message(SeaState.waiting_count,F.text)
 async def sea_count_msg(msg:Message,state:FSMContext):
