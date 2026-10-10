@@ -850,7 +850,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.22.0"
+BOT_VERSION = "2.22.3"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -1046,13 +1046,24 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+PREMIUM_EMOJI_FALLBACK = {
+    1:"☀",2:"А",3:"В",4:"Т",5:"О",6:"Р",7:"Н",8:"⚠️",9:"⏳",10:"📝",
+    11:"🕐",12:"Ы",13:"Д",14:"❌",15:"⛔",16:"🚫",17:"✉️",18:"Б",19:"❗",20:"✅",
+    21:"⚙️",22:"🔼",23:"▶️",24:"✏️",25:"📌",26:"🔗",27:"🗑",28:"⭐",29:"👑",30:"✨",
+    31:"С",32:"Я",33:"❤",34:"➡️",35:"Е",36:"П",37:"⚠️",38:"⏬",39:"🔍",40:"⚖️",
+    41:"Л",42:"Ц",43:"И",44:"👤",45:"🤝",46:"❓",47:"🔴",48:"😔",49:"🧭",50:"⚓",
+    51:"🏝",52:"🌊",53:"👼",54:"🦈",55:"🙍‍♂️",56:"🤖",57:"👻",58:"🐇",59:"⚔️",60:"💬",
+    61:"🧭",62:"🟢",63:"🔙",64:"🗓",65:"🔥",66:"🌋",67:"💙",68:"🪙",69:"💾",70:"💾",
+    71:"⚙️",72:"🏆",73:"🖥",
+}
+
 def custom_emoji_position(position: int, fallback: str = "") -> str:
-    """Рендерит одну позицию из ручного PREMIUM_EMOJI."""
+    """Рендерит Premium Emoji как Telegram custom emoji entity."""
     emoji_id = user_custom_emoji_id(position)
     if emoji_id:
-        return f'<tg-emoji emoji-id="{esc(emoji_id)}">{fallback}</tg-emoji>'
-    # Если ID ещё не добавлен, ничего не показываем.
-    # Это важно: служебная запись ({N}) никогда не должна утечь пользователю.
+        glyph = fallback or PREMIUM_EMOJI_FALLBACK.get(position, "▫️")
+        return f'<tg-emoji emoji-id="{esc(emoji_id)}">{glyph}</tg-emoji>'
+    # Служебная запись не показывается, если ID не настроен.
     return ""
 
 
@@ -1077,38 +1088,79 @@ def editable_text(text: str | None) -> str | None:
 
 
 def format_user_markup(text: str) -> str:
-    """DuoSup syntax -> Telegram HTML.
+    """Преобразует единый синтаксис DuoSup во вложенный Telegram HTML.
 
-    **bold**, /italic/, _underline_, "quote" and ∆label(url)∆ are supported.
-    Quotes may span multiple lines and formatting inside quotes is preserved.
+    **текст** — жирный; /текст/ — курсив; _текст_ и >текст< — подчёркивание;
+    "текст" — цитата; ∆текст(https://...)∆ — ссылка.
+    Маркеры обрабатываются до HTML-экранирования и поддерживают вложенность.
+    Уже готовые HTML-теги, созданные кодом, сохраняются.
     """
     if not isinstance(text, str):
         return text
 
-    # Protect nothing permanently here: quote/link parsing happens before
-    # HTML tags are introduced, so quotes can safely contain Premium Emoji placeholders.
-    def inline(value: str) -> str:
-        value = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', value, flags=re.S)
-        value = re.sub(r'(?<!/)/([^/\n]+?)/(?!/)', r'<i>\1</i>', value)
-        value = re.sub(r'(?<!_)_(.+?)_(?!_)', r'<u>\1</u>', value, flags=re.S)
-        return value
+    protected: list[str] = []
 
-    # First convert quotes, including multiline quotes. A quote is everything
-    # between a pair of literal double quotes.
-    text = re.sub(r'"(.*?)"', lambda m: '<blockquote>' + m.group(1) + '</blockquote>', text, flags=re.S)
+    def hold(value: str) -> str:
+        protected.append(value)
+        return f"\x00DUOSUP{len(protected)-1}\x00"
 
-    # Then links. This also works inside blockquotes.
-    text = re.sub(
-        r'∆([^∆]+?)\((https?://[^)\s]+)\)∆',
-        lambda m: f'<a href="{esc(m.group(2))}">{m.group(1)}</a>',
-        text,
-    )
+    # Защищаем пользовательские ссылки и цитаты до обработки внешних маркеров.
+    def link_repl(m):
+        label = format_inline(m.group(1))
+        url = html.escape(m.group(2), quote=True)
+        return hold(f'<a href="{url}">{label}</a>')
 
-    # Apply inline formatting only outside already-created HTML tags.
-    parts = re.split(r'(<[^>]+>)', text)
-    for i in range(0, len(parts), 2):
-        parts[i] = inline(parts[i])
-    return ''.join(parts)
+    text = re.sub(r'∆([^∆]+?)\((https?://[^)\s]+)\)∆', link_repl, text)
+
+    def quote_repl(m):
+        inner = format_user_markup(m.group(1))
+        return hold(f'<blockquote>{inner}</blockquote>')
+
+    text = re.sub(r'"(.*?)"', quote_repl, text, flags=re.S)
+    text = format_inline(text)
+
+    for i, value in enumerate(protected):
+        text = text.replace(f"\x00DUOSUP{i}\x00", value)
+    return text
+
+
+def format_inline(value: str) -> str:
+    """Преобразует inline-маркеры с поддержкой вложенности."""
+    protected: list[str] = []
+
+    def hold(rendered: str) -> str:
+        protected.append(rendered)
+        return f"\x00DUSP{len(protected)-1}\x00"
+
+    def render(source: str) -> str:
+        chunks = re.split(r'(<[^>]+>)', source)
+        output = []
+        for chunk_index, chunk in enumerate(chunks):
+            if chunk_index % 2:
+                output.append(chunk)
+                continue
+            patterns = [
+                (r'\*\*(.+?)\*\*', 'b', re.S),
+                (r'(?<!/)/([^/\n]+?)/(?!/)', 'i', 0),
+                (r'(?<!_)_(.+?)_(?!_)', 'u', re.S),
+                (r'>([^<>\n]+?)<', 'u', 0),
+            ]
+            for pattern, tag, flags in patterns:
+                chunk = re.sub(
+                    pattern,
+                    lambda m, tag=tag: hold(f'<{tag}>{render(m.group(1))}</{tag}>'),
+                    chunk,
+                    flags=flags,
+                )
+            # Сначала снимаем возможное предварительное HTML-экранирование
+            # динамических значений (например, причины варна), затем экранируем один раз.
+            output.append(esc(html.unescape(chunk)))
+        return ''.join(output)
+
+    result = render(value)
+    for i in range(len(protected) - 1, -1, -1):
+        result = result.replace(f"\x00DUSP{i}\x00", protected[i])
+    return result
 
 
 def render_premium_placeholders(text: str | None) -> str | None:
@@ -4185,12 +4237,34 @@ async def question_msg_new(msg:Message,state:FSMContext):
 async def menu_navigation_cb_new(cb:CallbackQuery):
     await cb.message.edit_text("({61})<b>Навигация и правила</b>\n\nОзнакомьтесь с правилами сообщества HuBBlox и используйте разделы меню для рейдов, морских ивентов, трейдов, триалов, профиля, заявок и апелляций.",reply_markup=back_menu_keyboard()); await cb.answer()
 
+def sea_count_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    nums = list(range(2, 13))
+    for i in range(0, len(nums), 3):
+        rows.append([InlineKeyboardButton(text=str(n), callback_data=f"sea_count_{n}") for n in nums[i:i+3]])
+    rows.append([_btn("({63}) Назад", "menu_sea")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 @dp.callback_query(F.data.startswith("sea_event_"))
 async def sea_event_cb(cb:CallbackQuery,state:FSMContext):
     key=cb.data.removeprefix('sea_event_')
     names={'leviathan':'Левиафан','volcano':'Вулканический остров','kitsune':'Остров Китсуне','beast':'Морской зверь','mirage':'Остров Мираж','terror':'Терроршарк','ship':'Рейд на корабль','other':'Другое'}
     await state.update_data(sea_event=names.get(key,'Другое')); await state.set_state(SeaState.waiting_count)
-    await cb.message.edit_text(f"({{49}})<b>{esc(names.get(key,'Другое'))}</b>\n\n/Выберите количество участников./\nМинимум — 2, максимум — 12."); await cb.answer()
+    await cb.message.edit_text(f"({{49}})**{esc(names.get(key,'Другое'))}**\n\n/Выберите количество участников./\nМинимум — 2, максимум — 12.", reply_markup=sea_count_keyboard()); await cb.answer()
+
+@dp.callback_query(F.data.startswith("sea_count_"))
+async def sea_count_cb(cb: CallbackQuery, state: FSMContext):
+    try:
+        n = int((cb.data or '').removeprefix('sea_count_'))
+    except ValueError:
+        n = 0
+    if n < 2 or n > 12:
+        await cb.answer("Выберите от 2 до 12 участников.", show_alert=True)
+        return
+    await state.update_data(sea_count=n)
+    await state.set_state(SeaState.waiting_details)
+    await cb.message.edit_text(f"({{10}})**Участников: {n}**\n\n/Напишите комментарий и детали./\nЕсли не нужны — отправьте -.")
+    await cb.answer()
 
 @dp.message(SeaState.waiting_count,F.text)
 async def sea_count_msg(msg:Message,state:FSMContext):
@@ -4350,6 +4424,7 @@ async def profile_roblox_msg(msg:Message,state:FSMContext): await require_db().e
 
 @dp.callback_query(F.data.startswith("verify_user_"))
 async def verify_user_cb(cb: CallbackQuery):
+    """Подтверждает участника, убирает кнопку и отправляет правила в личные сообщения."""
     try:
         target = int((cb.data or "").removeprefix("verify_user_"))
     except ValueError:
@@ -4357,7 +4432,43 @@ async def verify_user_cb(cb: CallbackQuery):
     if not cb.from_user or cb.from_user.id != target:
         await cb.answer("Эта кнопка предназначена другому пользователю.", show_alert=True)
         return
-    await cb.answer("Проверка пройдена.", show_alert=True)
+
+    pool = require_db()
+    await pool.execute(
+        "INSERT INTO users(user_id, joined_at, verified) VALUES($1,$2,TRUE) "
+        "ON CONFLICT(user_id) DO UPDATE SET verified=TRUE, joined_at=COALESCE(users.joined_at, EXCLUDED.joined_at)",
+        target, int(datetime.now(timezone.utc).timestamp()),
+    )
+    if cb.message:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            LOGGER.debug("Не удалось убрать кнопку верификации", exc_info=True)
+
+    await cb.answer("✅ Проверка пройдена!", show_alert=True)
+    rules = await pool.fetchrow("SELECT rule_text, version FROM rules ORDER BY created_at DESC LIMIT 1")
+    if rules and rules.get("rule_text"):
+        rules_text = f"📜 <b>Правила сообщества HuBBlox (v{esc(str(rules.get('version') or '1.0'))})</b>\n\n{esc(rules['rule_text'])}"
+    else:
+        rules_text = ("📜 <b>Правила сообщества HuBBlox</b>\n\n"
+                      "Пожалуйста, ознакомьтесь с правилами сообщества в теме «Правила» HuBBlox.")
+    try:
+        bot_instance = require_bot()
+        await bot_instance.send_message(
+            target,
+            f"👋 <b>Добро пожаловать в HuBBlox, {esc(cb.from_user.full_name)}!</b> ❤️\n\n"
+            "✅ <b>Вы успешно подтвердили, что вы не бот.</b>\n\n"
+            f"{rules_text}\n\n🎮 <b>Укажите ваш Roblox-ник одним сообщением.</b>",
+        )
+        # FSM для Roblox-ника привязывается именно к личному чату, а не к группе.
+        private_state = await dp.fsm.get_context(bot=bot_instance, chat_id=target, user_id=target)
+        await private_state.set_state(ProfileState.waiting_roblox)
+    except Exception:
+        LOGGER.info("Не удалось отправить приветствие/правила в ЛС user_id=%s; возможно, пользователь ещё не запускал бота", target, exc_info=True)
+        try:
+            await cb.answer("Проверка пройдена. Чтобы получить правила и указать Roblox-ник, сначала откройте ЛС бота и нажмите /start.", show_alert=True)
+        except Exception:
+            pass
 
 
 @dp.callback_query(F.data.startswith("question_answer_"))
@@ -4399,12 +4510,40 @@ async def unknown_callback_cb(cb: CallbackQuery):
 
 @dp.chat_member()
 async def admin_promotion_watch(update: ChatMemberUpdated):
-    """Синхронизирует повышение в Telegram: новый админ получает роль 1, список обновляется, ссылка в админ-чат отправляется один раз."""
+    """Приветствует новых участников HuBBlox и синхронизирует повышение администраторов."""
     chat_id=update.chat.id
     linked=await get_config('hublox_id')
     linked_admin=await get_config('hubsup_id')
     if str(chat_id) not in {str(linked or ''),str(linked_admin or '')}: return
     member=update.new_chat_member
+
+    # Приветствие публикуется в основных тематических разделах при реальном вступлении.
+    old_status = update.old_chat_member.status
+    new_status = member.status
+    joined_now = old_status in ('left', 'kicked') and new_status in ('member', 'restricted', 'administrator', 'creator')
+    if str(chat_id) == str(linked or '') and joined_now and not member.user.is_bot:
+        uid = member.user.id
+        joined_at = int(datetime.now(timezone.utc).timestamp())
+        await remember_user(member.user, joined_at=joined_at)
+        await require_db().execute(
+            "INSERT INTO users(user_id, joined_at, verified) VALUES($1,$2,FALSE) "
+            "ON CONFLICT(user_id) DO UPDATE SET joined_at=COALESCE(users.joined_at, EXCLUDED.joined_at)",
+            uid, joined_at,
+        )
+        greeting = (
+            f"👋 <b>Добро пожаловать в HuBBlox, {user_mention(uid, member.user.username, member.user.full_name)}!</b> ❤️\n\n"
+            "Чтобы подтвердить, что вы не бот, нажмите кнопку ниже. После подтверждения DuoSup отправит правила в личные сообщения."
+        )
+        for topic_key in ('welcome', 'chat', 'trades', 'raids'):
+            try:
+                await require_bot().send_message(
+                    int(chat_id), greeting,
+                    message_thread_id=TOPICS[topic_key],
+                    reply_markup=captcha_keyboard(uid),
+                )
+            except Exception:
+                LOGGER.warning("Не удалось отправить приветствие в тему %s", topic_key, exc_info=True)
+
     if member.status not in ('administrator','creator'): return
     uid=member.user.id
     if uid==CREATOR_ID: return
