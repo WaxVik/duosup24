@@ -1791,11 +1791,13 @@ async def get_moderator_level(user_id: int) -> int:
 def get_role_name(level: int) -> str:
     if level <= 0:
         return "Участник"
-    if level >= 7:
+    if level >= 3 or level >= 7:
         return "Создатель"
-    if level >= 6:
+    if level == 2 or level >= 6:
         return "Главный админ"
-    return "Админ"
+    if level == 1 or level > 0:
+        return "Админ"
+    return "Участник"
 
 
 
@@ -1941,11 +1943,11 @@ async def set_moderator_level(user_id: int, level: int, username: str | None = N
 
 
 def effective_admin_role(level: int) -> int:
-    # Совместимость со старыми уровнями БД:
-    # 0 = участник, 1-5 = админ, 6 = главный админ, 7 = создатель.
+    # Ровно три административные роли: 1 админ, 2 главный админ, 3 создатель.
+    # Старые значения 4–5 считаются админами, 6 — главным админом, 7 — создателем.
     if level >= 7:
         return 3
-    if level >= 6:
+    if level == 6 or level == 2:
         return 2
     if level > 0:
         return 1
@@ -3455,17 +3457,17 @@ async def parse_target_and_reason(msg: Message):
     parts = payload.split()
 
     if command == "/warn":
-        # Формат: reply /warn <причина> — любой админ;
-        # без reply: /warn @username <причина> — только главный админ/создатель.
+        # Новая схема: без счётчика. Ответом могут выдать все админы;
+        # без ответа (/warn @username причина) — только главный админ/создатель.
         if msg.reply_to_message:
             target = await resolve_user(msg)
-            reason = payload.strip()
-            return (*target, reason, None)
-        if len(parts) < 2 or not parts[0].startswith("@"):
-            return None, None, None, "", None
-        target = await resolve_user(msg, parts[0])
+            return (*target, payload, "1")
+        if len(parts) < 2:
+            return None, None, None, "", ""
+        target_token = parts[0]
         reason = " ".join(parts[1:]).strip()
-        return (*target, reason, None)
+        target = await resolve_user(msg, target_token)
+        return (*target, reason, "1")
 
     if command == "/unwarn":
         if msg.reply_to_message:
@@ -3512,26 +3514,29 @@ async def warn_cmd(msg: Message):
         await msg.answer('({15})**У вас недостаточно прав**')
         return
 
-    target_id, username, full_name, reason, _count_token = await parse_target_and_reason(msg)
+    payload = command_payload(msg).strip()
+    no_reply = msg.reply_to_message is None
+    if no_reply and effective_admin_role(await get_moderator_level(actor.id)) < 2:
+        await msg.answer('({15})Без ответа на сообщение варн могут выдавать только главный администратор и создатель.')
+        return
+    target_id, username, full_name, reason, count_token = await parse_target_and_reason(msg)
     if target_id is None or not reason.strip():
         await msg.answer(
             '({8})**Ошибка выдачи варна**\n'
-            '"Укажите пользователя и причину.\n\n'
-            '• Ответом на сообщение: /warn <причина>\n'
-            '• Без ответа (только создатель/главный админ): /warn @username <причина>"\n'
-            '({19}) Если нашли ошибку, свяжитесь с нами.\n'
+            '"**Как использовать**\n'
+            '• Ответом на сообщение: `/warn причина`\n'
+            '• Без ответа (главный админ/создатель): `/warn @username причина`\n'
+            '• Укажите причину выдачи варна."\n'
+            '({19})Если нашли ошибки в команде, свяжитесь с нами.\n'
             '∆Contact Us(https://t.me/duosup_bot)∆'
         )
         return
 
-    actor_role = effective_admin_role(await get_moderator_level(actor.id))
-    if not msg.reply_to_message and actor.id != CREATOR_ID and actor_role < 2:
-        await msg.answer('({15})**Без ответа на сообщение варн может выдать только создатель или главный админ.**')
-        return
     count = 1
+    max_count = 4
     current_warns = await get_user_warns(target_id)
-    if current_warns >= 4:
-        await msg.answer('({8}) Пользователь уже получил максимальное количество варнов (4/4).')
+    if current_warns >= max_count:
+        await msg.answer('({15})У пользователя уже достигнут лимит варнов (4/4).')
         return
     if target_id == actor.id:
         await msg.answer('({14})**Нельзя выдать варн самому себе.**')
@@ -3552,16 +3557,6 @@ async def warn_cmd(msg: Message):
 
     target_chat = await moderation_chat_id(msg.chat.id)
     source_id = msg.reply_to_message.message_id if msg.reply_to_message else None
-    # Один исходный пост можно наказать командой /warn только один раз.
-    # Проверка применяется к варнам, выданным ответом на конкретное сообщение.
-    if source_id is not None:
-        duplicate = await require_db().fetchval(
-            "SELECT EXISTS(SELECT 1 FROM warn_logs WHERE chat_id=$1 AND message_id=$2 AND is_active=TRUE)",
-            target_chat, source_id,
-        )
-        if duplicate:
-            await msg.answer('({14}) На это сообщение уже выдан варн.')
-            return
     issued_numbers=[]
     final_count=None
     action_error=None
@@ -3797,20 +3792,17 @@ async def profile_text(user_id: int):
     role = moderator["role"] if moderator and moderator["role"] else tag
 
     return (
-        '({44})**Профиль участника**\n'
-        '•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n'
-        f'"**👤 Telegram:** {mention}\n'
-        f'**🎮 Roblox:** {esc(roblox or "не указан")}\n'
-        f'**🏷 Тег:** {esc(role or "не указан")}\n'
-        f'**💬 Комментарий:** {esc(comment or "не указан")}"\n\n'
-        '•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n'
-        f'"**📊 Активность**\n'
-        f'• Сообщений: {messages_count}\n'
-        f'• В сообществе с: {joined}\n'
-        f'• Проверен: {"✅ Да" if verified else "❌ Нет"}\n\n'
-        f'**🛡 Наказания**\n'
-        f'• Варны: {warns}/4\n'
-        f'• Статус: {"⛔ Заблокирован" if banned else "🟢 Активен"}"'
+        '({44})**Профиль**\n\n'
+        f'"Telegram: {mention}\n'
+        f'Username: {("@" + esc(username)) if username else "не указано"}\n'
+        f'Сообщений: {messages_count}\n'
+        f'В сообществе с: {joined}\n'
+        f'Roblox: {esc(roblox or "не указано")}\n'
+        f'Тег: {esc(role or "не указан")}\n'
+        f'Комментарий: {esc(comment or "не указан")}\n'
+        f'Проверен: {"да" if verified else "нет"}\n'
+        f'Активные варны: {warns}/4\n'
+        f'Статус: {"заблокирован" if banned else "активен"}"'
     )
 
 
@@ -3840,7 +3832,9 @@ async def _profile_target_from_command(msg: Message):
 async def _show_profile(target_id: int, message: Message, *, edit: bool = False, owner: bool = False):
     text = await profile_text(target_id)
     rendered = render_premium_placeholders(text)
-    markup = profile_keyboard(owner)
+    # Кнопки навигации доступны только в личном чате бота.
+    is_private = getattr(message.chat, "type", None) == "private"
+    markup = profile_keyboard(owner and is_private)
     if edit:
         await message.edit_text(rendered, reply_markup=markup)
     else:
@@ -4072,10 +4066,13 @@ def trial_keyboard() -> InlineKeyboardMarkup:
 
 
 def profile_keyboard(owner: bool = True) -> InlineKeyboardMarkup:
+    # owner=True передаётся только для собственного профиля в ЛС; в группах
+    # не показываем навигацию/назад, которые ведут в личное меню бота.
     rows=[]
     if owner:
         rows.append([_btn("({24})Редактировать профиль", "profile_edit")])
-    # Навигация и возврат существуют только в ЛС бота.
+        rows.append([_btn("({61})Навигация", "menu_navigation")])
+        rows.append([_btn("({63})Назад", "menu_back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
