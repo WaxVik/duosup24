@@ -850,7 +850,7 @@ def env_int(name: str, default: int) -> int:
 
 CREATOR_ID = env_int("CREATOR_ID", 7675985792)
 CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
-BOT_VERSION = "2.22.3"
+BOT_VERSION = "2.22.2"
 
 TOPICS = {
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
@@ -3455,29 +3455,17 @@ async def parse_target_and_reason(msg: Message):
     parts = payload.split()
 
     if command == "/warn":
+        # Формат: reply /warn <причина> — любой админ;
+        # без reply: /warn @username <причина> — только главный админ/создатель.
         if msg.reply_to_message:
-            count = await _parse_count_token(parts[0] if parts else None)
-            reason = " ".join(parts[1:]).strip() if count is not None else ""
             target = await resolve_user(msg)
-            return (*target, reason, str(count) if count is not None else "")
-
-        if len(parts) < 2:
-            return None, None, None, "", ""
-        # Основной формат: @username (2) причина
-        target_token = parts[0]
-        count = await _parse_count_token(parts[1])
-        reason_start = 2
-        # Совместимый формат: (2) @username причина
-        if count is None:
-            count = await _parse_count_token(parts[0])
-            if count is not None and len(parts) >= 3:
-                target_token = parts[1]
-                reason_start = 2
-        if count is None or not target_token:
-            return None, None, None, "", ""
-        target = await resolve_user(msg, target_token)
-        reason = " ".join(parts[reason_start:]).strip()
-        return (*target, reason, str(count))
+            reason = payload.strip()
+            return (*target, reason, None)
+        if len(parts) < 2 or not parts[0].startswith("@"):
+            return None, None, None, "", None
+        target = await resolve_user(msg, parts[0])
+        reason = " ".join(parts[1:]).strip()
+        return (*target, reason, None)
 
     if command == "/unwarn":
         if msg.reply_to_message:
@@ -3524,33 +3512,26 @@ async def warn_cmd(msg: Message):
         await msg.answer('({15})**У вас недостаточно прав**')
         return
 
-    target_id, username, full_name, reason, count_token = await parse_target_and_reason(msg)
-    if target_id is None or not count_token or not count_token.isdigit():
+    target_id, username, full_name, reason, _count_token = await parse_target_and_reason(msg)
+    if target_id is None or not reason.strip():
         await msg.answer(
             '({8})**Ошибка выдачи варна**\n'
-            '"**Возможные причины**\n'
-            '• Не указано имя пользователя.\n'
-            '    /Ответьте на сообщение нарушителя/\n'
-            '    либо укажите @username.\n'
-            '• Нет причины:/\n'
-            '    /({8})Укажите причину выдачи варна./\n'
-            '• Не указано кол-во варнов.\n'
-            '    /({8})Укажите количество варнов./\n'
-            'Пример применения команды:\n'
-            '• С ответом на сообщение:\n'
-            '    //warn (n) <причина>/\n'
-            '• Без ответа:\n'
-            '    //warn @username (n) <причина>/"\n'
-            '({19})Если нашли ошибки в команде свяжитесь с нами.\n'
+            '"Укажите пользователя и причину.\n\n'
+            '• Ответом на сообщение: /warn <причина>\n'
+            '• Без ответа (только создатель/главный админ): /warn @username <причина>"\n'
+            '({19}) Если нашли ошибку, свяжитесь с нами.\n'
             '∆Contact Us(https://t.me/duosup_bot)∆'
         )
         return
 
-    count = int(count_token)
-    max_count = 4 if effective_admin_role(await get_moderator_level(actor.id)) >= 2 else 3
+    actor_role = effective_admin_role(await get_moderator_level(actor.id))
+    if not msg.reply_to_message and actor.id != CREATOR_ID and actor_role < 2:
+        await msg.answer('({15})**Без ответа на сообщение варн может выдать только создатель или главный админ.**')
+        return
+    count = 1
     current_warns = await get_user_warns(target_id)
-    if count < 1 or count > max_count or current_warns + count > max_count:
-        await msg.answer(f'({{15}})**У вас недостаточно прав**')
+    if current_warns >= 4:
+        await msg.answer('({8}) Пользователь уже получил максимальное количество варнов (4/4).')
         return
     if target_id == actor.id:
         await msg.answer('({14})**Нельзя выдать варн самому себе.**')
@@ -3571,6 +3552,16 @@ async def warn_cmd(msg: Message):
 
     target_chat = await moderation_chat_id(msg.chat.id)
     source_id = msg.reply_to_message.message_id if msg.reply_to_message else None
+    # Один исходный пост можно наказать командой /warn только один раз.
+    # Проверка применяется к варнам, выданным ответом на конкретное сообщение.
+    if source_id is not None:
+        duplicate = await require_db().fetchval(
+            "SELECT EXISTS(SELECT 1 FROM warn_logs WHERE chat_id=$1 AND message_id=$2 AND is_active=TRUE)",
+            target_chat, source_id,
+        )
+        if duplicate:
+            await msg.answer('({14}) На это сообщение уже выдан варн.')
+            return
     issued_numbers=[]
     final_count=None
     action_error=None
@@ -3806,17 +3797,20 @@ async def profile_text(user_id: int):
     role = moderator["role"] if moderator and moderator["role"] else tag
 
     return (
-        '({44})**Профиль**\n\n'
-        f'"Telegram: {mention}\n'
-        f'Username: {("@" + esc(username)) if username else "не указано"}\n'
-        f'Сообщений: {messages_count}\n'
-        f'В сообществе с: {joined}\n'
-        f'Roblox: {esc(roblox or "не указано")}\n'
-        f'Тег: {esc(role or "не указан")}\n'
-        f'Комментарий: {esc(comment or "не указан")}\n'
-        f'Проверен: {"да" if verified else "нет"}\n'
-        f'Активные варны: {warns}/4\n'
-        f'Статус: {"заблокирован" if banned else "активен"}"'
+        '({44})**Профиль участника**\n'
+        '•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n'
+        f'"**👤 Telegram:** {mention}\n'
+        f'**🎮 Roblox:** {esc(roblox or "не указан")}\n'
+        f'**🏷 Тег:** {esc(role or "не указан")}\n'
+        f'**💬 Комментарий:** {esc(comment or "не указан")}"\n\n'
+        '•—-—-—-—-—-<⁠✧>-—-—-—-—-—•\n'
+        f'"**📊 Активность**\n'
+        f'• Сообщений: {messages_count}\n'
+        f'• В сообществе с: {joined}\n'
+        f'• Проверен: {"✅ Да" if verified else "❌ Нет"}\n\n'
+        f'**🛡 Наказания**\n'
+        f'• Варны: {warns}/4\n'
+        f'• Статус: {"⛔ Заблокирован" if banned else "🟢 Активен"}"'
     )
 
 
@@ -4081,8 +4075,7 @@ def profile_keyboard(owner: bool = True) -> InlineKeyboardMarkup:
     rows=[]
     if owner:
         rows.append([_btn("({24})Редактировать профиль", "profile_edit")])
-    rows.append([_btn("({61})Навигация", "menu_navigation")])
-    rows.append([_btn("({63})Назад", "menu_back")])
+    # Навигация и возврат существуют только в ЛС бота.
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -4424,7 +4417,6 @@ async def profile_roblox_msg(msg:Message,state:FSMContext): await require_db().e
 
 @dp.callback_query(F.data.startswith("verify_user_"))
 async def verify_user_cb(cb: CallbackQuery):
-    """Подтверждает участника, убирает кнопку и отправляет правила в личные сообщения."""
     try:
         target = int((cb.data or "").removeprefix("verify_user_"))
     except ValueError:
@@ -4432,43 +4424,7 @@ async def verify_user_cb(cb: CallbackQuery):
     if not cb.from_user or cb.from_user.id != target:
         await cb.answer("Эта кнопка предназначена другому пользователю.", show_alert=True)
         return
-
-    pool = require_db()
-    await pool.execute(
-        "INSERT INTO users(user_id, joined_at, verified) VALUES($1,$2,TRUE) "
-        "ON CONFLICT(user_id) DO UPDATE SET verified=TRUE, joined_at=COALESCE(users.joined_at, EXCLUDED.joined_at)",
-        target, int(datetime.now(timezone.utc).timestamp()),
-    )
-    if cb.message:
-        try:
-            await cb.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            LOGGER.debug("Не удалось убрать кнопку верификации", exc_info=True)
-
-    await cb.answer("✅ Проверка пройдена!", show_alert=True)
-    rules = await pool.fetchrow("SELECT rule_text, version FROM rules ORDER BY created_at DESC LIMIT 1")
-    if rules and rules.get("rule_text"):
-        rules_text = f"📜 <b>Правила сообщества HuBBlox (v{esc(str(rules.get('version') or '1.0'))})</b>\n\n{esc(rules['rule_text'])}"
-    else:
-        rules_text = ("📜 <b>Правила сообщества HuBBlox</b>\n\n"
-                      "Пожалуйста, ознакомьтесь с правилами сообщества в теме «Правила» HuBBlox.")
-    try:
-        bot_instance = require_bot()
-        await bot_instance.send_message(
-            target,
-            f"👋 <b>Добро пожаловать в HuBBlox, {esc(cb.from_user.full_name)}!</b> ❤️\n\n"
-            "✅ <b>Вы успешно подтвердили, что вы не бот.</b>\n\n"
-            f"{rules_text}\n\n🎮 <b>Укажите ваш Roblox-ник одним сообщением.</b>",
-        )
-        # FSM для Roblox-ника привязывается именно к личному чату, а не к группе.
-        private_state = await dp.fsm.get_context(bot=bot_instance, chat_id=target, user_id=target)
-        await private_state.set_state(ProfileState.waiting_roblox)
-    except Exception:
-        LOGGER.info("Не удалось отправить приветствие/правила в ЛС user_id=%s; возможно, пользователь ещё не запускал бота", target, exc_info=True)
-        try:
-            await cb.answer("Проверка пройдена. Чтобы получить правила и указать Roblox-ник, сначала откройте ЛС бота и нажмите /start.", show_alert=True)
-        except Exception:
-            pass
+    await cb.answer("Проверка пройдена.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("question_answer_"))
@@ -4510,40 +4466,12 @@ async def unknown_callback_cb(cb: CallbackQuery):
 
 @dp.chat_member()
 async def admin_promotion_watch(update: ChatMemberUpdated):
-    """Приветствует новых участников HuBBlox и синхронизирует повышение администраторов."""
+    """Синхронизирует повышение в Telegram: новый админ получает роль 1, список обновляется, ссылка в админ-чат отправляется один раз."""
     chat_id=update.chat.id
     linked=await get_config('hublox_id')
     linked_admin=await get_config('hubsup_id')
     if str(chat_id) not in {str(linked or ''),str(linked_admin or '')}: return
     member=update.new_chat_member
-
-    # Приветствие публикуется в основных тематических разделах при реальном вступлении.
-    old_status = update.old_chat_member.status
-    new_status = member.status
-    joined_now = old_status in ('left', 'kicked') and new_status in ('member', 'restricted', 'administrator', 'creator')
-    if str(chat_id) == str(linked or '') and joined_now and not member.user.is_bot:
-        uid = member.user.id
-        joined_at = int(datetime.now(timezone.utc).timestamp())
-        await remember_user(member.user, joined_at=joined_at)
-        await require_db().execute(
-            "INSERT INTO users(user_id, joined_at, verified) VALUES($1,$2,FALSE) "
-            "ON CONFLICT(user_id) DO UPDATE SET joined_at=COALESCE(users.joined_at, EXCLUDED.joined_at)",
-            uid, joined_at,
-        )
-        greeting = (
-            f"👋 <b>Добро пожаловать в HuBBlox, {user_mention(uid, member.user.username, member.user.full_name)}!</b> ❤️\n\n"
-            "Чтобы подтвердить, что вы не бот, нажмите кнопку ниже. После подтверждения DuoSup отправит правила в личные сообщения."
-        )
-        for topic_key in ('welcome', 'chat', 'trades', 'raids'):
-            try:
-                await require_bot().send_message(
-                    int(chat_id), greeting,
-                    message_thread_id=TOPICS[topic_key],
-                    reply_markup=captcha_keyboard(uid),
-                )
-            except Exception:
-                LOGGER.warning("Не удалось отправить приветствие в тему %s", topic_key, exc_info=True)
-
     if member.status not in ('administrator','creator'): return
     uid=member.user.id
     if uid==CREATOR_ID: return
