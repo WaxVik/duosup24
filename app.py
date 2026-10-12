@@ -71,6 +71,7 @@ TOPICS = {
     "raids": env_int("TOPIC_RAIDS", 17),
     "sea_events": env_int("TOPIC_SEA_EVENTS", 1232),
     "trials": env_int("TOPIC_TRIALS", 1762),
+    "stock": env_int("TOPIC_STOCK", 1233),             # Стоки 24/7
     # ---- админ-чат ----
     "mod_chat": env_int("TOPIC_MOD_CHAT", 6),          # Чат админов (команды модерации)
     "modlog": env_int("TOPIC_MODLOG", 10),             # Состав + лог варнов/банов/разбанов + эскалации
@@ -85,6 +86,8 @@ LINKS = {
     "raids": "https://t.me/hubblox/17",
     "sea": "https://t.me/hubblox/1232",
     "contact": "https://t.me/duosup_bot",
+    "chat": "https://t.me/hubblox",
+    "stock": "https://t.me/hubblox/1233",
 }
 
 MSK = timezone(timedelta(hours=3))
@@ -121,6 +124,9 @@ PREMIUM_EMOJI: dict[int, str] = {
     67: "5348136325436451221", 68: "5350657479829141382", 69: "5350770579202944020",
     70: "5350668754118292190", 71: "5350725881478293775", 72: "5350488305362315240",
     73: "5282843764451195532",
+    74: "5278702045883292456",  # 🛍
+    75: "5427168083074628963",  # 💎
+    76: "5411225014148014586",  # 🔴 (для «Истёк»)
 }
 
 # Обычный символ, который виден, если премиум-эмодзи не отображается (колонка «если скопировать»).
@@ -134,6 +140,7 @@ EMOJI_FALLBACK: dict[int, str] = {
     50: "⚓", 51: "🏝", 52: "🌊", 53: "👼", 54: "🦈", 55: "🙍‍♂️", 56: "🤖", 57: "👻",
     58: "🐇", 59: "⚔️", 60: "💬", 61: "🧭", 62: "🟢", 63: "🔙", 64: "🗓", 65: "🔥",
     66: "🌋", 67: "💙", 68: "🪙", 69: "💾", 70: "💾", 71: "⚙️", 72: "🏆", 73: "🖥",
+    74: "🛍", 75: "💎", 76: "🔴",
 }
 
 _PH = re.compile(r"\(\{([0-9._]+)\}\)")
@@ -209,7 +216,7 @@ FRUITS = [
     ("portal", "Portal"), ("lightning", "Lightning"), ("pain", "Pain"), ("blizzard", "Blizzard"),
     ("gravity", "Gravity"), ("mammoth", "Mammoth"), ("trex", "T-Rex"), ("dough", "Dough"),
     ("shadow", "Shadow"), ("venom", "Venom"), ("gas", "Gas"), ("spirit", "Spirit"),
-    ("tiger", "Tiger"), ("yeti", "Yeti"), ("kitsune", "Kitsune"), ("control", "Control"),
+    ("tiger", "Leopard"), ("yeti", "Yeti"), ("kitsune", "Kitsune"), ("control", "Control"),
     ("dragon", "Dragon"),
 ]
 
@@ -442,6 +449,8 @@ async def init_db() -> None:
             violator_id BIGINT NOT NULL, chat_id BIGINT NOT NULL, message_id BIGINT NOT NULL,
             reason TEXT NOT NULL, created_at BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
             reviewed_by BIGINT, UNIQUE (chat_id, message_id))""",
+        """CREATE TABLE IF NOT EXISTS unique_roles (
+            user_id BIGINT PRIMARY KEY, username TEXT, role TEXT NOT NULL, created_at BIGINT NOT NULL)""",
         # новое: права, выданные через /premmod
         """CREATE TABLE IF NOT EXISTS admin_rights (
             user_id BIGINT PRIMARY KEY, role TEXT, rights JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -1318,20 +1327,24 @@ async def unlink_chats(msg: Message):
 # ======================== СОСТАВ АДМИНИСТРАЦИИ ========================
 async def build_admin_list() -> str:
     rows = await pool().fetch(
-        "SELECT user_id, username, level, role FROM moderators WHERE level>0 ORDER BY level DESC, user_id")
+        """SELECT m.user_id, m.username, m.level, k.full_name FROM moderators m
+           LEFT JOIN known_users k ON k.user_id = m.user_id WHERE m.level>0 ORDER BY m.level DESC, m.user_id""")
     groups: dict[int, list[str]] = {3: [], 2: [], 1: []}
     for r in rows:
-        rank = rank_from_level(int(r["level"]))
-        who = mention(r["user_id"], r["username"], None)
-        role = f" — {esc(r['role'])}" if r["role"] and rank < 3 else ""
-        groups[rank].append(f"{who}{role}")
+        groups[rank_from_level(int(r["level"]))].append(mention(r["user_id"], r["username"], r["full_name"]))
+    uniques = await pool().fetch(
+        """SELECT u.user_id, u.username, u.role, k.full_name FROM unique_roles u
+           LEFT JOIN known_users k ON k.user_id = u.user_id ORDER BY u.created_at""")
     out = [f"{e(21)} <b>Состав администрации</b>", SEP]
     if groups[3]:
         out.append(f"{e(29)} <b>Создатель</b>\n" + "\n".join(groups[3]))
     if groups[2]:
-        out.append(f"{e(28)} <b>Главные админы</b>\n" + "\n".join(groups[2]))
+        out.append(f"{e(30)} <b>Главные админы</b>\n" + "\n".join(groups[2]))
     if groups[1]:
-        out.append(f"{e(45)} <b>Админы</b>\n" + "\n".join(groups[1]))
+        out.append(f"{e(28)} <b>Админы</b>\n" + "\n".join(groups[1]))
+    if uniques:
+        out.append(f"{e(75)} <b>Уникальные роли</b>\n" + "\n".join(
+            f"{mention(u['user_id'], u['username'], u['full_name'])} — {esc(u['role'])}" for u in uniques))
     return "\n\n".join(out)
 
 
@@ -1365,7 +1378,7 @@ async def set_rank(user_id: int, username: str | None, rank: int) -> None:
     await pool().execute(
         """INSERT INTO moderators (user_id, username, level, role) VALUES ($1,$2,$3,$4)
            ON CONFLICT (user_id) DO UPDATE SET level=$3, username=COALESCE($2, moderators.username),
-           role=COALESCE(NULLIF(moderators.role,''), $4)""",
+           role=$4""",
         user_id, username, level, RANK_NAMES.get(rank) if rank else None)
     if rank == 0:
         await pool().execute("UPDATE moderators SET role=NULL WHERE user_id=$1", user_id)
@@ -1384,13 +1397,24 @@ async def change_rank(msg: Message, delta: int) -> None:
     if target is None or target == "bot":
         await reply(msg, "({8})Ответьте на сообщение пользователя либо укажите @username.")
         return
-    uid, uname, _ = target
+    uid, uname, fname = target
     if uid == CREATOR_ID:
         await reply(msg, "({14})Ранг создателя изменить нельзя.")
         return
+    import json
     new = max(0, min(2, await rank_of(uid) + delta))
     await set_rank(uid, uname, new)
-    await reply(msg, f"({{20}}){mention(uid, uname, None)} — теперь: <b>{RANK_NAMES[new]}</b>")
+    report: list[str] = []
+    if new > 0:
+        await pool().execute(
+            """INSERT INTO admin_rights (user_id, role, rights, updated_at) VALUES ($1,$2,$3::jsonb,$4)
+               ON CONFLICT (user_id) DO UPDATE SET role=$2, updated_at=$4""",
+            uid, RANK_NAMES[new], json.dumps(DEFAULT_RIGHTS), now_ts())
+        report = await grant_default_access(uid, uname, fname, RANK_NAMES[new], msg)
+    text = f"({{20}}){mention(uid, uname, fname)} — теперь: <b>{RANK_NAMES[new]}</b>"
+    if report:
+        text += "\n" + "\n".join(report)
+    await reply(msg, text)
     await refresh_admin_list()
 
 
@@ -1499,6 +1523,97 @@ async def is_member(chat_id: int, user_id: int) -> bool:
         return member.status in ("member", "administrator", "creator", "restricted")
     except Exception:
         return False
+
+
+DEFAULT_RIGHTS = {"delete": True, "invite": True}  # остальное можно поменять вручную в Telegram
+
+
+async def grant_default_access(uid: int, uname, fname, title: str, msg: Message) -> list[str]:
+    """Админка в обоих чатах с минимальными правами (удаление сообщений + пригласительные ссылки)."""
+    report = []
+    main_id, adm_id = await main_chat(), await admin_chat()
+    for label, chat_id in (("Основной чат", main_id), ("Админ-чат", adm_id)):
+        if not chat_id:
+            continue
+        if await is_member(chat_id, uid):
+            if await is_tg_admin(chat_id, uid):
+                try:
+                    await B().set_chat_administrator_custom_title(chat_id, uid, title[:16])
+                except Exception:
+                    pass
+                report.append(f"{e(20)} {label}: уже администратор, права не менял")
+            else:
+                ok = await promote_in(chat_id, uid, DEFAULT_RIGHTS, title)
+                report.append(f"{e(20) if ok else e(14)} {label}: {'админка выдана' if ok else 'не удалось выдать админку'}")
+        elif chat_id == adm_id:
+            try:
+                invite = await B().create_chat_invite_link(
+                    chat_id, member_limit=1, expire_date=datetime.now(timezone.utc) + timedelta(days=3),
+                    name=f"admin {uid}")
+                if not await dm(uid, f"{e(21)} Вас назначили в администрацию HuBBlox: <b>{esc(title)}</b>\n"
+                                     f"Вступите в админ-чат по одноразовой ссылке:\n{invite.invite_link}"):
+                    await B().send_message(msg.chat.id, R(
+                        f"{e(26)} {mention(uid, uname, fname)}, вступите в админ-чат по одноразовой ссылке:\n{invite.invite_link}"),
+                        **thread_kwargs(msg))
+                report.append(f"{e(26)} {label}: отправлена одноразовая ссылка")
+            except Exception as exc:
+                report.append(f"{e(14)} {label}: не удалось создать ссылку ({esc(exc)})")
+    return report
+
+
+@dp.message(Command("uniqrole"))
+async def uniqrole_cmd(msg: Message):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await reply(msg, "({15})У вас недостаточно прав")
+        return
+    if not await mod_group(msg):
+        return
+    import json
+    tokens = command_args(msg)
+    token = tokens.pop(0) if (not msg.reply_to_message and tokens and tokens[0].startswith("@")) else None
+    role = " ".join(tokens).strip()
+    target = await resolve_target(msg, token)
+    if target is None or target == "bot" or not role:
+        await reply(msg, "({8})<b>Ошибка выдачи уникальной роли</b>\n<blockquote>Ответьте на сообщение участника или укажите @username и напишите роль:\n"
+                         "<i>/uniqrole &lt;роль&gt;</i>\n<i>/uniqrole @username &lt;роль&gt;</i></blockquote>")
+        return
+    uid, uname, fname = target
+    role = role[:32]
+    await pool().execute(
+        """INSERT INTO unique_roles (user_id, username, role, created_at) VALUES ($1,$2,$3,$4)
+           ON CONFLICT (user_id) DO UPDATE SET username=COALESCE($2, unique_roles.username), role=$3""",
+        uid, uname, role, now_ts())
+    await pool().execute(
+        """INSERT INTO admin_rights (user_id, role, rights, updated_at) VALUES ($1,$2,$3::jsonb,$4)
+           ON CONFLICT (user_id) DO UPDATE SET role=$2, updated_at=$4""",
+        uid, role, json.dumps(DEFAULT_RIGHTS), now_ts())
+    report = await grant_default_access(uid, uname, fname, role, msg)
+    await reply(msg, f"({{20}}){mention(uid, uname, fname)} — уникальная роль: <b>{esc(role)}</b>\n" + "\n".join(report))
+    await refresh_admin_list()
+
+
+@dp.message(Command("uniqrole_del"))
+async def uniqrole_del_cmd(msg: Message):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await reply(msg, "({15})У вас недостаточно прав")
+        return
+    if not await mod_group(msg):
+        return
+    args = command_args(msg)
+    target = await resolve_target(msg, args[0] if args else None)
+    if target is None or target == "bot":
+        await reply(msg, "({8})Ответьте на сообщение участника или укажите @username.")
+        return
+    uid, uname, fname = target
+    res = await pool().execute("DELETE FROM unique_roles WHERE user_id=$1", uid)
+    if not res.endswith("1"):
+        await reply(msg, "({8})У этого участника нет уникальной роли.")
+        return
+    if await rank_of(uid) == 0:
+        await pool().execute("DELETE FROM admin_rights WHERE user_id=$1", uid)
+        await strip_admin(uid)
+    await reply(msg, f"({{20}})Уникальная роль у {mention(uid, uname, fname)} снята.")
+    await refresh_admin_list()
 
 
 @dp.callback_query(F.data == "pm_done")
@@ -1626,7 +1741,7 @@ async def on_chat_member(update: ChatMemberUpdated):
     chat_id = update.chat.id
     if chat_id == await admin_chat():
         row = await pool().fetchrow("SELECT role, rights FROM admin_rights WHERE user_id=$1", user.id)
-        if row and await rank_of(user.id) > 0:
+        if row and (await rank_of(user.id) > 0 or await pool().fetchval("SELECT 1 FROM unique_roles WHERE user_id=$1", user.id)):
             import json
             rights = row["rights"] if isinstance(row["rights"], dict) else json.loads(row["rights"] or "{}")
             if await promote_in(chat_id, user.id, rights, row["role"] or "Админ"):
@@ -3125,13 +3240,282 @@ async def private_text(msg: Message):
     await say(msg, MAIN_TEXT, main_menu())
 
 
+# ================================ СТОК ================================
+import aiohttp
+
+# Источник данных (Railway Variables). Без STOCK_API_URL автосток выключен, остаётся ручная /stock.
+STOCK_API_URL = os.getenv("STOCK_API_URL", "").strip()
+STOCK_API_KEY = os.getenv("STOCK_API_KEY", "").strip()
+STOCK_API_KEY_HEADER = os.getenv("STOCK_API_KEY_HEADER", "X-API-Key").strip() or "X-API-Key"
+STOCK_POLL_SECONDS = max(60, env_int("STOCK_POLL_SECONDS", 300))
+STOCK_MIN_ITEMS = 3  # меньше фруктов — считаем ответ источника сбойным и ничего не публикуем
+STOCK_NEXT_HOURS = {"normal": 4, "mirage": 2}
+_stock_task = None
+
+# Цены в Beli. Если источник отдаёт свою цену — берётся она. Таблицу можно править.
+PRICES = {
+    "rocket": 5000, "spin": 7500, "blade": 30000, "spring": 60000, "bomb": 80000, "smoke": 100000,
+    "spike": 180000, "flame": 250000, "ice": 350000, "sand": 420000, "dark": 500000, "eagle": 550000,
+    "diamond": 600000, "light": 650000, "rubber": 750000, "ghost": 940000, "magma": 960000,
+    "quake": 1000000, "buddha": 1200000, "love": 1300000, "creation": 1400000, "spider": 1500000,
+    "sound": 1700000, "phoenix": 1800000, "portal": 1900000, "lightning": 2100000, "pain": 2300000,
+    "blizzard": 2400000, "gravity": 2500000, "mammoth": 2700000, "trex": 2700000, "dough": 2800000,
+    "shadow": 2900000, "venom": 3000000, "control": 3200000, "gas": 3200000, "spirit": 3400000,
+    "tiger": 5000000, "yeti": 5000000, "kitsune": 8000000, "dragon": 15000000,
+}
+
+
+def _norm(value) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+FRUIT_BY_NAME: dict[str, str] = {_norm(name): key for key, name in FRUITS}
+FRUIT_BY_NAME.update({_norm(key): key for key, _ in FRUITS})
+FRUIT_BY_NAME.update({"leopard": "tiger", "trex": "trex", "tyrannosaurus": "trex"})
+
+NAME_KEYS = ("name", "fruit", "fruitName", "fruit_name", "title", "displayName")
+PRICE_KEYS = ("price", "beli", "cost", "money", "priceBeli", "price_beli")
+
+
+def _lookup(name) -> str | None:
+    n = _norm(name)
+    key = FRUIT_BY_NAME.get(n) or FRUIT_BY_NAME.get(n.removesuffix("fruit"))
+    if key:
+        return key
+    first = re.split(r"[-\s]+", str(name).strip())[0]  # «Kitsune-Kitsune Fruit» -> «Kitsune»
+    return FRUIT_BY_NAME.get(_norm(first))
+
+
+def _to_int(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        digits = re.sub(r"[^\d]", "", value)
+        return int(digits) if digits else None
+    return None
+
+
+def _parse_item(item, fallback_name=None):
+    name, price = fallback_name, None
+    if isinstance(item, str):
+        name = item
+    elif isinstance(item, dict):
+        for k in NAME_KEYS:
+            if isinstance(item.get(k), str):
+                name = item[k]
+                break
+        for k in PRICE_KEYS:
+            v = item.get(k)
+            if isinstance(v, dict):
+                v = v.get("beli") or v.get("Beli") or v.get("price")
+            price = _to_int(v)
+            if price is not None:
+                break
+    elif fallback_name is not None:
+        price = _to_int(item)
+    key = _lookup(name) if name else None
+    return (key, price) if key else None
+
+
+def _items(value) -> list:
+    out: list = []
+    if isinstance(value, list):
+        out = [x for x in (_parse_item(i) for i in value) if x]
+    elif isinstance(value, dict):
+        for inner in ("fruits", "items", "stock", "list", "data"):
+            if isinstance(value.get(inner), (list, dict)):
+                out = _items(value[inner])
+                if out:
+                    return out
+        out = [x for x in (_parse_item(i, fallback_name=n) for n, i in value.items()) if x]
+    seen, res = set(), []
+    for key, price in out:
+        if key not in seen:
+            seen.add(key)
+            res.append((key, price))
+    return res
+
+
+def extract_stock(data) -> dict[str, list]:
+    """Ищет в JSON источника списки обычного и миражного стока. -> {'normal': [(ключ, цена|None)], 'mirage': [...]}."""
+    found: dict[str, list] = {}
+
+    def kind_of(label):
+        low = str(label).lower()
+        if "mirage" in low or "advanced" in low:
+            return "mirage"
+        if "normal" in low or "regular" in low:
+            return "normal"
+        return None
+
+    def walk(obj, kind=None):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                sub = kind_of(k) or kind
+                if sub and sub not in found and isinstance(v, (list, dict)):
+                    items = _items(v)
+                    if items:
+                        found[sub] = items
+                        continue
+                walk(v, sub)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v, kind)
+
+    walk(data)
+    return found
+
+
+async def fetch_stock_json():
+    if not STOCK_API_URL:
+        return None
+    headers = {STOCK_API_KEY_HEADER: STOCK_API_KEY} if STOCK_API_KEY else {}
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(STOCK_API_URL, headers=headers) as resp:
+            resp.raise_for_status()
+            return await resp.json(content_type=None)
+
+
+# ---------------------------- оформление ----------------------------
+async def stock_state(kind: str) -> dict:
+    import json
+    raw = await get_config(f"stock_{kind}")
+    try:
+        return json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+
+
+def stock_footer() -> str:
+    return (f"<b>{e(60)}<u>{link('Чат по Blox Fruits', LINKS['chat'])}</u> | "
+            f"{e(11)} <u>{link('стоки 24/7', LINKS['stock'])}</u></b>")
+
+
+async def stock_text(kind: str, state: dict, active: bool) -> str:
+    icons = await fruit_icons()
+    names = dict(FRUITS)
+    lines = []
+    for key, price in sorted(state["items"], key=lambda x: x[1]):
+        price_text = f"${price:,}" if price else "—"
+        lines.append(f"{custom_emoji_html(icons.get(key), '▪️')} {esc(names.get(key, key))} • {price_text}")
+    body = "\n".join(lines)
+    head = f"Активен {e(62)}" if active else f"Истёк {e(76)}"
+    title = (f"{e(30)} Mirage Stock" if kind == "mirage" else f"{e(74)} Normal Stock") + f" ({esc(state['time'])} МСК)"
+    if active:
+        hours = STOCK_NEXT_HOURS[kind]
+        return (f"{head}\n{title}\n{body}\n\n{stock_footer()}\n\n"
+                f"{e(11)} <i>Следующее обновление через {hours} часа!</i>")
+    return f"{head}\n{title}\n<blockquote>{body}</blockquote>\n{stock_footer()}"
+
+
+async def publish_stock(kind: str, items: list, force: bool = False) -> bool:
+    """Старый пост -> «Истёк 🔴», новый -> «Активен 🟢». False, если сток не изменился."""
+    import json
+    chat_id = await main_chat()
+    if not chat_id:
+        return False
+    resolved = [[key, price or PRICES.get(key, 0)] for key, price in items]
+    keys = sorted(k for k, _ in resolved)
+    async with lock_for("stock", kind):
+        old = await stock_state(kind)
+        if not force and old.get("keys") == keys:
+            return False
+        if old.get("msg"):
+            try:
+                await B().edit_message_text(R(await stock_text(kind, old, False)), chat_id=chat_id,
+                                            message_id=old["msg"], reply_markup=None)
+            except Exception as exc:
+                if "not modified" not in str(exc).lower():
+                    LOG.warning("expire stock failed: %s", exc)
+        state = {"keys": keys, "items": resolved, "time": datetime.now(MSK).strftime("%H:00"), "msg": None}
+        sent = await B().send_message(chat_id, R(await stock_text(kind, state, True)),
+                                      message_thread_id=thread(TOPICS["stock"]))
+        state["msg"] = sent.message_id
+        await set_config(f"stock_{kind}", json.dumps(state))
+        return True
+
+
+async def stock_tick() -> None:
+    data = await fetch_stock_json()
+    if data is None:
+        return
+    parsed = extract_stock(data)
+    for kind in ("mirage", "normal"):
+        items = parsed.get(kind) or []
+        if len(items) < STOCK_MIN_ITEMS:
+            if items:
+                LOG.warning("stock %s: слишком мало фруктов (%s) — пропускаю", kind, len(items))
+            continue
+        if await publish_stock(kind, items):
+            LOG.info("stock %s опубликован: %s", kind, ", ".join(k for k, _ in items))
+
+
+async def stock_loop() -> None:
+    await asyncio.sleep(15)
+    LOG.info("Автосток запущен, опрос каждые %s сек.", STOCK_POLL_SECONDS)
+    while True:
+        try:
+            await stock_tick()
+        except Exception as exc:
+            LOG.warning("stock tick failed: %s", exc)
+        await asyncio.sleep(STOCK_POLL_SECONDS)
+
+
+# ------------------------------ команды ------------------------------
+@dp.message(Command("stock"))
+async def stock_cmd(msg: Message):
+    """Ручной сток: /stock normal rocket, spin, blade  (запасной вариант, если источник недоступен)."""
+    if not await redact_zone(msg):
+        return
+    parts = (msg.text or "").split(maxsplit=2)
+    kind = parts[1].lower() if len(parts) > 1 else ""
+    if kind not in STOCK_NEXT_HOURS or len(parts) < 3:
+        await reply(msg, "({8})<b>Ошибка</b>\n<blockquote>Формат:\n<i>/stock normal rocket, spin, blade</i>\n"
+                         "<i>/stock mirage flame, buddha, dough</i></blockquote>")
+        return
+    names = [x.strip() for x in re.split(r"[,\n;]+", parts[2]) if x.strip()]
+    items, unknown = [], []
+    for name in names:
+        key = _lookup(name)
+        (items if key else unknown).append((key, None) if key else name)
+    if unknown or not items:
+        await reply(msg, "({8})Не распознал: <b>" + esc(", ".join(unknown) or "пусто") + "</b>\nПишите названия фруктов по-английски.")
+        return
+    await publish_stock(kind, items, force=True)
+    await reply(msg, f"({{20}})Сток {kind} опубликован.")
+
+
+@dp.message(Command("stockcheck"))
+async def stockcheck_cmd(msg: Message):
+    """Проверка источника: что вернул и как бот это разобрал."""
+    if not await redact_zone(msg):
+        return
+    if not STOCK_API_URL:
+        await reply(msg, "({8})Источник не настроен. Добавьте в Railway Variables <code>STOCK_API_URL</code> "
+                         "(и <code>STOCK_API_KEY</code>, если нужен ключ).")
+        return
+    import json
+    try:
+        data = await fetch_stock_json()
+    except Exception as exc:
+        await reply(msg, f"({{14}})Источник не ответил: <code>{esc(exc)}</code>")
+        return
+    parsed = extract_stock(data)
+    names = dict(FRUITS)
+    lines = [f"{kind}: " + (", ".join(names[k] for k, _ in items) or "—") for kind, items in parsed.items()] or ["ничего не распознано"]
+    raw = esc(json.dumps(data, ensure_ascii=False)[:1200])
+    await reply(msg, "({39})<b>Проверка источника</b>\n<blockquote>" + "\n".join(esc(x) for x in lines) +
+                     f"</blockquote>\n<b>Сырой ответ (начало):</b>\n<pre>{raw}</pre>")
 # Автоварн — самым последним: он реагирует на любые групповые сообщения со ссылками.
 dp.message.register(autowarn_handler, F.chat.type.in_({"group", "supergroup"}))
 
 
 # ================================ ЗАПУСК ================================
 async def main() -> None:
-    global bot, BOT_USERNAME
+    global bot, BOT_USERNAME, _stock_task
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не задан в Railway Variables")
     if not DATABASE_URL:
@@ -3154,6 +3538,10 @@ async def main() -> None:
             BotCommand(command="report", description="Репорт (ответом на сообщение)"),
             BotCommand(command="cancel", description="Отменить действие"),
         ])
+        if STOCK_API_URL:
+            _stock_task = asyncio.create_task(stock_loop())
+        else:
+            LOG.info("STOCK_API_URL не задан — автосток выключен (работает ручная команда /stock)")
         LOG.info("DuoSup %s запущен как @%s (id=%s)", BOT_VERSION, BOT_USERNAME, me.id)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
