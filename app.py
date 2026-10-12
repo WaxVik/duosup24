@@ -1562,22 +1562,18 @@ _last_prompt: dict[int, float] = {}
 
 
 async def start_verification(chat_id: int, user, on_write: bool = False, topic: int | None = None) -> None:
-    """Блокирует писать и показывает кнопку «Я не бот» (не чаще раза в 2 минуты на человека)."""
+    """Показывает кнопку «Я не бот» (не чаще раза в 2 минуты на человека)."""
     import time
     if time.time() - _last_prompt.get(user.id, 0) < 120:
         return
     _last_prompt[user.id] = time.time()
-    try:
-        await B().restrict_chat_member(chat_id, user.id, permissions=ChatPermissions(can_send_messages=False))
-    except Exception:
-        pass
     await pool().execute(
         "INSERT INTO captcha_pending (user_id, chat_id, joined_at) VALUES ($1,$2,$3) "
         "ON CONFLICT (user_id) DO UPDATE SET chat_id=$2, joined_at=$3", user.id, chat_id, now_ts())
     m = mention(user.id, user.username, user.full_name)
     if on_write:
         text = (f"{e(8)} {m}, подтвердите, что вы не бот.\n"
-                "<blockquote>Пока профиль не подтверждён, писать в чат нельзя. Нажмите кнопку ниже.</blockquote>")
+                "<blockquote>Сообщения неподтверждённых участников удаляются. Нажмите кнопку ниже.</blockquote>")
     else:
         text = (f"👋 Добро пожаловать, {m}!\nРады видеть вас в нашем сообществе.\n"
                 "Пожалуйста, подтвердите свой профиль.")
@@ -1660,10 +1656,11 @@ async def verify_cb(cb: CallbackQuery):
         await cb.answer("Эта кнопка не для вас.", show_alert=True)
         return
     chat_id = cb.message.chat.id
-    try:
-        await B().restrict_chat_member(chat_id, uid, permissions=await default_permissions(chat_id))
-    except Exception:
-        pass
+    if not await is_banned(uid) and await get_warns(uid) < 2:
+        try:  # снимаем только старое ограничение «до верификации»; муты за варны не трогаем
+            await B().restrict_chat_member(chat_id, uid, permissions=await default_permissions(chat_id))
+        except Exception:
+            pass
     await pool().execute("UPDATE users SET verified=TRUE, roblox_prompt_pending=TRUE WHERE user_id=$1", uid)
     await pool().execute("DELETE FROM captcha_pending WHERE user_id=$1", uid)
     m = mention(uid, cb.from_user.username, cb.from_user.full_name)
