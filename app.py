@@ -88,7 +88,7 @@ LINKS = {
 }
 
 MSK = timezone(timedelta(hours=3))
-SEP = "•—-—-—-—-<\u2060✧>-—-—-—-—•".replace("<", "&lt;").replace(">", "&gt;")
+SEP = "•—-—-—-<\u2060✧>-—-—-—•".replace("<", "&lt;").replace(">", "&gt;")
 MAX_REASON = 500
 MAX_WARNS = 4
 APPEAL_WARN_HOURS = 24
@@ -1179,7 +1179,7 @@ async def autowarn_handler(msg: Message) -> None:
                 await msg.delete()
             except Exception:
                 pass
-            await start_verification(msg.chat.id, user)
+            await start_verification(msg.chat.id, user, on_write=True, topic=topic_of(msg))
             return
     if not (msg.text or msg.caption):
         return
@@ -1561,7 +1561,7 @@ WELCOME_RULES = (
 _last_prompt: dict[int, float] = {}
 
 
-async def start_verification(chat_id: int, user) -> None:
+async def start_verification(chat_id: int, user, on_write: bool = False, topic: int | None = None) -> None:
     """Блокирует писать и показывает кнопку «Я не бот» (не чаще раза в 2 минуты на человека)."""
     import time
     if time.time() - _last_prompt.get(user.id, 0) < 120:
@@ -1575,10 +1575,16 @@ async def start_verification(chat_id: int, user) -> None:
         "INSERT INTO captcha_pending (user_id, chat_id, joined_at) VALUES ($1,$2,$3) "
         "ON CONFLICT (user_id) DO UPDATE SET chat_id=$2, joined_at=$3", user.id, chat_id, now_ts())
     m = mention(user.id, user.username, user.full_name)
-    text = (f"👋 Добро пожаловать, {m}!\nРады видеть вас в нашем сообществе.\n"
-            "Пожалуйста, подтвердите свой профиль.")
+    if on_write:
+        text = (f"{e(8)} {m}, подтвердите, что вы не бот.\n"
+                "<blockquote>Пока профиль не подтверждён, писать в чат нельзя. Нажмите кнопку ниже.</blockquote>")
+    else:
+        text = (f"👋 Добро пожаловать, {m}!\nРады видеть вас в нашем сообществе.\n"
+                "Пожалуйста, подтвердите свой профиль.")
     try:
-        await B().send_message(chat_id, R(text), message_thread_id=thread(TOPICS["welcome"]),
+        # при входе — в тему «Чат»; при сообщении в другом месте — прямо в ту тему, где человек написал
+        target_topic = topic if on_write else TOPICS["chat"]
+        await B().send_message(chat_id, R(text), message_thread_id=thread(target_topic),
                                reply_markup=kb([btn("({20}) Я не бот", f"verify_{user.id}")]))
     except Exception:
         LOG.exception("welcome send failed")
@@ -3066,6 +3072,49 @@ async def em_reset(cb: CallbackQuery):
         return
     await pool().execute("DELETE FROM config WHERE key LIKE 'custom_emoji_fruit_%'")
     await cb.answer("Эмодзи фруктов сброшены", show_alert=True)
+
+
+# ============================== НАГРАДЫ ==============================
+MAX_AWARDS = 20
+
+
+@dp.message(F.text.regexp(r"(?i)^\s*наградить(?:\s|$)"))
+async def award_cmd(msg: Message):
+    """Ответом на сообщение: «Наградить <название>» — награда появляется в профиле."""
+    if not msg.from_user or await rank_of(msg.from_user.id) < 1:
+        return  # обычные участники пишут это в разговоре — не реагируем
+    if not await mod_group(msg):
+        return
+    award = re.sub(r"(?i)^\s*наградить\s*", "", msg.text or "").strip()
+    target_msg = msg.reply_to_message
+    if not target_msg or not target_msg.from_user or not award:
+        await reply(msg, "({8})<b>Ошибка выдачи награды</b>\n<blockquote>Ответьте на сообщение участника и напишите:\n"
+                         "<i>Наградить &lt;название награды&gt;</i></blockquote>")
+        return
+    target = target_msg.from_user
+    if target.is_bot:
+        await reply(msg, "({14})Нельзя наградить бота.")
+        return
+    if target.id == msg.from_user.id:
+        await reply(msg, "({14})Нельзя наградить самого себя.")
+        return
+    if len(award) > 40:
+        await reply(msg, "({8})Название награды — не длиннее 40 символов.")
+        return
+    await remember_user(target)
+    async with lock_for("award", target.id):
+        row = await user_row(target.id)
+        current = [x.strip() for x in ((row and row["achievements"]) or "").split("\n") if x.strip()]
+        if any(x.lower() == award.lower() for x in current):
+            await reply(msg, "({8})У участника уже есть такая награда.")
+            return
+        if len(current) >= MAX_AWARDS:
+            await reply(msg, f"({{8}})У участника уже максимум наград ({MAX_AWARDS}).")
+            return
+        current.append(award)
+        await pool().execute("UPDATE users SET achievements=$2 WHERE user_id=$1", target.id, "\n".join(current))
+    await reply(msg, f"{e(72)} {mention(target.id, target.username, target.full_name)} получает награду: "
+                     f"<b>«{esc(award)}»</b>")
 
 
 # =================== ПРИВАТНЫЙ ТЕКСТ БЕЗ СОСТОЯНИЯ ===================
