@@ -61,18 +61,23 @@ CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "WaxVik0").lstrip("@").strip()
 
 # Номера тем (message_thread_id). 0 или 1 = общая тема без thread.
 TOPICS = {
-    # основной чат HuBBlox
-    "welcome": env_int("TOPIC_WELCOME", 1),
-    "raids": env_int("TOPIC_RAIDS", 17),
+    # ---- основной чат HuBBlox ----
+    "welcome": env_int("TOPIC_WELCOME", 1),            # Добро пожаловать (верификация)
+    "chat": env_int("TOPIC_CHAT", 7),                  # Чат: здесь работают варны/баны/разбаны
+    "rules": env_int("TOPIC_RULES", 6),                # Правила
+    "announce": env_int("TOPIC_ANNOUNCE", 16),         # Оповещения (смена правил и т.п.)
+    "modlist_main": env_int("TOPIC_MODLIST_MAIN", 27), # Администрация (состав)
     "trades": env_int("TOPIC_TRADES", 8),
+    "raids": env_int("TOPIC_RAIDS", 17),
     "sea_events": env_int("TOPIC_SEA_EVENTS", 1232),
     "trials": env_int("TOPIC_TRIALS", 1762),
-    # админ-чат
-    "mod_chat": env_int("TOPIC_MOD_CHAT", 6),
+    # ---- админ-чат ----
+    "mod_chat": env_int("TOPIC_MOD_CHAT", 6),          # Чат админов (команды модерации)
+    "modlog": env_int("TOPIC_MODLOG", 10),             # Состав + лог варнов/банов/разбанов + эскалации
     "appeals": env_int("TOPIC_APPEALS", 9),
-    "modlist": env_int("TOPIC_MODLIST", 10),
-    "reports": env_int("TOPIC_REPORTS", 258),
     "questions": env_int("TOPIC_QUESTIONS", 387),
+    "reports": env_int("TOPIC_REPORTS", 258),          # только репорты участников
+    "redact": env_int("TOPIC_REDACT", 8),              # Редакт (только создатель)
 }
 
 LINKS = {
@@ -83,7 +88,7 @@ LINKS = {
 }
 
 MSK = timezone(timedelta(hours=3))
-SEP = "•—-—-—-—-—-<⁠✧>-—-—-—-—-—•".replace("<", "&lt;").replace(">", "&gt;")
+SEP = "•—-—-—-—-<\u2060✧>-—-—-—-—•".replace("<", "&lt;").replace(">", "&gt;")
 MAX_REASON = 500
 MAX_WARNS = 4
 APPEAL_WARN_HOURS = 24
@@ -220,7 +225,7 @@ RAID_FRUITS: dict[str, tuple[str, dict[str, int]]] = {
     "buddha": ("Будда", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
     "spider": ("Паук", {"Z": 800, "X": 3500, "C": 4500, "V": 6000, "F": 2500}),
     "phoenix": ("Феникс", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
-    "dough": ("Тесто", {"Z": 500, "X": 3000, "C": 4000, "M1": 0, "V": 5000, "F": 2000}),
+    "dough": ("Тесто", {"Z": 500, "X": 3000, "C": 4000, "M1": 4000, "V": 5000, "F": 2000}),
 }
 CHIP_FRUITS = {"phoenix", "dough"}
 
@@ -667,6 +672,23 @@ async def to_admin_chat(topic_key: str, text: str, markup=None):
         return None
 
 
+def topic_of(msg: Message) -> int | None:
+    """Номер темы, в которой написано сообщение (None — общая тема / обычная группа)."""
+    return msg.message_thread_id if getattr(msg, "is_topic_message", False) else None
+
+
+async def admin_log(text: str, markup=None) -> None:
+    """Лог модерации в админ-чат (тема «Состав админ»). Без запасного варианта в ЛС."""
+    chat_id = await admin_chat()
+    if not chat_id:
+        return
+    try:
+        await B().send_message(chat_id, R(text), reply_markup=markup,
+                               message_thread_id=thread(TOPICS["modlog"]))
+    except Exception:
+        LOG.exception("admin_log failed")
+
+
 # ============================ МОДЕРАЦИЯ ============================
 e = tg_emoji
 
@@ -741,6 +763,49 @@ async def in_group(msg: Message) -> bool:
     return False
 
 
+async def mod_group(msg: Message) -> bool:
+    """Команды наказаний работают в теме «Чат» основного чата и в теме «Чат» админ-чата."""
+    if msg.chat.type not in ("group", "supergroup"):
+        await reply(msg, "({8})Команда работает только в группе.")
+        return False
+    topic = topic_of(msg)
+    if msg.chat.id == await main_chat() and topic == TOPICS["chat"]:
+        return True
+    if msg.chat.id == await admin_chat() and topic == TOPICS["mod_chat"]:
+        return True
+    await reply(msg, "({8})Эта команда работает только в теме «Чат».")
+    return False
+
+
+async def redact_zone(msg: Message) -> bool:
+    """Редактор (эмодзи, правила, ссылки): только создатель — в теме «Редакт» админ-чата или в ЛС бота."""
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await reply(msg, "({15})У вас недостаточно прав")
+        return False
+    if msg.chat.type == "private":
+        return True
+    if msg.chat.id == await admin_chat() and topic_of(msg) == TOPICS["redact"]:
+        return True
+    await reply(msg, "({15})Эта команда работает только в теме «Редакт» админ-чата или в личке с ботом.")
+    return False
+
+
+async def log_action(title: str, actor_id: int, uid: int, uname, fname, reason: str | None, ident: str,
+                     chat_id: int, msg_id: int | None, extra: str = "") -> None:
+    """Запись о наказании в админ-чат."""
+    if actor_id == B().id:
+        actor = "DuoSup (автоварн)"
+    else:
+        row = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", actor_id)
+        actor = mention(actor_id, row and row["username"], row and row["full_name"])
+    text = (f"{e(21)} <b>{esc(title)}</b>\n<blockquote>Модератор: {actor}\n"
+            f"Нарушитель: {mention(uid, uname, fname)}\n"
+            + (f"Причина: {esc(reason)}\n" if reason else "") + extra +
+            f"ID • <i>{esc(ident)}</i>\n{e(11)}{fmt_dt()}</blockquote>")
+    url = msg_url(chat_id, msg_id)
+    await admin_log(text, kb([btn("({26}) Перейти к сообщению", url=url)]) if url else None)
+
+
 def appeal_markup(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     rows = []
     for kind, number in items:
@@ -751,7 +816,7 @@ def appeal_markup(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 
 
 def warn_text(m: str, count: int, reason: str, numbers: list[str], ts: int | None, auto: bool) -> str:
-    title = E("1.2.3.4.5.3.2.6.7.1") if auto else E("1.3.12.13.2.7_3.2.6.7.1")
+    title = E("2.3.4.5.3.2.6.7") if auto else E("3.12.13.2.7_3.2.6.7")
     ids = ", ".join(numbers)
     body = (
         f"{title}\n<b>Выдан:</b> {m} ({count}/{MAX_WARNS})\n"
@@ -768,7 +833,7 @@ def warn_text(m: str, count: int, reason: str, numbers: list[str], ts: int | Non
 
 def ban_text(m: str, reason: str, number: str, ts: int | None) -> str:
     return (
-        f"{E('1.3.12.13.2.7_18.2.7.1')}\n{m} получает бан\n"
+        f"{E('3.12.13.2.7_18.2.7')}\n{m} получает бан\n"
         f"<blockquote>причина: {esc(reason)}\nID_BAN • <i>{number}</i>\n"
         f"{e(11)}Время выдачи: {fmt_dt(ts)}</blockquote>\n"
         f"Вы можете подать апелляцию в любое время. {e(11)}"
@@ -799,7 +864,7 @@ async def escalate(msg: Message, actor_id: int, target_id: int, action: str, rea
     if url:
         rows.append([btn("({34}) Перейти к сообщению", url=url)])
     rows.append([btn("Завершить дело ({20})", f"admdone_{row_id}")])
-    await to_admin_chat("mod_chat", text, InlineKeyboardMarkup(inline_keyboard=rows))
+    await to_admin_chat("modlog", text, InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 @dp.callback_query(F.data.startswith("admdone_"))
@@ -870,7 +935,7 @@ async def give_warns(chat_id: int, user_id: int, n: int, reason: str, moderator_
 
 @dp.message(Command("warn"))
 async def warn_cmd(msg: Message):
-    if not await in_group(msg) or not msg.from_user:
+    if not await mod_group(msg) or not msg.from_user:
         return
     actor = msg.from_user.id
     if await rank_of(actor) < 1:
@@ -907,6 +972,11 @@ async def warn_cmd(msg: Message):
     new, numbers, ban_no, error = await give_warns(msg.chat.id, uid, count, reason, actor, msg.message_id)
     items = [("warn", n) for n in numbers]
     await reply(msg, warn_text(mention(uid, uname, fname), new, reason, numbers, None, False), appeal_markup(items))
+    await log_action(f"Варн {new}/{MAX_WARNS}", actor, uid, uname, fname, reason, ", ".join(numbers),
+                     msg.chat.id, msg.message_id)
+    if ban_no:
+        await log_action("Бан (лимит варнов 4/4)", actor, uid, uname, fname, "Достигнут лимит варнов (4/4)",
+                         ban_no, msg.chat.id, msg.message_id)
     if ban_no:
         await say(msg, ban_text(mention(uid, uname, fname), "Достигнут лимит варнов (4/4)", ban_no, None),
                   appeal_markup([("ban", ban_no)]))
@@ -936,7 +1006,7 @@ async def give_ban(chat_id: int, user_id: int, reason: str, moderator_id: int, s
 
 @dp.message(Command("ban"))
 async def ban_cmd(msg: Message):
-    if not await in_group(msg) or not msg.from_user:
+    if not await mod_group(msg) or not msg.from_user:
         return
     actor = msg.from_user.id
     if await rank_of(actor) < 1:
@@ -965,6 +1035,7 @@ async def ban_cmd(msg: Message):
         return
     m = mention(uid, uname, fname)
     await reply(msg, ban_text(m, reason, number, None), appeal_markup([("ban", number)]))
+    await log_action("Бан", actor, uid, uname, fname, reason, number, msg.chat.id, msg.message_id)
     await dm(uid, ban_text("Вы", reason, number, None).replace("Вы получает бан", "Вы получили бан"),
              appeal_markup([("ban", number)]))
     if error:
@@ -974,7 +1045,7 @@ async def ban_cmd(msg: Message):
 # --------------------------- UNWARN ---------------------------
 @dp.message(Command("unwarn"))
 async def unwarn_cmd(msg: Message):
-    if not await in_group(msg) or not msg.from_user:
+    if not await mod_group(msg) or not msg.from_user:
         return
     actor = msg.from_user.id
     if await rank_of(actor) < 2:
@@ -1005,8 +1076,10 @@ async def unwarn_cmd(msg: Message):
                        VALUES ($1,$2,$3,$4,$5,$6)""", uid, number, actor, msg.chat.id, msg.message_id, now_ts())
     if left is not None and left < 2 and not await is_banned(uid):
         await unmute_everywhere(uid)
+    await log_action("Снятие варнов", actor, uid, uname, fname, None, number, msg.chat.id, msg.message_id,
+                     extra=f"Снято: {removed} • Осталось: {left}/{MAX_WARNS}\n")
     await reply(msg, (
-        f"{E('1.31.7.32.4_3.2.6.7.1')}\nС пользователя {mention(uid, uname, fname)}\n"
+        f"{E('31.7.32.4_3.2.6.7')}\nС пользователя {mention(uid, uname, fname)}\n"
         f"<blockquote>Количество снятых варнов: {removed}\nОсталось варнов: {left}/{MAX_WARNS}\n"
         f"ID • <i>{number}</i>\n{SEP}\n{RULES_LINE}</blockquote>"))
 
@@ -1014,7 +1087,7 @@ async def unwarn_cmd(msg: Message):
 # --------------------------- UNBAN ---------------------------
 @dp.message(Command("unban"))
 async def unban_cmd(msg: Message):
-    if not await in_group(msg) or not msg.from_user:
+    if not await mod_group(msg) or not msg.from_user:
         return
     actor = msg.from_user.id
     if await rank_of(actor) < 2:
@@ -1044,8 +1117,9 @@ async def unban_cmd(msg: Message):
         except Exception:
             pass
     await unmute_everywhere(uid)
+    await log_action("Разбан", actor, uid, uname, fname, None, number, msg.chat.id, msg.message_id)
     await reply(msg, (
-        f"{E('1.31.7.32.4_18.2.7.1')}\nС пользователя {mention(uid, uname, fname)}\n"
+        f"{E('31.7.32.4_18.2.7')}\nС пользователя {mention(uid, uname, fname)}\n"
         f"<blockquote>ID • <i>{number}</i>\n{SEP}\n{RULES_LINE}</blockquote>"))
 
 
@@ -1095,8 +1169,18 @@ async def whitelisted(link_norm: str) -> bool:
 
 async def autowarn_handler(msg: Message) -> None:
     user = msg.from_user
-    if not user or user.is_bot or msg.chat.id != await main_chat():
+    if not user or user.is_bot or msg.sender_chat or msg.chat.id != await main_chat():
         return
+    # Не прошёл проверку «Я не бот» — сообщение удаляем и просим подтвердиться.
+    if await rank_of(user.id) == 0:
+        row = await user_row(user.id)
+        if not (row and row["verified"]) and not await is_tg_admin(msg.chat.id, user.id):
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            await start_verification(msg.chat.id, user)
+            return
     if not (msg.text or msg.caption):
         return
     links = extract_links(msg)
@@ -1116,6 +1200,11 @@ async def autowarn_handler(msg: Message) -> None:
     m = mention(user.id, user.username, user.full_name)
     await reply(msg, warn_text(m, new, "1.15 Запрещенная ссылка", numbers, None, True),
                 appeal_markup([("warn", numbers[0])]))
+    await log_action(f"Автоварн {new}/{MAX_WARNS}", bot_id, user.id, user.username, user.full_name,
+                     "1.15 Запрещенная ссылка", ", ".join(numbers), msg.chat.id, msg.message_id)
+    if ban_no:
+        await log_action("Бан (лимит варнов 4/4)", bot_id, user.id, user.username, user.full_name,
+                         "Достигнут лимит варнов (4/4)", ban_no, msg.chat.id, msg.message_id)
     if ban_no:
         await say(msg, ban_text(m, "Достигнут лимит варнов (4/4)", ban_no, None), appeal_markup([("ban", ban_no)]))
 
@@ -1123,8 +1212,7 @@ async def autowarn_handler(msg: Message) -> None:
 # ----------------------- БЕЛЫЙ СПИСОК ССЫЛОК -----------------------
 @dp.message(Command("redact"))
 async def redact_cmd(msg: Message):
-    if await rank_of(msg.from_user.id) < 2:
-        await reply(msg, "({15})У вас недостаточно прав")
+    if not await redact_zone(msg):
         return
     await reply(msg, "({21})<b>Редактор</b>\n<blockquote>/redact_add &lt;домен или t.me/путь&gt; — добавить в белый список\n"
                      "/redact_del &lt;домен&gt; — убрать\n/links — показать белый список\n"
@@ -1133,8 +1221,7 @@ async def redact_cmd(msg: Message):
 
 @dp.message(Command("redact_add"))
 async def redact_add(msg: Message):
-    if await rank_of(msg.from_user.id) < 2:
-        await reply(msg, "({15})У вас недостаточно прав")
+    if not await redact_zone(msg):
         return
     args = command_args(msg)
     if not args:
@@ -1147,8 +1234,7 @@ async def redact_add(msg: Message):
 
 @dp.message(Command("redact_del"))
 async def redact_del(msg: Message):
-    if await rank_of(msg.from_user.id) < 2:
-        await reply(msg, "({15})У вас недостаточно прав")
+    if not await redact_zone(msg):
         return
     args = command_args(msg)
     if not args:
@@ -1161,8 +1247,7 @@ async def redact_del(msg: Message):
 
 @dp.message(Command("links"))
 async def links_cmd(msg: Message):
-    if await rank_of(msg.from_user.id) < 1:
-        await reply(msg, "({15})У вас недостаточно прав")
+    if not await redact_zone(msg):
         return
     rows = await pool().fetch("SELECT value FROM link_whitelist ORDER BY value")
     body = "\n".join(f"• <code>{esc(r['value'])}</code>" for r in rows) or "Список пуст — запрещены все ссылки."
@@ -1263,7 +1348,8 @@ async def refresh_admin_list() -> None:
             if "not modified" in str(exc).lower():
                 continue
         try:
-            sent = await B().send_message(chat_id, text, message_thread_id=thread(TOPICS["modlist"]))
+            topic = TOPICS["modlog"] if chat_id == await admin_chat() else TOPICS["modlist_main"]
+            sent = await B().send_message(chat_id, text, message_thread_id=thread(topic))
             await set_config(key, sent.message_id)
         except Exception:
             LOG.warning("admin list send failed for %s", chat_id)
@@ -1290,6 +1376,8 @@ async def set_rank(user_id: int, username: str | None, rank: int) -> None:
 async def change_rank(msg: Message, delta: int) -> None:
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await reply(msg, "({15})У вас недостаточно прав")
+        return
+    if not await mod_group(msg):
         return
     args = command_args(msg)
     target = await resolve_target(msg, args[0] if args else None)
@@ -1336,7 +1424,7 @@ async def premmod_cmd(msg: Message, state: FSMContext):
     if not msg.from_user or msg.from_user.id != CREATOR_ID:
         await reply(msg, "({15})У вас недостаточно прав")
         return
-    if not await in_group(msg):
+    if not await mod_group(msg):
         return
     args = command_args(msg)
     target = await resolve_target(msg, args[0] if args else None)
@@ -1470,6 +1558,59 @@ WELCOME_RULES = (
 )
 
 
+_last_prompt: dict[int, float] = {}
+
+
+async def start_verification(chat_id: int, user) -> None:
+    """Блокирует писать и показывает кнопку «Я не бот» (не чаще раза в 2 минуты на человека)."""
+    import time
+    if time.time() - _last_prompt.get(user.id, 0) < 120:
+        return
+    _last_prompt[user.id] = time.time()
+    try:
+        await B().restrict_chat_member(chat_id, user.id, permissions=ChatPermissions(can_send_messages=False))
+    except Exception:
+        pass
+    await pool().execute(
+        "INSERT INTO captcha_pending (user_id, chat_id, joined_at) VALUES ($1,$2,$3) "
+        "ON CONFLICT (user_id) DO UPDATE SET chat_id=$2, joined_at=$3", user.id, chat_id, now_ts())
+    m = mention(user.id, user.username, user.full_name)
+    text = (f"👋 Добро пожаловать, {m}!\nРады видеть вас в нашем сообществе.\n"
+            "Пожалуйста, подтвердите свой профиль.")
+    try:
+        await B().send_message(chat_id, R(text), message_thread_id=thread(TOPICS["welcome"]),
+                               reply_markup=kb([btn("({20}) Я не бот", f"verify_{user.id}")]))
+    except Exception:
+        LOG.exception("welcome send failed")
+
+
+async def is_tg_admin(chat_id: int, user_id: int) -> bool:
+    try:
+        member = await B().get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+
+@dp.message(F.new_chat_members)
+async def on_new_members(msg: Message):
+    if msg.chat.id != await main_chat():
+        return
+    for user in msg.new_chat_members or []:
+        if user.is_bot:
+            continue
+        await remember_user(user, joined=True)
+        if await is_banned(user.id):
+            await mute_everywhere(user.id, None)
+            continue
+        if await rank_of(user.id) > 0:
+            continue
+        row = await user_row(user.id)
+        if row and row["verified"]:
+            continue
+        await start_verification(msg.chat.id, user)
+
+
 @dp.chat_member()
 async def on_chat_member(update: ChatMemberUpdated):
     old, new = update.old_chat_member.status, update.new_chat_member.status
@@ -1504,22 +1645,7 @@ async def on_chat_member(update: ChatMemberUpdated):
     row = await user_row(user.id)
     if row and row["verified"]:
         return
-    try:
-        await B().restrict_chat_member(chat_id, user.id, permissions=ChatPermissions(can_send_messages=False))
-    except Exception:
-        pass
-    await pool().execute(
-        "INSERT INTO captcha_pending (user_id, chat_id, joined_at) VALUES ($1,$2,$3) "
-        "ON CONFLICT (user_id) DO UPDATE SET chat_id=$2, joined_at=$3", user.id, chat_id, now_ts())
-    m = mention(user.id, user.username, user.full_name)
-    text = (f"👋 Добро пожаловать, {m}!\nРады видеть вас в нашем сообществе.\n"
-            "Пожалуйста, подтвердите свой профиль.")
-    try:
-        await B().send_message(chat_id, R(text), message_thread_id=thread(TOPICS["welcome"]),
-                               reply_markup=kb([btn("({20}) Я не бот", f"verify_{user.id}")]))
-    except Exception:
-        LOG.exception("welcome send failed")
-
+    await start_verification(chat_id, user)
 
 @dp.callback_query(F.data.startswith("verify_"))
 async def verify_cb(cb: CallbackQuery):
@@ -1549,6 +1675,8 @@ async def verify_cb(cb: CallbackQuery):
 async def del_cmd(msg: Message):
     if not msg.from_user or await rank_of(msg.from_user.id) < 2:
         await reply(msg, "({15})У вас недостаточно прав")
+        return
+    if not await mod_group(msg):
         return
     if not msg.reply_to_message:
         await reply(msg, "({8})Ответьте на сообщение, которое нужно удалить.")
@@ -1704,10 +1832,37 @@ async def menu_nav(cb: CallbackQuery):
     await edit(cb, text, back_only())
 
 
+async def publish_rules(version: str, text: str) -> None:
+    """Правила -> тема «Правила», оповещение -> тема «Оповещения»."""
+    chat_id = await main_chat()
+    if not chat_id:
+        return
+    body = R(f"{e(61)} <b>Правила сообщества HuBBlox</b> • v{esc(version)}\n{SEP}\n{esc(text)}")
+    posted = None
+    saved = await get_config("rules_msg_id")
+    if saved:
+        try:
+            await B().edit_message_text(body, chat_id=chat_id, message_id=int(saved))
+            posted = int(saved)
+        except Exception as exc:
+            if "not modified" in str(exc).lower():
+                posted = int(saved)
+    try:
+        if not posted:
+            sent = await B().send_message(chat_id, body, message_thread_id=thread(TOPICS["rules"]))
+            posted = sent.message_id
+            await set_config("rules_msg_id", posted)
+        url = msg_url(chat_id, posted)
+        await B().send_message(chat_id, R(f"{e(26)} <b>Правила обновлены</b> (версия {esc(version)})\nОзнакомьтесь с изменениями."),
+                               message_thread_id=thread(TOPICS["announce"]),
+                               reply_markup=kb([btn("({26}) Открыть правила", url=url)]) if url else None)
+    except Exception:
+        LOG.exception("publish_rules failed")
+
+
 @dp.message(Command("setrules"))
 async def setrules_cmd(msg: Message, state: FSMContext):
-    if not msg.from_user or msg.from_user.id != CREATOR_ID:
-        await reply(msg, "({15})У вас недостаточно прав")
+    if not await redact_zone(msg):
         return
     await state.set_state(RulesSt.text)
     await reply(msg, "({24})Отправьте новый текст правил одним сообщением.\n<i>Отмена: /cancel</i>")
@@ -1720,6 +1875,7 @@ async def setrules_text(msg: Message, state: FSMContext):
     await pool().execute("INSERT INTO rules (version, rule_text, created_at) VALUES ($1,$2,$3)",
                          version, msg.text.strip()[:3500], now_ts())
     await reply(msg, f"({{20}})Правила обновлены (версия {version}).")
+    await publish_rules(version, msg.text.strip()[:3500])
 
 
 # ------------------------------- ПРОФИЛЬ -------------------------------
@@ -1735,10 +1891,14 @@ async def profile_html(user_id: int) -> str:
     achievements = [x.strip() for x in ((row and row["achievements"]) or "").split("\n") if x.strip()]
     ach = "\n".join(f"• {esc(x)}" for x in achievements) or "• —"
     return (
-        f"{e(44)}<b>Профиль</b>\n<blockquote>Telegram: {tg}\nRoblox: {esc((row and row['roblox_username']) or '—')}\n"
-        f"Тег: {esc(tag)}\nВарнов : {warns}/{MAX_WARNS}\nСообщений: {int(row['messages_count']) if row else 0}\n"
-        f"Комментарий:\n{esc(comment)}\nВ сообществе с: {fmt_date(row['joined_at'] if row else None)}\n{SEP}\n"
-        f"{e(72)} Достижения:\n{ach}</blockquote>"
+        f"{e(44)} <b>{tg}</b>\n{SEP}\n"
+        f"{e(73)} <b>Ник:</b> {esc((row and row['roblox_username']) or '—')}\n"
+        f"{e(25)} <b>Тег:</b> {esc(tag)}\n"
+        f"{e(8)} <b>Варны:</b> {warns}/{MAX_WARNS}\n"
+        f"{e(60)} <b>Кол-во сообщений:</b> {int(row['messages_count']) if row else 0}\n"
+        f"<blockquote><b>Комментарий:</b>\n<i>{esc(comment)}</i>\n"
+        f"<b>Награды</b> {e(72)}\n{ach}</blockquote>\n"
+        f"{SEP}\n{e(64)} <b>В сообществе с:</b> {fmt_date(row['joined_at'] if row else None)}"
     )
 
 
@@ -1850,48 +2010,80 @@ def app_title(app, payload: dict) -> str:
     return "Трейд"
 
 
+STATUS_LINE = {"active": "({62}) <b>Активна</b>", "taken": "({45}) <b>Помощник найден</b>",
+               "closed": "({20}) <b>Завершена</b>"}
+
+
+async def helpers_html(payload: dict) -> str:
+    ids = payload.get("helpers", [])
+    if not ids:
+        return "пока никого"
+    out = []
+    for h in ids:
+        k = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", h)
+        out.append(mention(h, k and k["username"], k and k["full_name"]))
+    return ", ".join(out)
+
+
 async def app_text(app, closed: bool = False) -> str:
     p = json_payload(app["payload"])
     known = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", app["user_id"])
     urow = await user_row(app["user_id"])
     author = mention(app["user_id"], known and known["username"], known and known["full_name"])
     roblox = esc((urow and urow["roblox_username"]) or "—")
-    n = app_num(app["id"])
+    n = num(app["id"])
     kind = app["kind"]
+    status = "closed" if closed or app["status"] == "closed" else app["status"]
     comment = p.get("comment")
-    c_line = f"\n{e(25)} Комментарий: {esc(comment)}" if comment else ""
+    people = [f"{e(44)} <b>Автор:</b> {author}", f"{e(73)} <b>Roblox:</b> {roblox}"]
     if kind == "raid":
         icons = await fruit_icons()
         fruit = RAID_FRUITS[p["fruit"]]
         price = sum(fruit[1].get(s, 0) for s in p["skills"])
-        bal = p.get("balance", 0)
-        chip = ""
+        header = f"{e(69)} <b>Рейд</b> • <b>{n}</b>"
+        details = [f"{fruit_html(icons, p['fruit'])} <b>Фрукт:</b> {esc(fruit[0])}",
+                   f"{e(59)} <b>Навыки:</b> {esc(' • '.join(p['skills']))}",
+                   f"{e(68)} <b>Баланс:</b> {thousands(p.get('balance', 0))} • <b>Нужно:</b> {thousands(price)}"]
         if p["fruit"] in CHIP_FRUITS:
-            chip = f"\nЧип: {'да' if p.get('chip') else 'нет'}"
-        text = (f"{e(69)} <b>Рейд {n}</b>\n{e(44)} Автор: {author}\nRoblox: {roblox}\n"
-                f"{fruit_html(icons, p['fruit'])} Фрукт: <b>{esc(fruit[0])}</b>\nНавыки: {esc(' • '.join(p['skills']))}\n"
-                f"{e(24)} Баланс: {thousands(bal)} • Нужно: {thousands(price)}{chip}{c_line}")
+            details.append(f"{e(70)} <b>Чип:</b> {'да' if p.get('chip') else 'нет'}")
     elif kind == "sea":
-        emoji_n = SEA_EVENTS.get(p.get("event"), ("", 0))[1]
-        icon = e(emoji_n) if emoji_n else e(49)
-        text = (f"{icon} <b>{esc(p.get('event_name'))} {n}</b>\n{e(44)} Автор: {author}\nRoblox: {roblox}\n"
-                f"{e(45)} Участников: {p.get('count')}{c_line}")
+        emoji_n = SEA_EVENTS.get(p.get("event"), ("", 0))[1] or 49
+        header = f"{e(emoji_n)} <b>{esc(p.get('event_name'))}</b> • <b>{n}</b>"
+        details = [f"{e(45)} <b>Участников:</b> {p.get('count')}"]
     elif kind == "trial":
         icons = await race_icons()
-        icon = custom_emoji_html(icons.get(p.get("race")), "🧬")
-        text = (f"{e(71)} <b>Триал {n}</b>\n{e(44)} Автор: {author}\nRoblox: {roblox}\n"
-                f"{icon} Раса: <b>{esc(p.get('race_name'))}</b>{c_line}")
+        header = f"{e(71)} <b>Триал</b> • <b>{n}</b>"
+        details = [f"{custom_emoji_html(icons.get(p.get('race')), '🧬')} <b>Раса:</b> {esc(p.get('race_name'))}"]
     else:
-        text = f"{e(48)} <b>Трейд {n}</b>\n{e(44)} Автор: {author}\n{esc(p.get('text'))}"
-    if closed or app["status"] == "closed":
-        text += f"\n\n{e(20)} <b>Заявка завершена</b>"
-    return text
+        header = f"{e(48)} <b>Трейд</b> • <b>{n}</b>"
+        return (f"{header}\n{SEP}\n{people[0]}\n{SEP}\n<blockquote>{esc(p.get('text'))}</blockquote>\n{SEP}\n"
+                f"{STATUS_LINE[status]}")
+    out = [header, SEP] + people + details + [SEP]
+    if comment:
+        out.append(f"<blockquote>{e(25)} {esc(comment)}</blockquote>")
+    out.append(f"{e(45)} <b>Помощники:</b> {await helpers_html(p)}")
+    out.append(STATUS_LINE[status])
+    return "\n".join(out)
 
 
 def help_markup(app) -> InlineKeyboardMarkup | None:
     if app["kind"] == "trade" or app["status"] == "closed":
         return None
     return kb([btn("({45}) Помочь", f"apph_{app['id']}")])
+
+
+async def refresh_application_post(app_id: int) -> None:
+    """Перерисовывает опубликованную заявку (помощники, статус)."""
+    app = await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id)
+    chat_id = await main_chat()
+    if not app or not chat_id or not app["chat_message_id"]:
+        return
+    try:
+        await B().edit_message_text(R(await app_text(app)), chat_id=chat_id, message_id=app["chat_message_id"],
+                                    reply_markup=help_markup(app))
+    except Exception as exc:
+        if "not modified" not in str(exc).lower():
+            LOG.warning("refresh post failed: %s", exc)
 
 
 TOPIC_BY_KIND = {"raid": "raids", "sea": "sea_events", "trade": "trades", "trial": "trials"}
@@ -1928,6 +2120,7 @@ async def menu_raid(cb: CallbackQuery, state: FSMContext):
     icons = await fruit_icons()
     buttons = [btn(name, f"raid_f_{key}", icon_id=icons.get(key)) for key, (name, _) in RAID_FRUITS.items()]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([btn("({39}) Найти рейд", "raid_find")])
     rows.append([BACK()])
     await edit(cb, "({69})<b>Создание рейда</b>\nВыберите фрукт:", InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -2039,6 +2232,7 @@ async def menu_sea(cb: CallbackQuery, state: FSMContext):
     for key, (name, emoji_n) in SEA_EVENTS.items():
         label = f"({{{emoji_n}}}) {name}" if emoji_n else f"••• {name}"
         rows.append([btn(label, f"sea_e_{key}")])
+    rows.append([btn("({39}) Найти ивент", "sea_find")])
     rows.append([BACK()])
     await edit(cb, "({49})<b>Морские ивенты</b>\nНа какой ивент собираемся?", InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -2124,6 +2318,7 @@ async def menu_trial(cb: CallbackQuery, state: FSMContext):
     icons = await race_icons()
     buttons = [btn(name, f"trial_r_{key}", icon_id=icons.get(key)) for key, name in RACES]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([btn("({39}) Найти триал", "trial_find")])
     rows.append([BACK()])
     await edit(cb, "({71})<b>Создание Триала</b>\nВыберите расу:", InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -2189,7 +2384,7 @@ async def trade_find(cb: CallbackQuery, state: FSMContext):
 async def trade_card(row) -> tuple[str, InlineKeyboardMarkup | None]:
     p = json_payload(row["payload"])
     known = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", row["user_id"])
-    text = (f"{e(48)} <b>Трейд {app_num(row['id'])}</b>\n{e(44)} Автор: "
+    text = (f"{e(48)} <b>Трейд {num(row['id'])}</b>\n{e(44)} Автор: "
             f"{mention(row['user_id'], known and known['username'], known and known['full_name'])}\n{esc(p.get('text'))}")
     url = msg_url(int(await get_config('hublox_id') or 0), row["chat_message_id"])
     return text, kb([btn("({26}) Перейти к сообщению", url=url)]) if url else None
@@ -2223,6 +2418,96 @@ async def trade_active(cb: CallbackQuery):
     for row in rows:
         text, markup = await trade_card(row)
         await say(cb, text, markup)
+
+
+# ------------------- ПОИСК РЕЙДОВ / ИВЕНТОВ / ТРИАЛОВ -------------------
+def result_markup(app, url: str | None) -> InlineKeyboardMarkup:
+    rows = []
+    if url:
+        rows.append([btn("({26}) Перейти к сообщению", url=url)])
+    h = help_markup(app)
+    if h:
+        rows += h.inline_keyboard
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def show_found(cb: CallbackQuery, title: str, rows, back_cb: str) -> None:
+    back = kb([btn("({63}) Назад", back_cb)])
+    if not rows:
+        await edit(cb, f"{title}\n({{14}}) Подходящих заявок не найдено.", back)
+        return
+    await edit(cb, f"{title}\nНайдено заявок: <b>{len(rows)}</b>", back)
+    chat_id = await main_chat() or 0
+    for app in rows:
+        await say(cb, await app_text(app), result_markup(app, msg_url(chat_id, app["chat_message_id"])))
+
+
+@dp.callback_query(F.data == "raid_find")
+async def raid_find(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    icons = await fruit_icons()
+    buttons = [btn(name, f"rfind_{key}", icon_id=icons.get(key)) for key, (name, _) in RAID_FRUITS.items()]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([btn("({63}) Назад", "menu_raid")])
+    await edit(cb, "({39})<b>Поиск рейда</b>\nВыберите фрукт:", InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@dp.callback_query(F.data.startswith("rfind_"))
+async def raid_find_result(cb: CallbackQuery):
+    key = cb.data.removeprefix("rfind_")
+    if key not in RAID_FRUITS:
+        await cb.answer("Неизвестный фрукт", show_alert=True)
+        return
+    rows = await pool().fetch(
+        "SELECT * FROM applications WHERE kind='raid' AND status<>'closed' AND payload->>'fruit'=$1 "
+        "AND user_id<>$2 ORDER BY id DESC LIMIT 5", key, cb.from_user.id)
+    await show_found(cb, f"({{39}})<b>Рейды: {esc(RAID_FRUITS[key][0])}</b>", rows, "raid_find")
+
+
+@dp.callback_query(F.data == "sea_find")
+async def sea_find(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    rows = []
+    for key, (name, emoji_n) in SEA_EVENTS.items():
+        label = f"({{{emoji_n}}}) {name}" if emoji_n else f"••• {name}"
+        rows.append([btn(label, f"sfind_{key}")])
+    rows.append([btn("({63}) Назад", "menu_sea")])
+    await edit(cb, "({39})<b>Поиск морского ивента</b>\nКакой ивент ищете?", InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@dp.callback_query(F.data.startswith("sfind_"))
+async def sea_find_result(cb: CallbackQuery):
+    key = cb.data.removeprefix("sfind_")
+    if key not in SEA_EVENTS:
+        await cb.answer("Неизвестный ивент", show_alert=True)
+        return
+    rows = await pool().fetch(
+        "SELECT * FROM applications WHERE kind='sea' AND status<>'closed' AND payload->>'event'=$1 "
+        "AND user_id<>$2 ORDER BY id DESC LIMIT 5", key, cb.from_user.id)
+    await show_found(cb, f"({{39}})<b>Ивенты: {esc(SEA_EVENTS[key][0])}</b>", rows, "sea_find")
+
+
+@dp.callback_query(F.data == "trial_find")
+async def trial_find(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    icons = await race_icons()
+    buttons = [btn(name, f"tfind_{key}", icon_id=icons.get(key)) for key, name in RACES]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([btn("({63}) Назад", "menu_trial")])
+    await edit(cb, "({39})<b>Поиск триала</b>\nУкажите вашу расу:", InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@dp.callback_query(F.data.startswith("tfind_"))
+async def trial_find_result(cb: CallbackQuery):
+    key = cb.data.removeprefix("tfind_")
+    names = dict(RACES)
+    if key not in names:
+        await cb.answer("Неизвестная раса", show_alert=True)
+        return
+    rows = await pool().fetch(
+        "SELECT * FROM applications WHERE kind='trial' AND status='active' AND payload->>'race'=$1 "
+        "AND user_id<>$2 ORDER BY id DESC LIMIT 5", key, cb.from_user.id)
+    await show_found(cb, f"({{39}})<b>Свободные триалы: {esc(names[key])}</b>", rows, "trial_find")
 
 
 # ----------------------- ПОМОЩЬ ПО ЗАЯВКАМ -----------------------
@@ -2290,14 +2575,15 @@ async def app_help_confirm(cb: CallbackQuery):
             "claimed_at=COALESCE(claimed_at,$4) WHERE id=$1", app_id, json.dumps(payload), uid, now_ts())
     app = await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id)
     try:
-        await cb.message.edit_text(R(f"{e(14)}Вы взяли заявку {app_num(app_id)}."), reply_markup=None)
+        await cb.message.edit_text(R(f"{e(20)} {mention(uid, cb.from_user.username, cb.from_user.full_name)}, вы взяли заявку {num(app_id)}."), reply_markup=None)
         asyncio.create_task(delete_later(cb.message))
     except Exception:
         pass
+    await refresh_application_post(app_id)
     urow = await user_row(uid)
     helper = mention(uid, cb.from_user.username, cb.from_user.full_name)
     await dm(app["user_id"], (
-        f"{e(19)}На вашу заявку {app_num(app_id)} откликнулся {helper}.\n"
+        f"{e(19)}На вашу заявку {num(app_id)} откликнулся {helper}.\n"
         f"Roblox: {esc((urow and urow['roblox_username']) or '—')}\n"
         f"<blockquote>Роль/ивент: {esc(app_title(app, payload))}</blockquote>"))
     await cb.answer("Заявка взята")
@@ -2316,10 +2602,10 @@ async def menu_apps(cb: CallbackQuery):
         helpers = p.get("helpers", [])
         if r["kind"] == "sea":
             emoji_n = SEA_EVENTS.get(p.get("event"), ("", 49))[1] or 49
-            label = f"{p.get('event_name')} {app_num(r['id'])}"
+            label = f"{p.get('event_name')} {num(r['id'])}"
         else:
             emoji_n = KIND_EMOJI[r["kind"]]
-            label = f"{KIND_TITLE[r['kind']]} {app_num(r['id'])}"
+            label = f"{KIND_TITLE[r['kind']]} {num(r['id'])}"
         if helpers:
             names = []
             for h in helpers:
@@ -2328,7 +2614,7 @@ async def menu_apps(cb: CallbackQuery):
             lines.append(f"{e(emoji_n)} {esc(label)} — заявка взята\n" + "\n".join(names))
         else:
             lines.append(f"{e(emoji_n)} {esc(label)} — активна{e(62)}")
-        buttons.append([InlineKeyboardButton(text=f"Завершить заявку {app_num(r['id'])}", callback_data=f"appf_{r['id']}")])
+        buttons.append([InlineKeyboardButton(text=f"Завершить заявку {num(r['id'])}", callback_data=f"appf_{r['id']}")])
     buttons.append([BACK()])
     await edit(cb, f"({{73}})<b>Ваши активные заявки</b>\n<blockquote>" + "\n".join(lines) + "</blockquote>",
                InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -2343,14 +2629,8 @@ async def app_finish(cb: CallbackQuery):
         return
     await pool().execute("UPDATE applications SET status='closed' WHERE id=$1", app_id)
     app = await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id)
-    chat_id = await main_chat()
-    if chat_id and app["chat_message_id"]:
-        try:
-            await B().edit_message_text(R(await app_text(app, closed=True)), chat_id=chat_id,
-                                        message_id=app["chat_message_id"], reply_markup=None)
-        except Exception:
-            pass
-    await cb.answer(f"Заявка {app_num(app_id)} завершена")
+    await refresh_application_post(app_id)
+    await cb.answer(f"Заявка {num(app_id)} завершена")
     await menu_apps(cb)
 
 
@@ -2601,7 +2881,8 @@ async def question_text(msg: Message, state: FSMContext):
     user = msg.from_user
     async with pool().acquire() as conn:
         async with conn.transaction():
-            number = app_num(await next_number(conn, "question_counter"))
+            qn = await next_number(conn, "question_counter")
+            number = f"#{qn:05d}"
             qid = await conn.fetchval(
                 "INSERT INTO questions (question_number, user_id, username, question_text, created_at) VALUES ($1,$2,$3,$4,$5) RETURNING id",
                 number, user.id, user.username, text, now_ts())
@@ -2674,8 +2955,7 @@ EMOJI_CENTER_TEXT = "🎨 <b>Центр Premium Emoji DuoSup</b>\nВыберит
 
 @dp.message(Command("addemoji"))
 async def addemoji_cmd(msg: Message, state: FSMContext):
-    if not msg.from_user or msg.from_user.id != CREATOR_ID:
-        await reply(msg, "({15})У вас недостаточно прав")
+    if not await redact_zone(msg):
         return
     await state.clear()
     await msg.answer(EMOJI_CENTER_TEXT, reply_markup=emoji_center_markup())
