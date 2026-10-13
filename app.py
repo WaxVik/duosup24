@@ -3260,6 +3260,7 @@ STOCK_API_KEY = os.getenv("STOCK_API_KEY", "").strip()
 STOCK_API_KEY_HEADER = os.getenv("STOCK_API_KEY_HEADER", "X-API-Key").strip() or "X-API-Key"
 STOCK_POLL_SECONDS = max(60, env_int("STOCK_POLL_SECONDS", 14400))  # запасной интервал, если источник не отдаёт время смены
 STOCK_MONTHLY_LIMIT = env_int("STOCK_MONTHLY_LIMIT", 190)  # защита лимита кредитов (у бесплатного плана Parse их 200)
+STOCK_FULL_MODE = os.getenv("STOCK_FULL_MODE", "").strip().lower() in ("1", "true", "yes")  # проверять каждые 2 часа, пока хватает лимита
 STOCK_MIN_ITEMS = 3  # меньше фруктов — считаем ответ источника сбойным и ничего не публикуем
 STOCK_NEXT_HOURS = {"normal": 4, "mirage": 2}
 _stock_task = None
@@ -3506,11 +3507,14 @@ async def publish_stock(kind: str, items: list, force: bool = False, epoch: int 
 
 
 _stale = 0
+_cached: tuple[int, object] | None = None
+_stock_status: dict = {"last_check": None, "next_check": None, "error": None}
+_err_notice: dict[str, int] = {}
 
 
 async def stock_tick() -> int:
     """Одна проверка источника. Возвращает, через сколько секунд проверять снова."""
-    global _stale
+    global _stale, _cached
     now = now_ts()
     if await stock_calls_used() >= STOCK_MONTHLY_LIMIT:
         warn_key = _month_key("stock_budget_warned")
@@ -3520,9 +3524,13 @@ async def stock_tick() -> int:
                                  f"({STOCK_MONTHLY_LIMIT}). Возобновится в начале следующего месяца или поднимите STOCK_MONTHLY_LIMIT.")
         LOG.warning("stock: лимит запросов на месяц исчерпан")
         return 6 * 3600
-    data = await fetch_stock_json()
-    if data is None:
-        return STOCK_POLL_SECONDS
+    if _cached and now - _cached[0] < 1200:  # повтор после сбоя публикации — без нового запроса
+        data = _cached[1]
+    else:
+        data = await fetch_stock_json()
+        if data is None:
+            return STOCK_POLL_SECONDS
+        _cached = (now, data)
     parsed = extract_stock(data)
     resets = extract_resets(data)
     for kind in ("mirage", "normal"):
@@ -3536,13 +3544,24 @@ async def stock_tick() -> int:
     if not resets:
         return STOCK_POLL_SECONDS
     # Бесплатного лимита не хватает на каждые 2 часа (360/мес) — тогда проверяем только смены Normal (раз в 4 часа).
-    targets = [resets["normal"]] if STOCK_MONTHLY_LIMIT < 360 and "normal" in resets else list(resets.values())
+    economy = STOCK_MONTHLY_LIMIT < 360 and not STOCK_FULL_MODE
+    targets = [resets["normal"]] if economy and "normal" in resets else list(resets.values())
     future = [t for t in targets if t > now]
     if not future:  # источник ещё не обновил данные — повторим чуть позже
         _stale += 1
         return 180 if _stale <= 5 else 1800
     _stale = 0
     return max(120, min(future) - now + 90)
+
+
+async def _notify_stock_error(text: str) -> None:
+    """Сообщает создателю об ошибке автостока (не чаще раза в 6 часов на одинаковую ошибку)."""
+    now = now_ts()
+    if now - _err_notice.get(text, 0) < 6 * 3600:
+        return
+    _err_notice[text] = now
+    await dm(CREATOR_ID, f"{e(8)} <b>Автосток: ошибка</b>\n<blockquote>{esc(text)[:600]}</blockquote>\n"
+                         "Проверьте: бот админ в основном чате, тема «Стоки 24/7» существует, чаты связаны (/link_hublox).")
 
 
 async def stock_loop() -> None:
@@ -3552,8 +3571,15 @@ async def stock_loop() -> None:
         wait = 900
         try:
             wait = await stock_tick()
+            _stock_status["error"] = None
         except Exception as exc:
-            LOG.warning("stock tick failed: %s", exc)
+            text = f"{type(exc).__name__}: {exc}"
+            _stock_status["error"] = text
+            LOG.warning("stock tick failed: %s", text)
+            await _notify_stock_error(text)
+            wait = 600
+        _stock_status["last_check"] = now_ts()
+        _stock_status["next_check"] = now_ts() + max(60, wait)
         LOG.info("stock: следующая проверка через %s мин", max(1, wait // 60))
         await asyncio.sleep(max(60, wait))
 
@@ -3580,6 +3606,34 @@ async def stock_cmd(msg: Message):
         return
     await publish_stock(kind, items, force=True)
     await reply(msg, f"({{20}})Сток {kind} опубликован.")
+
+
+@dp.message(Command("stockstatus"))
+async def stockstatus_cmd(msg: Message):
+    """Состояние автостока без запроса к источнику (кредиты не тратит)."""
+    if not await redact_zone(msg):
+        return
+    fmt = lambda ts: datetime.fromtimestamp(ts, MSK).strftime("%d.%m %H:%M МСК") if ts else "—"  # noqa: E731
+    mode = "экономный (только смены Normal)" if STOCK_MONTHLY_LIMIT < 360 and not STOCK_FULL_MODE else "полный (каждые 2 часа)"
+    lines = [f"Источник: {'настроен' if STOCK_API_URL else 'НЕ настроен'}",
+             f"Цикл запущен: {'да' if _stock_task and not _stock_task.done() else 'нет'}",
+             f"Режим: {mode}",
+             f"Последняя проверка: {fmt(_stock_status['last_check'])}",
+             f"Следующая проверка: {fmt(_stock_status['next_check'])}",
+             f"Запросов в месяце: {await stock_calls_used()}/{STOCK_MONTHLY_LIMIT}",
+             f"Ошибка: {_stock_status['error'] or 'нет'}"]
+    chat_id = await main_chat()
+    for kind in ("normal", "mirage"):
+        st = await stock_state(kind)
+        if st.get("msg"):
+            url = msg_url(chat_id or 0, st["msg"])
+            nxt = fmt(st["epoch"]) if st.get("epoch") else "—"
+            lines.append(f"{kind}: пост {st['time']} МСК, след. смена {nxt}" + (f" • {url}" if url else ""))
+        else:
+            lines.append(f"{kind}: ещё не публиковался")
+    if not chat_id:
+        lines.append("ВНИМАНИЕ: основной чат не привязан (/link_hublox)")
+    await reply(msg, "({21})<b>Автосток</b>\n<blockquote>" + "\n".join(esc(x) for x in lines) + "</blockquote>")
 
 
 @dp.message(Command("stockcheck"))
