@@ -451,6 +451,7 @@ async def init_db() -> None:
             reviewed_by BIGINT, UNIQUE (chat_id, message_id))""",
         """CREATE TABLE IF NOT EXISTS unique_roles (
             user_id BIGINT PRIMARY KEY, username TEXT, role TEXT NOT NULL, created_at BIGINT NOT NULL)""",
+        "CREATE TABLE IF NOT EXISTS stock_subs (user_id BIGINT NOT NULL, fruit TEXT NOT NULL, PRIMARY KEY (user_id, fruit))",
         # новое: права, выданные через /premmod
         """CREATE TABLE IF NOT EXISTS admin_rights (
             user_id BIGINT PRIMARY KEY, role TEXT, rights JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -1861,9 +1862,17 @@ class RulesSt(StatesGroup):
     text = State()
 
 
+ICON_CACHE: dict[str, str | None] = {"gas": None}  # иконка кнопки «Сток» = эмодзи фрукта Gas из /addemoji
+
+
+async def refresh_icon_cache() -> None:
+    ICON_CACHE["gas"] = (await fruit_icons()).get("gas")
+
+
 def main_menu() -> InlineKeyboardMarkup:
     return kb(
         [btn("({72}) Ивенты", "menu_events")],
+        [btn("({74}) Сток", "menu_stock", icon_id=ICON_CACHE.get("gas"))],
         [btn("({49}) Морские ивенты", "menu_sea")],
         [btn("({69}) Создать рейд", "menu_raid")],
         [btn("({48}) Создать трейд", "menu_trade")],
@@ -3129,6 +3138,7 @@ async def emoji_save(msg: Message, state: FSMContext, fruits: bool) -> None:
             await reply(msg, "({8})Это не Premium Emoji. Отправьте именно премиум-эмодзи или <code>-</code> чтобы пропустить.")
             return
         await set_config(f"custom_emoji_{'fruit' if fruits else 'race'}_{key}", emoji_id)
+        await refresh_icon_cache()
     idx += 1
     if idx >= len(items):
         await state.clear()
@@ -3183,6 +3193,7 @@ async def em_reset(cb: CallbackQuery):
         await cb.answer("⛔ Только создатель.", show_alert=True)
         return
     await pool().execute("DELETE FROM config WHERE key LIKE 'custom_emoji_fruit_%'")
+    await refresh_icon_cache()
     await cb.answer("Эмодзи фруктов сброшены", show_alert=True)
 
 
@@ -3247,7 +3258,8 @@ import aiohttp
 STOCK_API_URL = os.getenv("STOCK_API_URL", "").strip()
 STOCK_API_KEY = os.getenv("STOCK_API_KEY", "").strip()
 STOCK_API_KEY_HEADER = os.getenv("STOCK_API_KEY_HEADER", "X-API-Key").strip() or "X-API-Key"
-STOCK_POLL_SECONDS = max(60, env_int("STOCK_POLL_SECONDS", 300))
+STOCK_POLL_SECONDS = max(60, env_int("STOCK_POLL_SECONDS", 14400))  # запасной интервал, если источник не отдаёт время смены
+STOCK_MONTHLY_LIMIT = env_int("STOCK_MONTHLY_LIMIT", 190)  # защита лимита кредитов (у бесплатного плана Parse их 200)
 STOCK_MIN_ITEMS = 3  # меньше фруктов — считаем ответ источника сбойным и ничего не публикуем
 STOCK_NEXT_HOURS = {"normal": 4, "mirage": 2}
 _stock_task = None
@@ -3274,7 +3286,7 @@ FRUIT_BY_NAME.update({_norm(key): key for key, _ in FRUITS})
 FRUIT_BY_NAME.update({"leopard": "tiger", "trex": "trex", "tyrannosaurus": "trex"})
 
 NAME_KEYS = ("name", "fruit", "fruitName", "fruit_name", "title", "displayName")
-PRICE_KEYS = ("price", "beli", "cost", "money", "priceBeli", "price_beli")
+PRICE_KEYS = ("money_price", "price", "beli", "cost", "money", "priceBeli", "price_beli")
 
 
 def _lookup(name) -> str | None:
@@ -3344,6 +3356,8 @@ def extract_stock(data) -> dict[str, list]:
 
     def kind_of(label):
         low = str(label).lower()
+        if any(w in low for w in ("previous", "prev", "old", "last")):
+            return None  # прошлый сток не берём
         if "mirage" in low or "advanced" in low:
             return "mirage"
         if "normal" in low or "regular" in low:
@@ -3368,15 +3382,57 @@ def extract_stock(data) -> dict[str, list]:
     return found
 
 
+def extract_resets(data) -> dict[str, int]:
+    """Время следующей смены стока (unix) из ответа источника: {'normal': ..., 'mirage': ...}."""
+    out: dict[str, int] = {}
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                low = str(k).lower()
+                if low.endswith("resets_at_epoch") and isinstance(v, (int, float)):
+                    kind = "mirage" if "mirage" in low else "normal" if "normal" in low else None
+                    if kind:
+                        out[kind] = int(v)
+                else:
+                    walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(data)
+    return out
+
+
+def _month_key(prefix: str) -> str:
+    return f"{prefix}_{datetime.now(timezone.utc):%Y%m}"
+
+
+async def stock_calls_used() -> int:
+    return int(await get_config(_month_key("stock_calls")) or 0)
+
+
+async def stock_count_call() -> None:
+    await set_config(_month_key("stock_calls"), await stock_calls_used() + 1)
+
+
 async def fetch_stock_json():
     if not STOCK_API_URL:
         return None
     headers = {STOCK_API_KEY_HEADER: STOCK_API_KEY} if STOCK_API_KEY else {}
+    if "parse.bot" in STOCK_API_URL:  # Parse требует версию снимка API (как в curl-примере)
+        headers["API-Snapshot-Version"] = os.getenv("STOCK_API_SNAPSHOT", "3").strip() or "3"
+    for pair in filter(None, (x.strip() for x in os.getenv("STOCK_API_EXTRA_HEADERS", "").split(","))):
+        name, _, value = pair.partition(":")  # формат: Имя:значение,Имя2:значение2
+        if name.strip() and value.strip():
+            headers[name.strip()] = value.strip()
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(STOCK_API_URL, headers=headers) as resp:
             resp.raise_for_status()
-            return await resp.json(content_type=None)
+            data = await resp.json(content_type=None)
+    await stock_count_call()
+    return data
 
 
 # ---------------------------- оформление ----------------------------
@@ -3411,7 +3467,7 @@ async def stock_text(kind: str, state: dict, active: bool) -> str:
     return f"{head}\n{title}\n<blockquote>{body}</blockquote>\n{stock_footer()}"
 
 
-async def publish_stock(kind: str, items: list, force: bool = False) -> bool:
+async def publish_stock(kind: str, items: list, force: bool = False, epoch: int | None = None) -> bool:
     """Старый пост -> «Истёк 🔴», новый -> «Активен 🟢». False, если сток не изменился."""
     import json
     chat_id = await main_chat()
@@ -3421,8 +3477,11 @@ async def publish_stock(kind: str, items: list, force: bool = False) -> bool:
     keys = sorted(k for k, _ in resolved)
     async with lock_for("stock", kind):
         old = await stock_state(kind)
-        if not force and old.get("keys") == keys:
-            return False
+        if not force:
+            if epoch is not None and old.get("epoch") == epoch:
+                return False
+            if epoch is None and old.get("keys") == keys:
+                return False
         if old.get("msg"):
             try:
                 await B().edit_message_text(R(await stock_text(kind, old, False)), chat_id=chat_id,
@@ -3430,38 +3489,73 @@ async def publish_stock(kind: str, items: list, force: bool = False) -> bool:
             except Exception as exc:
                 if "not modified" not in str(exc).lower():
                     LOG.warning("expire stock failed: %s", exc)
-        state = {"keys": keys, "items": resolved, "time": datetime.now(MSK).strftime("%H:00"), "msg": None}
+        if epoch:  # сток начался за период до следующей смены
+            started = datetime.fromtimestamp(epoch - STOCK_NEXT_HOURS[kind] * 3600, MSK).strftime("%H:%M")
+        else:
+            started = datetime.now(MSK).strftime("%H:00")
+        state = {"keys": keys, "items": resolved, "time": started, "epoch": epoch, "msg": None}
         sent = await B().send_message(chat_id, R(await stock_text(kind, state, True)),
                                       message_thread_id=thread(TOPICS["stock"]))
         state["msg"] = sent.message_id
         await set_config(f"stock_{kind}", json.dumps(state))
-        return True
+    try:
+        await notify_stock_subscribers(kind, state)
+    except Exception:
+        LOG.exception("stock notify failed")
+    return True
 
 
-async def stock_tick() -> None:
+_stale = 0
+
+
+async def stock_tick() -> int:
+    """Одна проверка источника. Возвращает, через сколько секунд проверять снова."""
+    global _stale
+    now = now_ts()
+    if await stock_calls_used() >= STOCK_MONTHLY_LIMIT:
+        warn_key = _month_key("stock_budget_warned")
+        if not await get_config(warn_key):
+            await set_config(warn_key, 1)
+            await dm(CREATOR_ID, f"{e(8)} <b>Автосток остановлен:</b> достигнут лимит запросов за месяц "
+                                 f"({STOCK_MONTHLY_LIMIT}). Возобновится в начале следующего месяца или поднимите STOCK_MONTHLY_LIMIT.")
+        LOG.warning("stock: лимит запросов на месяц исчерпан")
+        return 6 * 3600
     data = await fetch_stock_json()
     if data is None:
-        return
+        return STOCK_POLL_SECONDS
     parsed = extract_stock(data)
+    resets = extract_resets(data)
     for kind in ("mirage", "normal"):
         items = parsed.get(kind) or []
         if len(items) < STOCK_MIN_ITEMS:
             if items:
                 LOG.warning("stock %s: слишком мало фруктов (%s) — пропускаю", kind, len(items))
             continue
-        if await publish_stock(kind, items):
+        if await publish_stock(kind, items, epoch=resets.get(kind)):
             LOG.info("stock %s опубликован: %s", kind, ", ".join(k for k, _ in items))
+    if not resets:
+        return STOCK_POLL_SECONDS
+    # Бесплатного лимита не хватает на каждые 2 часа (360/мес) — тогда проверяем только смены Normal (раз в 4 часа).
+    targets = [resets["normal"]] if STOCK_MONTHLY_LIMIT < 360 and "normal" in resets else list(resets.values())
+    future = [t for t in targets if t > now]
+    if not future:  # источник ещё не обновил данные — повторим чуть позже
+        _stale += 1
+        return 180 if _stale <= 5 else 1800
+    _stale = 0
+    return max(120, min(future) - now + 90)
 
 
 async def stock_loop() -> None:
     await asyncio.sleep(15)
-    LOG.info("Автосток запущен, опрос каждые %s сек.", STOCK_POLL_SECONDS)
+    LOG.info("Автосток запущен (проверка по расписанию смен стока)")
     while True:
+        wait = 900
         try:
-            await stock_tick()
+            wait = await stock_tick()
         except Exception as exc:
             LOG.warning("stock tick failed: %s", exc)
-        await asyncio.sleep(STOCK_POLL_SECONDS)
+        LOG.info("stock: следующая проверка через %s мин", max(1, wait // 60))
+        await asyncio.sleep(max(60, wait))
 
 
 # ------------------------------ команды ------------------------------
@@ -3504,11 +3598,81 @@ async def stockcheck_cmd(msg: Message):
         await reply(msg, f"({{14}})Источник не ответил: <code>{esc(exc)}</code>")
         return
     parsed = extract_stock(data)
+    resets = extract_resets(data)
     names = dict(FRUITS)
     lines = [f"{kind}: " + (", ".join(names[k] for k, _ in items) or "—") for kind, items in parsed.items()] or ["ничего не распознано"]
     raw = esc(json.dumps(data, ensure_ascii=False)[:1200])
+    for kind, ts in resets.items():
+        lines.append(f"{kind}: следующая смена {datetime.fromtimestamp(ts, MSK):%d.%m %H:%M} МСК")
+    lines.append(f"запросов в этом месяце: {await stock_calls_used()}/{STOCK_MONTHLY_LIMIT}")
     await reply(msg, "({39})<b>Проверка источника</b>\n<blockquote>" + "\n".join(esc(x) for x in lines) +
                      f"</blockquote>\n<b>Сырой ответ (начало):</b>\n<pre>{raw}</pre>")
+
+
+# ------------------- подписки на фрукты (кнопка «Сток») -------------------
+async def notify_stock_subscribers(kind: str, state: dict) -> None:
+    """Личное уведомление тем, кто отметил фрукт, который появился в стоке."""
+    rows = await pool().fetch("SELECT DISTINCT user_id FROM stock_subs WHERE fruit = ANY($1::text[])", state["keys"])
+    if not rows:
+        return
+    body = await stock_text(kind, state, True)
+    for r in rows:
+        uid = r["user_id"]
+        known = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", uid)
+        who = mention(uid, known and known["username"], known and known["full_name"])
+        await dm(uid, f"{who} фрукт в стоке!\n{body}")
+        await asyncio.sleep(0.05)  # не упираемся в лимиты Telegram
+
+
+STOCK_MENU_TEXT = (f"{e(74)} <b>Сток</b>\n<blockquote>Отметьте фрукты. Когда любой из них появится в Normal "
+                   "или Mirage стоке, бот пришлёт уведомление сюда, в личные сообщения.</blockquote>")
+
+
+async def stock_menu_markup(user_id: int) -> InlineKeyboardMarkup:
+    icons = await fruit_icons()
+    chosen = {r["fruit"] for r in await pool().fetch("SELECT fruit FROM stock_subs WHERE user_id=$1", user_id)}
+    buttons = [btn(f"{name}✅" if key in chosen else name, f"ssub_{key}", icon_id=icons.get(key))
+               for key, name in FRUITS]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([btn("({14}) Очистить выбор", "stock_clear")])
+    rows.append([BACK()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data == "menu_stock")
+async def menu_stock(cb: CallbackQuery):
+    await edit(cb, STOCK_MENU_TEXT, await stock_menu_markup(cb.from_user.id))
+
+
+@dp.callback_query(F.data.startswith("ssub_"))
+async def stock_toggle(cb: CallbackQuery):
+    key = cb.data.removeprefix("ssub_")
+    names = dict(FRUITS)
+    if key not in names:
+        await cb.answer("Неизвестный фрукт", show_alert=True)
+        return
+    uid = cb.from_user.id
+    res = await pool().execute("DELETE FROM stock_subs WHERE user_id=$1 AND fruit=$2", uid, key)
+    if res.endswith(" 0"):
+        await pool().execute("INSERT INTO stock_subs (user_id, fruit) VALUES ($1,$2) ON CONFLICT DO NOTHING", uid, key)
+        toast = f"{names[key]}: уведомления включены"
+    else:
+        toast = f"{names[key]}: уведомления выключены"
+    try:
+        await cb.message.edit_reply_markup(reply_markup=await stock_menu_markup(uid))
+    except Exception:
+        pass
+    await cb.answer(toast)
+
+
+@dp.callback_query(F.data == "stock_clear")
+async def stock_clear(cb: CallbackQuery):
+    await pool().execute("DELETE FROM stock_subs WHERE user_id=$1", cb.from_user.id)
+    try:
+        await cb.message.edit_reply_markup(reply_markup=await stock_menu_markup(cb.from_user.id))
+    except Exception:
+        pass
+    await cb.answer("Выбор очищен")
 # Автоварн — самым последним: он реагирует на любые групповые сообщения со ссылками.
 dp.message.register(autowarn_handler, F.chat.type.in_({"group", "supergroup"}))
 
@@ -3529,6 +3693,7 @@ async def main() -> None:
     dp.callback_query.outer_middleware(RememberMiddleware())
     try:
         await init_db()
+        await refresh_icon_cache()
         me = await bot.get_me()
         BOT_USERNAME = me.username or BOT_USERNAME
         await bot.set_my_commands([
