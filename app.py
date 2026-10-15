@@ -3261,6 +3261,9 @@ STOCK_API_KEY_HEADER = os.getenv("STOCK_API_KEY_HEADER", "X-API-Key").strip() or
 STOCK_POLL_SECONDS = max(60, env_int("STOCK_POLL_SECONDS", 14400))  # запасной интервал, если источник не отдаёт время смены
 STOCK_MONTHLY_LIMIT = env_int("STOCK_MONTHLY_LIMIT", 190)  # защита лимита кредитов (у бесплатного плана Parse их 200)
 STOCK_FULL_MODE = os.getenv("STOCK_FULL_MODE", "").strip().lower() in ("1", "true", "yes")  # проверять каждые 2 часа, пока хватает лимита
+STOCK_DELAY_SECONDS = max(0, env_int("STOCK_DELAY_SECONDS", 120))    # сколько ждать после смены стока до проверки (если источник обновляется с задержкой)
+STOCK_RETRY_SECONDS = max(60, env_int("STOCK_RETRY_SECONDS", 300))  # повтор, если после смены данные ещё старые
+STOCK_RETRY_TRIES = max(1, env_int("STOCK_RETRY_TRIES", 3))         # сколько раз повторять (каждый повтор = 1 кредит)
 STOCK_MIN_ITEMS = 3  # меньше фруктов — считаем ответ источника сбойным и ничего не публикуем
 STOCK_NEXT_HOURS = {"normal": 4, "mirage": 2}
 _stock_task = None
@@ -3421,8 +3424,9 @@ async def fetch_stock_json():
     if not STOCK_API_URL:
         return None
     headers = {STOCK_API_KEY_HEADER: STOCK_API_KEY} if STOCK_API_KEY else {}
-    if "parse.bot" in STOCK_API_URL:  # Parse требует версию снимка API (как в curl-примере)
-        headers["API-Snapshot-Version"] = os.getenv("STOCK_API_SNAPSHOT", "3").strip() or "3"
+    snapshot = os.getenv("STOCK_API_SNAPSHOT", "").strip()  # нужен только если в curl-примере API есть API-Snapshot-Version
+    if snapshot:
+        headers["API-Snapshot-Version"] = snapshot
     for pair in filter(None, (x.strip() for x in os.getenv("STOCK_API_EXTRA_HEADERS", "").split(","))):
         name, _, value = pair.partition(":")  # формат: Имя:значение,Имя2:значение2
         if name.strip() and value.strip():
@@ -3479,6 +3483,10 @@ async def publish_stock(kind: str, items: list, force: bool = False, epoch: int 
     async with lock_for("stock", kind):
         old = await stock_state(kind)
         if not force:
+            if epoch is not None and old.get("epoch") is None and old.get("keys") == keys and old.get("msg"):
+                old["epoch"] = epoch  # тот же сток, опубликованный вручную — не дублируем
+                await set_config(f"stock_{kind}", json.dumps(old))
+                return False
             if epoch is not None and old.get("epoch") == epoch:
                 return False
             if epoch is None and old.get("keys") == keys:
@@ -3516,6 +3524,8 @@ async def stock_tick() -> int:
     """Одна проверка источника. Возвращает, через сколько секунд проверять снова."""
     global _stale, _cached
     now = now_ts()
+    if not await main_chat():
+        return 60  # чаты ещё не связаны — ничего не тратим, проверим снова через минуту
     if await stock_calls_used() >= STOCK_MONTHLY_LIMIT:
         warn_key = _month_key("stock_budget_warned")
         if not await get_config(warn_key):
@@ -3532,26 +3542,42 @@ async def stock_tick() -> int:
             return STOCK_POLL_SECONDS
         _cached = (now, data)
     parsed = extract_stock(data)
-    resets = extract_resets(data)
+    resets = extract_resets(data)  # источник может не отдавать время смены — тогда считаем по часам
+    stale_clock = False
     for kind in ("mirage", "normal"):
         items = parsed.get(kind) or []
         if len(items) < STOCK_MIN_ITEMS:
             if items:
                 LOG.warning("stock %s: слишком мало фруктов (%s) — пропускаю", kind, len(items))
             continue
-        if await publish_stock(kind, items, epoch=resets.get(kind)):
+        epoch = resets.get(kind)
+        if epoch is None:
+            period = STOCK_NEXT_HOURS[kind] * 3600
+            epoch = (now // period + 1) * period  # ближайшая смена (Normal каждые 4 ч, Mirage каждые 2 ч по UTC)
+            old = await stock_state(kind)
+            if old.get("keys") == sorted(k for k, _ in items):
+                if old.get("epoch") and old["epoch"] <= now:
+                    stale_clock = True  # время смены прошло, а список прежний — сайт ещё не обновился
+                continue
+        if await publish_stock(kind, items, epoch=epoch):
             LOG.info("stock %s опубликован: %s", kind, ", ".join(k for k, _ in items))
-    if not resets:
-        return STOCK_POLL_SECONDS
-    # Бесплатного лимита не хватает на каждые 2 часа (360/мес) — тогда проверяем только смены Normal (раз в 4 часа).
     economy = STOCK_MONTHLY_LIMIT < 360 and not STOCK_FULL_MODE
-    targets = [resets["normal"]] if economy and "normal" in resets else list(resets.values())
+    if resets:
+        boundaries = resets
+    else:
+        if stale_clock and _stale < STOCK_RETRY_TRIES:
+            _stale += 1
+            _cached = None
+            return STOCK_RETRY_SECONDS
+        boundaries = {k: (now // (h * 3600) + 1) * (h * 3600) for k, h in STOCK_NEXT_HOURS.items()}
+    targets = [boundaries["normal"]] if economy and "normal" in boundaries else list(boundaries.values())
     future = [t for t in targets if t > now]
     if not future:  # источник ещё не обновил данные — повторим чуть позже
         _stale += 1
-        return 180 if _stale <= 5 else 1800
+        _cached = None
+        return STOCK_RETRY_SECONDS if _stale <= STOCK_RETRY_TRIES else 1800
     _stale = 0
-    return max(120, min(future) - now + 90)
+    return max(120, min(future) - now + STOCK_DELAY_SECONDS)
 
 
 async def _notify_stock_error(text: str) -> None:
@@ -3604,8 +3630,25 @@ async def stock_cmd(msg: Message):
     if unknown or not items:
         await reply(msg, "({8})Не распознал: <b>" + esc(", ".join(unknown) or "пусто") + "</b>\nПишите названия фруктов по-английски.")
         return
-    await publish_stock(kind, items, force=True)
+    period = STOCK_NEXT_HOURS[kind] * 3600
+    await publish_stock(kind, items, force=True, epoch=(now_ts() // period + 1) * period)
     await reply(msg, f"({{20}})Сток {kind} опубликован.")
+
+
+@dp.message(Command("stocknow"))
+async def stocknow_cmd(msg: Message):
+    """Принудительная проверка источника и публикация, если сток сменился (тратит 1 кредит)."""
+    if not await redact_zone(msg):
+        return
+    if not STOCK_API_URL:
+        await reply(msg, "({8})Источник не настроен: добавьте STOCK_API_URL и STOCK_API_KEY в Railway Variables.")
+        return
+    try:
+        wait = await stock_tick()
+    except Exception as exc:
+        await reply(msg, f"({{14}})Ошибка: <code>{esc(f'{type(exc).__name__}: {exc}')}</code>")
+        return
+    await reply(msg, f"({{20}})Проверено. Автопроверка снова через {max(1, wait // 60)} мин.\nПосты смотрите в теме «Стоки 24/7».")
 
 
 @dp.message(Command("stockstatus"))
