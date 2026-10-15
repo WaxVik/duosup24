@@ -3467,7 +3467,7 @@ async def stock_text(kind: str, state: dict, active: bool) -> str:
     title = (f"{e(30)} Mirage Stock" if kind == "mirage" else f"{e(74)} Normal Stock") + f" ({esc(state['time'])} МСК)"
     if active:
         hours = STOCK_NEXT_HOURS[kind]
-        return (f"{head}\n{title}\n{body}\n\n{stock_footer()}\n\n"
+        return (f"{head}\n{title}\n<blockquote>{body}</blockquote>\n\n{stock_footer()}\n\n"
                 f"{e(11)} <i>Следующее обновление через {hours} часа!</i>")
     return f"{head}\n{title}\n<blockquote>{body}</blockquote>\n{stock_footer()}"
 
@@ -3524,6 +3524,8 @@ async def stock_tick() -> int:
     """Одна проверка источника. Возвращает, через сколько секунд проверять снова."""
     global _stale, _cached
     now = now_ts()
+    if await get_config("stock_paused") == "1":
+        return 600  # остановлено командой /stopstock
     if not await main_chat():
         return 60  # чаты ещё не связаны — ничего не тратим, проверим снова через минуту
     if await stock_calls_used() >= STOCK_MONTHLY_LIMIT:
@@ -3561,6 +3563,14 @@ async def stock_tick() -> int:
                 continue
         if await publish_stock(kind, items, epoch=epoch):
             LOG.info("stock %s опубликован: %s", kind, ", ".join(k for k, _ in items))
+    anchor = await get_config("stock_anchor")
+    if anchor:  # расписание задано командой /startstock: проверки каждые 2 часа от указанной минуты (МСК)
+        if stale_clock and _stale < STOCK_RETRY_TRIES:
+            _stale += 1
+            _cached = None
+            return STOCK_RETRY_SECONDS
+        _stale = 0
+        return max(60, next_anchor_slot(anchor, now) - now)
     economy = STOCK_MONTHLY_LIMIT < 360 and not STOCK_FULL_MODE
     if resets:
         boundaries = resets
@@ -3580,6 +3590,36 @@ async def stock_tick() -> int:
     return max(120, min(future) - now + STOCK_DELAY_SECONDS)
 
 
+_stock_wake = asyncio.Event()  # будит цикл, когда меняется расписание (/startstock, /stopstock)
+
+
+def next_anchor_slot(anchor: str, now: int) -> int:
+    """Ближайшее время проверки после now: «anchor» по МСК и далее каждые 2 часа (11:02, 13:02, 15:02 …)."""
+    hour, minute = (int(x) for x in anchor.split(":"))
+    base = int(datetime.fromtimestamp(now, MSK).replace(hour=hour, minute=minute, second=0, microsecond=0).timestamp())
+    return base + ((now - base) // 7200 + 1) * 7200
+
+
+async def stock_idle_wait() -> int:
+    """Сколько ждать до следующей проверки по текущему расписанию (без запроса к источнику)."""
+    if await get_config("stock_paused") == "1":
+        return 600
+    anchor = await get_config("stock_anchor")
+    if anchor:
+        return max(60, next_anchor_slot(anchor, now_ts()) - now_ts())
+    return 60
+
+
+async def _sleep_or_wake(seconds: int) -> bool:
+    """True, если проснулись досрочно из-за смены расписания."""
+    try:
+        await asyncio.wait_for(_stock_wake.wait(), timeout=max(60, seconds))
+    except asyncio.TimeoutError:
+        return False
+    _stock_wake.clear()
+    return True
+
+
 async def _notify_stock_error(text: str) -> None:
     """Сообщает создателю об ошибке автостока (не чаще раза в 6 часов на одинаковую ошибку)."""
     now = now_ts()
@@ -3592,22 +3632,27 @@ async def _notify_stock_error(text: str) -> None:
 
 async def stock_loop() -> None:
     await asyncio.sleep(15)
-    LOG.info("Автосток запущен (проверка по расписанию смен стока)")
+    LOG.info("Автосток запущен")
+    run, wait = True, 60
     while True:
-        wait = 900
-        try:
-            wait = await stock_tick()
-            _stock_status["error"] = None
-        except Exception as exc:
-            text = f"{type(exc).__name__}: {exc}"
-            _stock_status["error"] = text
-            LOG.warning("stock tick failed: %s", text)
-            await _notify_stock_error(text)
-            wait = 600
-        _stock_status["last_check"] = now_ts()
+        if run:
+            wait = 900
+            try:
+                wait = await stock_tick()
+                _stock_status["error"] = None
+            except Exception as exc:
+                text = f"{type(exc).__name__}: {exc}"
+                _stock_status["error"] = text
+                LOG.warning("stock tick failed: %s", text)
+                await _notify_stock_error(text)
+                wait = 600
+            _stock_status["last_check"] = now_ts()
         _stock_status["next_check"] = now_ts() + max(60, wait)
         LOG.info("stock: следующая проверка через %s мин", max(1, wait // 60))
-        await asyncio.sleep(max(60, wait))
+        if await _sleep_or_wake(wait):  # расписание изменили — пересчитываем без запроса к источнику
+            wait, run = await stock_idle_wait(), False
+        else:
+            run = True
 
 
 # ------------------------------ команды ------------------------------
@@ -3635,6 +3680,43 @@ async def stock_cmd(msg: Message):
     await reply(msg, f"({{20}})Сток {kind} опубликован.")
 
 
+@dp.message(Command("startstock"))
+async def startstock_cmd(msg: Message):
+    """/startstock 11:02 — проверять сток каждые 2 часа от указанного времени по МСК."""
+    if not await redact_zone(msg):
+        return
+    if not STOCK_API_URL:
+        await reply(msg, "({8})Источник не настроен: добавьте STOCK_API_URL и STOCK_API_KEY в Railway Variables.")
+        return
+    args = command_args(msg)
+    m = re.fullmatch(r"([01]?\d|2[0-3])[:.]([0-5]\d)", args[0]) if args else None
+    if not m:
+        current = await get_config("stock_anchor")
+        await reply(msg, "({8})<b>Укажите время по МСК</b>\n<blockquote>Формат: <i>/startstock 11:02</i>\n"
+                         "Бот будет проверять сток каждые 2 часа начиная с этой минуты (11:02, 13:02, 15:02 …).\n"
+                         "Ставьте время сразу после смены стока, например на 1–2 минуты позже.</blockquote>"
+                         + (f"\nСейчас: <b>{esc(current)} МСК</b>" if current else ""))
+        return
+    anchor = f"{int(m.group(1)):02d}:{m.group(2)}"
+    await set_config("stock_anchor", anchor)
+    await set_config("stock_paused", "0")
+    _stock_wake.set()
+    first = next_anchor_slot(anchor, now_ts())
+    slots = ", ".join(datetime.fromtimestamp(first + 7200 * i, MSK).strftime("%H:%M") for i in range(4))
+    left = max(1, (first - now_ts()) // 60)
+    await reply(msg, f"({{20}})<b>Автосток запущен</b>\n<blockquote>Проверки каждые 2 часа по МСК: {slots} …\n"
+                     f"Первая проверка через {left} мин.\nNormal обновится на тех проверках, где он реально сменился (каждые 4 часа).</blockquote>")
+
+
+@dp.message(Command("stopstock"))
+async def stopstock_cmd(msg: Message):
+    if not await redact_zone(msg):
+        return
+    await set_config("stock_paused", "1")
+    _stock_wake.set()
+    await reply(msg, "({20})Автосток остановлен. Запустить снова: <i>/startstock 11:02</i>")
+
+
 @dp.message(Command("stocknow"))
 async def stocknow_cmd(msg: Message):
     """Принудительная проверка источника и публикация, если сток сменился (тратит 1 кредит)."""
@@ -3657,10 +3739,13 @@ async def stockstatus_cmd(msg: Message):
     if not await redact_zone(msg):
         return
     fmt = lambda ts: datetime.fromtimestamp(ts, MSK).strftime("%d.%m %H:%M МСК") if ts else "—"  # noqa: E731
+    anchor = await get_config("stock_anchor")
+    paused = await get_config("stock_paused") == "1"
     mode = "экономный (только смены Normal)" if STOCK_MONTHLY_LIMIT < 360 and not STOCK_FULL_MODE else "полный (каждые 2 часа)"
     lines = [f"Источник: {'настроен' if STOCK_API_URL else 'НЕ настроен'}",
              f"Цикл запущен: {'да' if _stock_task and not _stock_task.done() else 'нет'}",
              f"Режим: {mode}",
+             f"Расписание: {'каждые 2 ч от ' + anchor + ' МСК' if anchor else 'по часам (чётные часы UTC)'}" + (" — ОСТАНОВЛЕНО" if paused else ""),
              f"Последняя проверка: {fmt(_stock_status['last_check'])}",
              f"Следующая проверка: {fmt(_stock_status['next_check'])}",
              f"Запросов в месяце: {await stock_calls_used()}/{STOCK_MONTHLY_LIMIT}",
