@@ -23,6 +23,8 @@ import os
 import re
 import secrets
 import string
+import time as _time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -44,7 +46,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.1.0"
+BOT_VERSION = "3.2.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -420,6 +422,7 @@ async def init_db() -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS roblox_username TEXT",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS roblox_prompt_pending BOOL NOT NULL DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS achievements TEXT",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS is_html BOOL NOT NULL DEFAULT FALSE",
         """CREATE TABLE IF NOT EXISTS applications (
             id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, kind TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active', chat_message_id BIGINT,
@@ -549,6 +552,34 @@ async def max_warns_for(user_id: int) -> int:
     if rank == 1 and (await get_rights(user_id)).get("restrict"):
         return 4
     return 3
+
+
+CMD_PERMS = [  # (ключ, название, ранг, которому команда доступна по умолчанию)
+    ("warn", "/warn — выдать варн", 1),
+    ("ban", "/ban — выдать бан", 1),
+    ("unwarn", "/unwarn — снять варн", 2),
+    ("unban", "/unban — снять бан", 2),
+    ("del", "/del — удалить сообщение", 2),
+    ("award", "Наградить — выдать награду", 1),
+]
+
+
+async def cmd_overrides(user_id: int) -> dict:
+    raw = await get_config(f"cmdperm_{user_id}")
+    try:
+        return json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+
+
+async def can_use(user_id: int, cmd: str, min_rank: int) -> bool:
+    """Можно ли пользователю команду: личная настройка из /adminpanel, иначе — по рангу."""
+    if user_id == CREATOR_ID:
+        return True
+    override = await cmd_overrides(user_id)
+    if cmd in override:
+        return bool(override[cmd])
+    return await rank_of(user_id) >= min_rank
 
 
 async def user_row(user_id: int):
@@ -1016,7 +1047,7 @@ async def warn_cmd(msg: Message):
     if not await mod_group(msg) or not msg.from_user:
         return
     actor = msg.from_user.id
-    if await rank_of(actor) < 1:
+    if not await can_use(actor, "warn", 1):
         await reply(msg, "({15})У вас недостаточно прав")
         return
     count, token, reason = parse_punish(msg, True)
@@ -1087,7 +1118,7 @@ async def ban_cmd(msg: Message):
     if not await mod_group(msg) or not msg.from_user:
         return
     actor = msg.from_user.id
-    if await rank_of(actor) < 1:
+    if not await can_use(actor, "ban", 1):
         await reply(msg, "({15})У вас недостаточно прав")
         return
     _, token, reason = parse_punish(msg, False)
@@ -1126,7 +1157,7 @@ async def unwarn_cmd(msg: Message):
     if not await mod_group(msg) or not msg.from_user:
         return
     actor = msg.from_user.id
-    if await rank_of(actor) < 2:
+    if not await can_use(actor, "unwarn", 2):
         await reply(msg, "({15})У вас недостаточно прав для снятия варнов.")
         return
     count, token, _ = parse_punish(msg, True)
@@ -1136,9 +1167,18 @@ async def unwarn_cmd(msg: Message):
         return
     uid, uname, fname = target
     async with lock_for("warn", uid):
-        rows = await pool().fetch(
-            "SELECT id FROM warn_logs WHERE user_id=$1 AND is_active ORDER BY id DESC LIMIT $2", uid, count)
+        if actor == CREATOR_ID:
+            rows = await pool().fetch(
+                "SELECT id FROM warn_logs WHERE user_id=$1 AND is_active ORDER BY id DESC LIMIT $2", uid, count)
+        else:  # автоварны (их выдаёт сам бот) главные админы снять не могут
+            rows = await pool().fetch(
+                "SELECT id FROM warn_logs WHERE user_id=$1 AND is_active AND moderator_id<>$3 "
+                "ORDER BY id DESC LIMIT $2", uid, count, B().id)
         if not rows:
+            if actor != CREATOR_ID and await pool().fetchval(
+                    "SELECT 1 FROM warn_logs WHERE user_id=$1 AND is_active AND moderator_id=$2 LIMIT 1", uid, B().id):
+                await reply(msg, "({15})Варны, выданные автоматически (автоварн), может снять только создатель.")
+                return
             await reply(msg, ERR_UNWARN)
             return
         removed = len(rows)
@@ -1168,7 +1208,7 @@ async def unban_cmd(msg: Message):
     if not await mod_group(msg) or not msg.from_user:
         return
     actor = msg.from_user.id
-    if await rank_of(actor) < 2:
+    if not await can_use(actor, "unban", 2):
         await reply(msg, "({15})У вас недостаточно прав для разбана.")
         return
     _, token, _ = parse_punish(msg, False)
@@ -1271,20 +1311,7 @@ async def autowarn_handler(msg: Message) -> None:
         return
     if await is_banned(user.id):
         return
-    bot_id = B().id
-    new, numbers, ban_no, error = await give_warns(msg.chat.id, user.id, 1, "1.15 Запрещенная ссылка", bot_id, msg.message_id)
-    if not numbers:
-        return
-    m = mention(user.id, user.username, user.full_name)
-    await reply(msg, warn_text(m, new, "1.15 Запрещенная ссылка", numbers, None, True),
-                appeal_markup([("warn", numbers[0])]))
-    await log_action(f"Автоварн {new}/{MAX_WARNS}", bot_id, user.id, user.username, user.full_name,
-                     "1.15 Запрещенная ссылка", ", ".join(numbers), msg.chat.id, msg.message_id)
-    if ban_no:
-        await log_action("Бан (лимит варнов 4/4)", bot_id, user.id, user.username, user.full_name,
-                         "Достигнут лимит варнов (4/4)", ban_no, msg.chat.id, msg.message_id)
-    if ban_no:
-        await say(msg, ban_text(m, "Достигнут лимит варнов (4/4)", ban_no, None), appeal_markup([("ban", ban_no)]))
+    await auto_warn(msg, "1.15 Запрещенная ссылка")
 
 
 # ----------------------- БЕЛЫЙ СПИСОК ССЫЛОК -----------------------
@@ -1860,7 +1887,7 @@ async def verify_cb(cb: CallbackQuery):
 # ============================ УДАЛЕНИЕ СООБЩЕНИЙ ============================
 @dp.message(Command("del"))
 async def del_cmd(msg: Message):
-    if not msg.from_user or await rank_of(msg.from_user.id) < 2:
+    if not msg.from_user or not await can_use(msg.from_user.id, "del", 2):
         await reply(msg, "({15})У вас недостаточно прав")
         return
     if not await mod_group(msg):
@@ -2016,23 +2043,25 @@ async def menu_events(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_nav")
 async def menu_nav(cb: CallbackQuery):
-    rules = await pool().fetchval("SELECT rule_text FROM rules ORDER BY created_at DESC LIMIT 1")
+    rules_row = await pool().fetchrow("SELECT rule_text, is_html FROM rules ORDER BY created_at DESC LIMIT 1")
     text = (f"({{61}})<b>Навигация и правила</b>\n"
             f"• {link('Рейды', LINKS['raids'])}\n• {link('Трейды', LINKS['trades'])}\n"
             f"• {link('Морские ивенты', LINKS['sea'])}\n• {link('Триалы', LINKS['trials'])}\n")
-    if rules:
-        text += f"\n<blockquote>{esc(rules)}</blockquote>"
+    if rules_row:
+        text += (f"\n{rules_row['rule_text']}" if rules_row["is_html"]
+                 else f"\n<blockquote>{esc(rules_row['rule_text'])}</blockquote>")
     else:
         text += "\nПравила сообщества опубликованы в теме «Правила»."
     await edit(cb, text, back_only())
 
 
-async def publish_rules(version: str, text: str) -> None:
+async def publish_rules(version: str, text: str, is_html: bool = False) -> None:
     """Правила -> тема «Правила», оповещение -> тема «Оповещения»."""
     chat_id = await main_chat()
     if not chat_id:
         return
-    body = R(f"{e(61)} <b>Правила сообщества HuBBlox</b> • v{esc(version)}\n{SEP}\n{esc(text)}")
+    shown = text if is_html else esc(text)  # is_html: текст уже с Premium Emoji и цитатами, как его прислал создатель
+    body = R(f"{e(61)} <b>Правила сообщества HuBBlox</b> • v{esc(version)}\n{SEP}\n{shown}")
     posted = None
     saved = await get_config("rules_msg_id")
     if saved:
@@ -2065,12 +2094,16 @@ async def setrules_cmd(msg: Message, state: FSMContext):
 
 @dp.message(RulesSt.text, F.text, ~F.text.startswith("/"))
 async def setrules_text(msg: Message, state: FSMContext):
+    if len(msg.text) > 3500:
+        await reply(msg, "({8})Текст слишком длинный (максимум 3500 символов). Сократите и отправьте снова или /cancel.")
+        return
     await state.clear()
+    rules_html = msg.html_text.strip()  # сохраняет Premium Emoji, цитаты, жирный/курсив и ссылки
     version = str(1 + int(await pool().fetchval("SELECT COUNT(*) FROM rules") or 0))
-    await pool().execute("INSERT INTO rules (version, rule_text, created_at) VALUES ($1,$2,$3)",
-                         version, msg.text.strip()[:3500], now_ts())
+    await pool().execute("INSERT INTO rules (version, rule_text, created_at, is_html) VALUES ($1,$2,$3,TRUE)",
+                         version, rules_html, now_ts())
     await reply(msg, f"({{20}})Правила обновлены (версия {version}).")
-    await publish_rules(version, msg.text.strip()[:3500])
+    await publish_rules(version, rules_html, True)
 
 
 # ------------------------------- ПРОФИЛЬ -------------------------------
@@ -2863,8 +2896,9 @@ async def appealable(user_id: int) -> list[tuple[str, str, str]]:
     since = now_ts() - APPEAL_WARN_HOURS * 3600
     warns = await pool().fetch(
         """SELECT warn_number FROM warn_logs WHERE user_id=$1 AND is_active AND created_at>=$2
+           AND moderator_id<>$3
            AND warn_number NOT IN (SELECT violation_number FROM appeals WHERE user_id=$1 AND violation_type='warn')
-           ORDER BY id""", user_id, since)
+           ORDER BY id""", user_id, since, B().id)
     out += [("warn", w["warn_number"], f"({{8}}) Варн {w['warn_number']}") for w in warns]
     if await is_banned(user_id):
         ban = await pool().fetchrow(
@@ -2880,9 +2914,12 @@ async def begin_appeal(target, state: FSMContext, user_id: int, kind: str, numbe
     """Запускает апелляцию на конкретное наказание (если оно принадлежит пользователю и доступно)."""
     msg = target.message if isinstance(target, CallbackQuery) else target
     table, col = ("warn_logs", "warn_number") if kind == "warn" else ("ban_logs", "ban_number")
-    row = await pool().fetchrow(f"SELECT user_id, created_at FROM {table} WHERE {col}=$1", number)
+    row = await pool().fetchrow(f"SELECT user_id, created_at, moderator_id FROM {table} WHERE {col}=$1", number)
     if not row or row["user_id"] != user_id:
         await say(msg, "({15})Это наказание выдано не вам.")
+        return
+    if kind == "warn" and row["moderator_id"] == B().id:
+        await say(msg, "({14})Апелляция на автоматический варн (автоварн) недоступна.")
         return
     if await pool().fetchval("SELECT 1 FROM appeals WHERE violation_number=$1 AND violation_type=$2", number, kind):
         await say(msg, "({8})Апелляция на это наказание уже подана.")
@@ -3291,7 +3328,7 @@ MAX_AWARDS = 20
 @dp.message(F.text.regexp(r"(?i)^\s*наградить(?:\s|$)"))
 async def award_cmd(msg: Message):
     """Ответом на сообщение: «Наградить <название>» — награда появляется в профиле."""
-    if not msg.from_user or await rank_of(msg.from_user.id) < 1:
+    if not msg.from_user or not await can_use(msg.from_user.id, "award", 1):
         return  # обычные участники пишут это в разговоре — не реагируем
     if not await mod_group(msg):
         return
@@ -4091,6 +4128,290 @@ async def stock_clear(cb: CallbackQuery):
     except Exception:
         pass
     await cb.answer("Выбор очищен")
+# ===================== АВТОВАРН (ссылки, спам) =====================
+async def auto_warn(msg: Message, reason: str) -> None:
+    """Варн от имени бота. Кнопки апелляции у автоварна нет, главные админы его не снимают."""
+    user = msg.from_user
+    bot_id = B().id
+    new, numbers, ban_no, error = await give_warns(msg.chat.id, user.id, 1, reason, bot_id, msg.message_id)
+    if not numbers:
+        return
+    m = mention(user.id, user.username, user.full_name)
+    await reply(msg, warn_text(m, new, reason, numbers, None, True))
+    await log_action(f"Автоварн {new}/{MAX_WARNS}", bot_id, user.id, user.username, user.full_name,
+                     reason, ", ".join(numbers), msg.chat.id, msg.message_id)
+    if ban_no:
+        await log_action("Бан (лимит варнов 4/4)", bot_id, user.id, user.username, user.full_name,
+                         "Достигнут лимит варнов (4/4)", ban_no, msg.chat.id, msg.message_id)
+        await say(msg, ban_text(m, "Достигнут лимит варнов (4/4)", ban_no, None), appeal_markup([("ban", ban_no)]))
+
+
+SPAM_MSGS = 7        # больше 6 сообщений
+SPAM_WINDOW = 3.0    # за 3 секунды
+_spam_hist: dict[tuple, deque] = {}
+_spam_group: dict[tuple, str] = {}
+
+
+async def spam_check(msg: Message) -> None:
+    user = msg.from_user
+    if not user or user.is_bot or msg.sender_chat or msg.chat.type not in ("group", "supergroup"):
+        return
+    key = (msg.chat.id, user.id)
+    if msg.media_group_id:  # альбом из нескольких фото — это одно сообщение
+        if _spam_group.get(key) == msg.media_group_id:
+            return
+        _spam_group[key] = msg.media_group_id
+    now = _time.monotonic()
+    hist = _spam_hist.setdefault(key, deque(maxlen=SPAM_MSGS))
+    hist.append(now)
+    if len(_spam_hist) > 5000:
+        for k in [k for k, v in _spam_hist.items() if not v or now - v[-1] > 10]:
+            _spam_hist.pop(k, None)
+            _spam_group.pop(k, None)
+    if len(hist) < SPAM_MSGS or now - hist[0] > SPAM_WINDOW:
+        return
+    hist.clear()
+    if msg.chat.id != await main_chat():
+        return
+    if user.id == CREATOR_ID or await rank_of(user.id) > 0 or await is_tg_admin(msg.chat.id, user.id):
+        return
+    row = await user_row(user.id)
+    if not (row and row["verified"]) or await is_banned(user.id):
+        return
+    await auto_warn(msg, "1.16 Спам")
+
+
+class SpamMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        try:
+            if isinstance(event, Message):
+                await spam_check(event)
+        except Exception:
+            LOG.exception("spam check failed")
+        return await handler(event, data)
+
+
+# ===================== /off и автозавершение заявок =====================
+APP_TTL_HOURS = 24
+
+
+async def close_application(app_id: int) -> bool:
+    res = await pool().execute("UPDATE applications SET status='closed' WHERE id=$1 AND status<>'closed'", app_id)
+    if res.endswith(" 0"):
+        return False
+    await refresh_application_post(app_id)
+    return True
+
+
+@dp.message(Command("off"))
+async def off_cmd(msg: Message):
+    """/off #-00045 — создатель завершает заявку; владельцу приходит сообщение в ЛС."""
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await reply(msg, "({15})У вас недостаточно прав")
+        return
+    args = command_args(msg)
+    m = re.fullmatch(r"#?-?(\d{1,9})", args[0]) if args else None
+    if not m:
+        await reply(msg, "({8})<b>Ошибка завершения заявки</b>\n<blockquote>Укажите номер заявки:\n<i>/off #-00045</i></blockquote>")
+        return
+    app_id = int(m.group(1))
+    app = await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id)
+    if not app:
+        await reply(msg, f"({{8}})Заявка {num(app_id)} не найдена.")
+        return
+    if app["status"] == "closed":
+        await reply(msg, f"({{8}})Заявка {num(app_id)} уже завершена.")
+        return
+    await close_application(app_id)
+    sent = await dm(app["user_id"], f"{e(20)} Ваша заявка <b>{num(app_id)}</b> была завершена @{esc(CREATOR_USERNAME)}")
+    await reply(msg, f"({{20}})Заявка {num(app_id)} завершена." +
+                ("" if sent else "\nВладельцу не удалось отправить сообщение (он не запускал бота)."))
+
+
+async def applications_expiry_loop() -> None:
+    """Заявка завершается сама через 24 часа после создания."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            rows = await pool().fetch(
+                "UPDATE applications SET status='closed' WHERE status<>'closed' AND created_at<$1 RETURNING id",
+                now_ts() - APP_TTL_HOURS * 3600)
+            for r in rows:
+                await refresh_application_post(r["id"])
+                await asyncio.sleep(0.3)
+        except Exception:
+            LOG.exception("applications expiry failed")
+        await asyncio.sleep(300)
+
+
+# ============================= /adminpanel =============================
+async def person_html(uid: int) -> str:
+    k = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", uid)
+    return mention(uid, k and k["username"], k and k["full_name"])
+
+
+async def panel_list():
+    rows = await pool().fetch(
+        """SELECT m.user_id, m.username, m.level, m.role, k.full_name FROM moderators m
+           LEFT JOIN known_users k ON k.user_id = m.user_id
+           WHERE m.level>0 AND m.user_id<>$1 ORDER BY m.level DESC, m.user_id""", CREATOR_ID)
+    buttons = []
+    for r in rows:
+        name = r["full_name"] or (f"@{r['username']}" if r["username"] else str(r["user_id"]))
+        role = r["role"] or RANK_NAMES[rank_from_level(int(r["level"]))]
+        buttons.append([InlineKeyboardButton(text=f"{name} — {role}"[:60], callback_data=f"ap_u_{r['user_id']}")])
+    buttons.append([InlineKeyboardButton(text="✖️ Закрыть", callback_data="ap_close")])
+    text = (f"{e(21)} <b>Админ-панель</b>\n<blockquote>Выберите администратора.</blockquote>" if rows
+            else f"{e(21)} <b>Админ-панель</b>\nАдминов пока нет.")
+    return text, InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def panel_creator(cb: CallbackQuery) -> bool:
+    return cb.from_user.id == CREATOR_ID
+
+
+@dp.message(Command("adminpanel"))
+async def adminpanel_cmd(msg: Message):
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        await reply(msg, "({15})У вас недостаточно прав")
+        return
+    if msg.chat.id != await admin_chat():
+        await reply(msg, "({8})Админ-панель работает только в чате администрации.")
+        return
+    text, markup = await panel_list()
+    await msg.answer(R(text), reply_markup=markup, **thread_kwargs(msg))
+
+
+@dp.callback_query(F.data == "ap_close")
+async def ap_close(cb: CallbackQuery):
+    if not panel_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await _delete_quiet(cb.message)
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "ap_list")
+async def ap_list(cb: CallbackQuery):
+    if not panel_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    text, markup = await panel_list()
+    await edit(cb, text, markup)
+
+
+@dp.callback_query(F.data.startswith("ap_u_"))
+async def ap_user(cb: CallbackQuery):
+    if not panel_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    uid = int(cb.data.removeprefix("ap_u_"))
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Telegram разрешения", callback_data=f"ap_tg_{uid}")],
+        [InlineKeyboardButton(text="DuoSup разрешения", callback_data=f"ap_ds_{uid}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="ap_list")],
+    ])
+    await edit(cb, f"{e(21)} <b>Админ:</b> {await person_html(uid)}\n<blockquote>Выберите раздел разрешений.</blockquote>", markup)
+
+
+async def tg_rights_view(uid: int):
+    rights = await get_rights(uid)
+    rows = []
+    for key, title, _, _ in PERM_RIGHTS:
+        mark = "✅" if rights.get(key) else "❌"
+        rows.append([InlineKeyboardButton(text=f"{mark} {title}", callback_data=f"ap_tgt_{uid}_{key}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ap_u_{uid}")])
+    text = (f"{e(21)} <b>Telegram разрешения</b>\n{await person_html(uid)}\n"
+            "<blockquote>Нажмите на право, чтобы включить или выключить. "
+            "Изменения сразу применяются во всех чатах.</blockquote>")
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data.startswith("ap_tg_"))
+async def ap_tg(cb: CallbackQuery):
+    if not panel_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    text, markup = await tg_rights_view(int(cb.data.removeprefix("ap_tg_")))
+    await edit(cb, text, markup)
+
+
+@dp.callback_query(F.data.startswith("ap_tgt_"))
+async def ap_tg_toggle(cb: CallbackQuery):
+    if not panel_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    _, _, uid_s, key = cb.data.split("_", 3)
+    uid = int(uid_s)
+    if key not in {k for k, *_ in PERM_RIGHTS}:
+        await cb.answer("Неизвестное право", show_alert=True)
+        return
+    rights = await get_rights(uid)
+    rights[key] = not rights.get(key)
+    role = (await pool().fetchval("SELECT role FROM admin_rights WHERE user_id=$1", uid)
+            or await pool().fetchval("SELECT role FROM moderators WHERE user_id=$1", uid) or "Админ")
+    await pool().execute(
+        """INSERT INTO admin_rights (user_id, role, rights, updated_at) VALUES ($1,$2,$3::jsonb,$4)
+           ON CONFLICT (user_id) DO UPDATE SET rights=$3::jsonb, updated_at=$4""",
+        uid, role, json.dumps(rights), now_ts())
+    results = []
+    for chat_id in await target_chats():
+        if await is_member(chat_id, uid):
+            results.append(await promote_in(chat_id, uid, rights, role))
+    toast = ("Применено во всех чатах" if results and all(results)
+             else "Не удалось обновить права в части чатов" if results else "Сохранено (админа нет в чатах)")
+    text, markup = await tg_rights_view(uid)
+    await edit(cb, text, markup)
+    await cb.answer(toast)
+
+
+async def ds_view(uid: int):
+    override = await cmd_overrides(uid)
+    rank = await rank_of(uid)
+    rows = []
+    for key, title, min_rank in CMD_PERMS:
+        allowed = override.get(key, rank >= min_rank)
+        rows.append([InlineKeyboardButton(text=f"{'✅' if allowed else '❌'} {title}", callback_data=f"ap_dst_{uid}_{key}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ap_u_{uid}")])
+    text = (f"{e(21)} <b>DuoSup разрешения</b>\n{await person_html(uid)}\n"
+            "<blockquote>✅ — команда разрешена, ❌ — запрещена. Нажмите, чтобы переключить.</blockquote>")
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data.startswith("ap_ds_"))
+async def ap_ds(cb: CallbackQuery):
+    if not panel_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    text, markup = await ds_view(int(cb.data.removeprefix("ap_ds_")))
+    await edit(cb, text, markup)
+
+
+@dp.callback_query(F.data.startswith("ap_dst_"))
+async def ap_ds_toggle(cb: CallbackQuery):
+    if not panel_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    _, _, uid_s, key = cb.data.split("_", 3)
+    uid = int(uid_s)
+    spec = next((x for x in CMD_PERMS if x[0] == key), None)
+    if not spec:
+        await cb.answer("Неизвестная команда", show_alert=True)
+        return
+    override = await cmd_overrides(uid)
+    default = await rank_of(uid) >= spec[2]
+    now_allowed = override.get(key, default)
+    new = not now_allowed
+    if new == default:
+        override.pop(key, None)
+    else:
+        override[key] = new
+    await set_config(f"cmdperm_{uid}", json.dumps(override) if override else "")
+    text, markup = await ds_view(uid)
+    await edit(cb, text, markup)
+    await cb.answer(f"{spec[1]}: {'разрешено' if new else 'запрещено'}")
+
+
 # Автоварн — самым последним: он реагирует на любые групповые сообщения со ссылками.
 dp.message.register(autowarn_handler, F.chat.type.in_({"group", "supergroup"}))
 
@@ -4108,6 +4429,7 @@ async def main() -> None:
         props = DefaultBotProperties(parse_mode=ParseMode.HTML)
     bot = Bot(token=BOT_TOKEN, default=props)
     dp.message.outer_middleware(RememberMiddleware())
+    dp.message.outer_middleware(SpamMiddleware())
     dp.callback_query.outer_middleware(RememberMiddleware())
     try:
         await init_db()
@@ -4125,6 +4447,7 @@ async def main() -> None:
             _stock_task = asyncio.create_task(stock_loop())
         else:
             LOG.info("STOCK_API_URL не задан — автосток выключен (работает ручная команда /stock)")
+        spawn(applications_expiry_loop())
         LOG.info("DuoSup %s запущен как @%s (id=%s)", BOT_VERSION, BOT_USERNAME, me.id)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
