@@ -7,6 +7,11 @@ DuoSup — Telegram-бот сообщества HuBBlox (Blox Fruits).
 CREATOR_ID, CREATOR_USERNAME, TOPIC_* (необязательные).
 Структура базы совместима с прежней версией — данные сохраняются.
 
+Автосток, несколько аккаунтов Parse.bot (необязательно): STOCK_API_URL / STOCK_API_KEY — аккаунт 1,
+STOCK_API_URL_2 / STOCK_API_KEY_2 … STOCK_API_URL_5 / STOCK_API_KEY_5 — запасные.
+Когда на аккаунте кончаются кредиты, бот сам переходит на следующий (по кругу) и пишет создателю в ЛС.
+ERROR_TTL_SECONDS (по умолчанию 15) — через сколько секунд исчезают ошибки в основном чате.
+
 Как редактировать тексты: в сообщениях и кнопках ({N}) — Premium Emoji по номеру
 из словаря PREMIUM_EMOJI. ({1.3.12_2}) — несколько эмодзи: "." = без пробела,
 "_" = один пробел. Форматирование пишется обычным HTML: <b> <i> <u> <blockquote>.
@@ -39,7 +44,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.0.0"
+BOT_VERSION = "3.1.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -217,7 +222,7 @@ FRUITS = [
     ("gravity", "Gravity"), ("mammoth", "Mammoth"), ("trex", "T-Rex"), ("dough", "Dough"),
     ("shadow", "Shadow"), ("venom", "Venom"), ("gas", "Gas"), ("spirit", "Spirit"),
     ("tiger", "Leopard"), ("yeti", "Yeti"), ("kitsune", "Kitsune"), ("control", "Control"),
-    ("dragon", "Dragon"),
+    ("dragon", "Dragon"), ("magnet", "Magnet"),
 ]
 
 # Фрукты для рейдов: ключ -> (название, {навык: цена}). Порядок навыков = порядок кнопок.
@@ -643,8 +648,71 @@ async def say(target, text: str, markup=None, **kwargs):
     return await message.answer(R(text), reply_markup=markup, **kwargs)
 
 
+ERROR_TTL = max(5, env_int("ERROR_TTL_SECONDS", 15))  # через сколько секунд исчезают ошибки в основном чате
+_bg_tasks: set = set()
+_spam_seen: dict[int, int] = {}
+
+
+def spawn(coro) -> None:
+    """Фоновая задача (ссылка хранится, чтобы её не убрал сборщик мусора)."""
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+async def _delete_quiet(message) -> None:
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+async def _cleanup_later(delay: int, *messages) -> None:
+    await asyncio.sleep(delay)
+    for m in messages:
+        if m is not None:
+            await _delete_quiet(m)
+
+
+def _is_error_text(text: str) -> bool:
+    """Ответы, которые начинаются с ⚠️ / ❌ / ⛔ (эмодзи 8, 14, 15), считаются ошибками."""
+    return text.lstrip().startswith(("({8})", "({14})", "({15})", tg_emoji(8), tg_emoji(14), tg_emoji(15)))
+
+
+async def _in_main_chat(msg: Message) -> bool:
+    try:
+        return msg.chat.type in ("group", "supergroup") and msg.chat.id == await main_chat()
+    except Exception:
+        return False
+
+
 async def reply(msg: Message, text: str, markup=None, **kwargs):
-    return await msg.reply(R(text), reply_markup=markup, **kwargs)
+    sent = await msg.reply(R(text), reply_markup=markup, **kwargs)
+    # В основном чате HuBBlox остаются только выполненные команды: ошибка и неудачная команда исчезают.
+    # В админ-чате и в личке ничего не удаляется.
+    if _is_error_text(text) and await _in_main_chat(msg):
+        own = (msg.text or msg.caption or "").lstrip()
+        failed_cmd = msg if (own.startswith("/") or own.lower().startswith("наградить")) else None
+        spawn(_cleanup_later(ERROR_TTL, sent, failed_cmd))
+    return sent
+
+
+async def spam_notice(msg: Message, text: str) -> None:
+    """Команда не там, где нужно. В основном чате: одно сообщение на 15 секунд, повторы тихо удаляются."""
+    if not await _in_main_chat(msg):
+        await reply(msg, text)
+        return
+    uid = msg.from_user.id if msg.from_user else 0
+    now = now_ts()
+    if len(_spam_seen) > 2000:
+        for key in [k for k, v in _spam_seen.items() if now - v > 60]:
+            _spam_seen.pop(key, None)
+    if now - _spam_seen.get(uid, 0) < ERROR_TTL:
+        await _delete_quiet(msg)  # спам: нового уведомления нет, сама команда удаляется
+        return
+    _spam_seen[uid] = now
+    sent = await msg.reply(R(text))
+    spawn(_cleanup_later(ERROR_TTL, sent, msg))
 
 
 async def edit(cb: CallbackQuery, text: str, markup=None):
@@ -1897,7 +1965,7 @@ async def private_only(target) -> bool:
     if isinstance(target, CallbackQuery):
         await target.answer("Откройте бота в личных сообщениях.", show_alert=True)
     else:
-        await reply(msg, "({8})Эта команда работает только в личных сообщениях с ботом.")
+        await spam_notice(msg, "({8})Эта команда работает только в личных сообщениях с ботом.")
     return False
 
 
@@ -1911,7 +1979,7 @@ def json_payload(value) -> dict:
 @dp.message(Command("start"))
 async def start_cmd(msg: Message, state: FSMContext):
     if msg.chat.type != "private":
-        await reply(msg, "({8})Команда /start работает только в личных сообщениях бота.")
+        await spam_notice(msg, "({8})Команда /start работает только в личных сообщениях бота.")
         return
     await state.clear()
     args = command_args(msg)
@@ -3070,6 +3138,7 @@ def custom_emoji_id_of(msg: Message) -> str | None:
 def emoji_center_markup() -> InlineKeyboardMarkup:
     return kb(
         [InlineKeyboardButton(text="🍎 Эмодзи фруктов", callback_data="em_fruits")],
+        [InlineKeyboardButton(text="🧲 Эмодзи Magnet (только он)", callback_data="em_magnet")],
         [InlineKeyboardButton(text="🧬 Эмодзи рас триалов", callback_data="em_races")],
         [InlineKeyboardButton(text="📋 Установленные эмодзи", callback_data="em_list")],
         [InlineKeyboardButton(text="🗑 Сбросить эмодзи фруктов", callback_data="em_reset")],
@@ -3116,6 +3185,18 @@ async def em_start(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@dp.callback_query(F.data == "em_magnet")
+async def em_magnet(cb: CallbackQuery, state: FSMContext):
+    if not creator_cb(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    idx = next(i for i, (k, _) in enumerate(FRUITS) if k == "magnet")
+    await state.set_state(EmojiSt.fruit)
+    await state.update_data(idx=idx, only=True)
+    await cb.message.edit_text(emoji_prompt(True, idx))
+    await cb.answer()
+
+
 def emoji_prompt(fruits: bool, idx: int) -> str:
     items = FRUITS if fruits else RACES
     key, name = items[idx]
@@ -3130,7 +3211,9 @@ async def emoji_save(msg: Message, state: FSMContext, fruits: bool) -> None:
     if msg.from_user.id != CREATOR_ID:
         return
     items = FRUITS if fruits else RACES
-    idx = (await state.get_data()).get("idx", 0)
+    data = await state.get_data()
+    idx = data.get("idx", 0)
+    only = bool(data.get("only"))
     key, name = items[idx]
     if (msg.text or "").strip() != "-":
         emoji_id = custom_emoji_id_of(msg)
@@ -3139,6 +3222,10 @@ async def emoji_save(msg: Message, state: FSMContext, fruits: bool) -> None:
             return
         await set_config(f"custom_emoji_{'fruit' if fruits else 'race'}_{key}", emoji_id)
         await refresh_icon_cache()
+    if only:  # режим «только один фрукт» (Magnet)
+        await state.clear()
+        await reply(msg, f"({{20}})Premium Emoji для <b>{esc(name)}</b> сохранён.", emoji_center_markup())
+        return
     idx += 1
     if idx >= len(items):
         await state.clear()
@@ -3257,9 +3344,23 @@ import aiohttp
 # Источник данных (Railway Variables). Без STOCK_API_URL автосток выключен, остаётся ручная /stock.
 STOCK_API_URL = os.getenv("STOCK_API_URL", "").strip()
 STOCK_API_KEY = os.getenv("STOCK_API_KEY", "").strip()
+
+
+def _load_stock_accounts() -> list[dict]:
+    """Аккаунт 1 = STOCK_API_URL/KEY, запасные = STOCK_API_URL_2/KEY_2 … STOCK_API_URL_5/KEY_5."""
+    found = []
+    for n in range(1, 6):
+        suffix = "" if n == 1 else f"_{n}"
+        url = os.getenv(f"STOCK_API_URL{suffix}", "").strip()
+        if url:
+            found.append({"n": n, "url": url, "key": os.getenv(f"STOCK_API_KEY{suffix}", "").strip()})
+    return found
+
+
+STOCK_ACCOUNTS = _load_stock_accounts()
 STOCK_API_KEY_HEADER = os.getenv("STOCK_API_KEY_HEADER", "X-API-Key").strip() or "X-API-Key"
 STOCK_POLL_SECONDS = max(60, env_int("STOCK_POLL_SECONDS", 14400))  # запасной интервал, если источник не отдаёт время смены
-STOCK_MONTHLY_LIMIT = env_int("STOCK_MONTHLY_LIMIT", 190)  # защита лимита кредитов (у бесплатного плана Parse их 200)
+STOCK_MONTHLY_LIMIT = env_int("STOCK_MONTHLY_LIMIT", 190)  # лимит запросов НА КАЖДЫЙ аккаунт (у бесплатного плана Parse их 200)
 STOCK_FULL_MODE = os.getenv("STOCK_FULL_MODE", "").strip().lower() in ("1", "true", "yes")  # проверять каждые 2 часа, пока хватает лимита
 STOCK_DELAY_SECONDS = max(0, env_int("STOCK_DELAY_SECONDS", 120))    # сколько ждать после смены стока до проверки (если источник обновляется с задержкой)
 STOCK_RETRY_SECONDS = max(60, env_int("STOCK_RETRY_SECONDS", 300))  # повтор, если после смены данные ещё старые
@@ -3412,18 +3513,73 @@ def _month_key(prefix: str) -> str:
     return f"{prefix}_{datetime.now(timezone.utc):%Y%m}"
 
 
-async def stock_calls_used() -> int:
-    return int(await get_config(_month_key("stock_calls")) or 0)
+class StockCreditsOut(Exception):
+    """У текущего аккаунта Parse.bot закончились кредиты."""
 
 
-async def stock_count_call() -> None:
-    await set_config(_month_key("stock_calls"), await stock_calls_used() + 1)
+class StockAllExhausted(Exception):
+    """Кредиты закончились на всех аккаунтах."""
 
 
-async def fetch_stock_json():
-    if not STOCK_API_URL:
+def _calls_key(acc: int) -> str:
+    return _month_key("stock_calls") if acc == 1 else _month_key(f"stock_calls_a{acc}")
+
+
+async def stock_current_acc() -> int:
+    n = int(await get_config("stock_acc") or 1)
+    return n if any(a["n"] == n for a in STOCK_ACCOUNTS) else STOCK_ACCOUNTS[0]["n"]
+
+
+async def stock_calls_used(acc: int | None = None) -> int:
+    if acc is None:
+        acc = await stock_current_acc()
+    return int(await get_config(_calls_key(acc)) or 0)
+
+
+async def stock_count_call(acc: int | None = None) -> None:
+    if acc is None:
+        acc = await stock_current_acc()
+    await set_config(_calls_key(acc), await stock_calls_used(acc) + 1)
+
+
+async def _acc_usable(acc: dict) -> bool:
+    if await get_config(_month_key(f"stock_dead_a{acc['n']}")):
+        return False  # источник сам сказал, что кредиты кончились (до начала следующего месяца)
+    return await stock_calls_used(acc["n"]) < STOCK_MONTHLY_LIMIT
+
+
+async def pick_account() -> dict | None:
+    """Текущий аккаунт, а если его кредиты кончились — следующий по кругу (1→2→3→4→1). None — не осталось ни одного."""
+    if not STOCK_ACCOUNTS:
         return None
-    headers = {STOCK_API_KEY_HEADER: STOCK_API_KEY} if STOCK_API_KEY else {}
+    async with lock_for("stock_acc"):
+        order = sorted(STOCK_ACCOUNTS, key=lambda a: a["n"])
+        current = await stock_current_acc()
+        start = next(i for i, a in enumerate(order) if a["n"] == current)
+        for step in range(len(order)):
+            acc = order[(start + step) % len(order)]
+            if await _acc_usable(acc):
+                if acc["n"] != current:
+                    await set_config("stock_acc", acc["n"])
+                    await dm(CREATOR_ID, f"{e(8)} <b>Parse.bot: переход на аккаунт {acc['n']}</b>\n"
+                                         f"<blockquote>На аккаунте {current} закончились кредиты. "
+                                         f"Проверка стока продолжается с аккаунта {acc['n']} из {len(order)}.</blockquote>")
+                return acc
+        return None
+
+
+def _credits_exhausted(status: int, body: str) -> bool:
+    low = body.lower()
+    words = ("credit", "quota", "limit", "balance", "payment", "insufficient", "exhaust")
+    if status == 402:
+        return True
+    if status in (401, 403, 429) and any(w in low for w in words):
+        return True
+    return status >= 400 and ("credit" in low or "quota" in low)
+
+
+async def _request_stock(acc: dict):
+    headers = {STOCK_API_KEY_HEADER: acc["key"]} if acc["key"] else {}
     snapshot = os.getenv("STOCK_API_SNAPSHOT", "").strip()  # нужен только если в curl-примере API есть API-Snapshot-Version
     if snapshot:
         headers["API-Snapshot-Version"] = snapshot
@@ -3433,11 +3589,49 @@ async def fetch_stock_json():
             headers[name.strip()] = value.strip()
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(STOCK_API_URL, headers=headers) as resp:
-            resp.raise_for_status()
-            data = await resp.json(content_type=None)
-    await stock_count_call()
+        async with session.get(acc["url"], headers=headers) as resp:
+            body = await resp.text()
+            if _credits_exhausted(resp.status, body):
+                raise StockCreditsOut()
+            if resp.status >= 400:
+                raise RuntimeError(f"HTTP {resp.status}: {body[:200]}")
+    try:
+        data = json.loads(body)
+    except ValueError as exc:
+        raise RuntimeError(f"источник вернул не JSON: {body[:200]}") from exc
+    if isinstance(data, dict) and str(data.get("status", "success")).lower() not in ("success", "ok") \
+            and any(w in body.lower() for w in ("credit", "quota")):
+        raise StockCreditsOut()
     return data
+
+
+async def fetch_stock_json():
+    if not STOCK_ACCOUNTS:
+        return None
+    for _ in range(len(STOCK_ACCOUNTS)):
+        acc = await pick_account()
+        if acc is None:
+            break
+        try:
+            data = await _request_stock(acc)
+        except StockCreditsOut:
+            await set_config(_month_key(f"stock_dead_a{acc['n']}"), 1)
+            LOG.warning("stock: на аккаунте %s закончились кредиты", acc["n"])
+            continue  # pick_account на следующем круге переключит на другой аккаунт и напишет создателю
+        await stock_count_call(acc["n"])
+        return data
+    raise StockAllExhausted("кредиты закончились на всех аккаунтах Parse.bot")
+
+
+async def _all_exhausted() -> int:
+    warn_key = _month_key("stock_budget_warned")
+    if not await get_config(warn_key):
+        await set_config(warn_key, 1)
+        await dm(CREATOR_ID, f"{e(8)} <b>Автосток остановлен:</b> кредиты закончились на всех аккаунтах Parse.bot "
+                             f"({len(STOCK_ACCOUNTS)}). Возобновится в начале следующего месяца. "
+                             "Чтобы добавить аккаунт: STOCK_API_URL_N и STOCK_API_KEY_N в Railway Variables.")
+    LOG.warning("stock: кредиты закончились на всех аккаунтах")
+    return 6 * 3600
 
 
 # ---------------------------- оформление ----------------------------
@@ -3502,11 +3696,16 @@ async def publish_stock(kind: str, items: list, force: bool = False, epoch: int 
             started = datetime.fromtimestamp(epoch - STOCK_NEXT_HOURS[kind] * 3600, MSK).strftime("%H:%M")
         else:
             started = datetime.now(MSK).strftime("%H:00")
+        old_dms = await take_stock_dms(kind)  # личные уведомления о прошлом стоке
         state = {"keys": keys, "items": resolved, "time": started, "epoch": epoch, "msg": None}
         sent = await B().send_message(chat_id, R(await stock_text(kind, state, True)),
                                       message_thread_id=thread(TOPICS["stock"]))
         state["msg"] = sent.message_id
         await set_config(f"stock_{kind}", json.dumps(state))
+    try:
+        await expire_stock_dms(kind, old, old_dms)
+    except Exception:
+        LOG.exception("stock dm expire failed")
     try:
         await notify_stock_subscribers(kind, state)
     except Exception:
@@ -3528,18 +3727,15 @@ async def stock_tick() -> int:
         return 600  # остановлено командой /stopstock
     if not await main_chat():
         return 60  # чаты ещё не связаны — ничего не тратим, проверим снова через минуту
-    if await stock_calls_used() >= STOCK_MONTHLY_LIMIT:
-        warn_key = _month_key("stock_budget_warned")
-        if not await get_config(warn_key):
-            await set_config(warn_key, 1)
-            await dm(CREATOR_ID, f"{e(8)} <b>Автосток остановлен:</b> достигнут лимит запросов за месяц "
-                                 f"({STOCK_MONTHLY_LIMIT}). Возобновится в начале следующего месяца или поднимите STOCK_MONTHLY_LIMIT.")
-        LOG.warning("stock: лимит запросов на месяц исчерпан")
-        return 6 * 3600
+    if STOCK_ACCOUNTS and await pick_account() is None:
+        return await _all_exhausted()  # кредиты кончились на всех аккаунтах
     if _cached and now - _cached[0] < 1200:  # повтор после сбоя публикации — без нового запроса
         data = _cached[1]
     else:
-        data = await fetch_stock_json()
+        try:
+            data = await fetch_stock_json()
+        except StockAllExhausted:
+            return await _all_exhausted()
         if data is None:
             return STOCK_POLL_SECONDS
         _cached = (now, data)
@@ -3571,7 +3767,7 @@ async def stock_tick() -> int:
             return STOCK_RETRY_SECONDS
         _stale = 0
         return max(60, next_anchor_slot(anchor, now) - now)
-    economy = STOCK_MONTHLY_LIMIT < 360 and not STOCK_FULL_MODE
+    economy = STOCK_MONTHLY_LIMIT * max(1, len(STOCK_ACCOUNTS)) < 360 and not STOCK_FULL_MODE
     if resets:
         boundaries = resets
     else:
@@ -3685,7 +3881,7 @@ async def startstock_cmd(msg: Message):
     """/startstock 11:02 — проверять сток каждые 2 часа от указанного времени по МСК."""
     if not await redact_zone(msg):
         return
-    if not STOCK_API_URL:
+    if not STOCK_ACCOUNTS:
         await reply(msg, "({8})Источник не настроен: добавьте STOCK_API_URL и STOCK_API_KEY в Railway Variables.")
         return
     args = command_args(msg)
@@ -3722,7 +3918,7 @@ async def stocknow_cmd(msg: Message):
     """Принудительная проверка источника и публикация, если сток сменился (тратит 1 кредит)."""
     if not await redact_zone(msg):
         return
-    if not STOCK_API_URL:
+    if not STOCK_ACCOUNTS:
         await reply(msg, "({8})Источник не настроен: добавьте STOCK_API_URL и STOCK_API_KEY в Railway Variables.")
         return
     try:
@@ -3741,15 +3937,19 @@ async def stockstatus_cmd(msg: Message):
     fmt = lambda ts: datetime.fromtimestamp(ts, MSK).strftime("%d.%m %H:%M МСК") if ts else "—"  # noqa: E731
     anchor = await get_config("stock_anchor")
     paused = await get_config("stock_paused") == "1"
-    mode = "экономный (только смены Normal)" if STOCK_MONTHLY_LIMIT < 360 and not STOCK_FULL_MODE else "полный (каждые 2 часа)"
-    lines = [f"Источник: {'настроен' if STOCK_API_URL else 'НЕ настроен'}",
+    mode = ("экономный (только смены Normal)" if STOCK_MONTHLY_LIMIT * max(1, len(STOCK_ACCOUNTS)) < 360 and not STOCK_FULL_MODE
+            else "полный (каждые 2 часа)")
+    lines = [f"Источник: {'настроен' if STOCK_ACCOUNTS else 'НЕ настроен'}",
              f"Цикл запущен: {'да' if _stock_task and not _stock_task.done() else 'нет'}",
              f"Режим: {mode}",
              f"Расписание: {'каждые 2 ч от ' + anchor + ' МСК' if anchor else 'по часам (чётные часы UTC)'}" + (" — ОСТАНОВЛЕНО" if paused else ""),
              f"Последняя проверка: {fmt(_stock_status['last_check'])}",
              f"Следующая проверка: {fmt(_stock_status['next_check'])}",
-             f"Запросов в месяце: {await stock_calls_used()}/{STOCK_MONTHLY_LIMIT}",
+             f"Аккаунт Parse: №{await stock_current_acc() if STOCK_ACCOUNTS else '—'} (подключено: {len(STOCK_ACCOUNTS)})",
              f"Ошибка: {_stock_status['error'] or 'нет'}"]
+    for acc in STOCK_ACCOUNTS:
+        dead = " — кредиты кончились" if await get_config(_month_key(f"stock_dead_a{acc['n']}")) else ""
+        lines.append(f"Аккаунт {acc['n']}: запросов {await stock_calls_used(acc['n'])}/{STOCK_MONTHLY_LIMIT}{dead}")
     chat_id = await main_chat()
     for kind in ("normal", "mirage"):
         st = await stock_state(kind)
@@ -3769,7 +3969,7 @@ async def stockcheck_cmd(msg: Message):
     """Проверка источника: что вернул и как бот это разобрал."""
     if not await redact_zone(msg):
         return
-    if not STOCK_API_URL:
+    if not STOCK_ACCOUNTS:
         await reply(msg, "({8})Источник не настроен. Добавьте в Railway Variables <code>STOCK_API_URL</code> "
                          "(и <code>STOCK_API_KEY</code>, если нужен ключ).")
         return
@@ -3786,7 +3986,8 @@ async def stockcheck_cmd(msg: Message):
     raw = esc(json.dumps(data, ensure_ascii=False)[:1200])
     for kind, ts in resets.items():
         lines.append(f"{kind}: следующая смена {datetime.fromtimestamp(ts, MSK):%d.%m %H:%M} МСК")
-    lines.append(f"запросов в этом месяце: {await stock_calls_used()}/{STOCK_MONTHLY_LIMIT}")
+    cur = await stock_current_acc()
+    lines.append(f"аккаунт №{cur}: запросов в этом месяце {await stock_calls_used(cur)}/{STOCK_MONTHLY_LIMIT}")
     await reply(msg, "({39})<b>Проверка источника</b>\n<blockquote>" + "\n".join(esc(x) for x in lines) +
                      f"</blockquote>\n<b>Сырой ответ (начало):</b>\n<pre>{raw}</pre>")
 
@@ -3798,12 +3999,47 @@ async def notify_stock_subscribers(kind: str, state: dict) -> None:
     if not rows:
         return
     body = await stock_text(kind, state, True)
+    sent_ids: dict[str, int] = {}
     for r in rows:
         uid = r["user_id"]
         known = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", uid)
         who = mention(uid, known and known["username"], known and known["full_name"])
-        await dm(uid, f"{who} фрукт в стоке!\n{body}")
+        try:
+            sent = await B().send_message(uid, R(f"{who} фрукт в стоке!\n{body}"))
+            sent_ids[str(uid)] = sent.message_id
+        except Exception:
+            pass
         await asyncio.sleep(0.05)  # не упираемся в лимиты Telegram
+    await set_config(f"stock_dm_{kind}", json.dumps(sent_ids))  # чтобы потом пометить сток как истёкший
+
+
+async def take_stock_dms(kind: str) -> dict[str, int]:
+    """Забирает (и стирает) список личных уведомлений о прошлом стоке этого типа."""
+    raw = await get_config(f"stock_dm_{kind}")
+    if not raw:
+        return {}
+    await set_config(f"stock_dm_{kind}", "")
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {}
+
+
+async def expire_stock_dms(kind: str, old: dict, sent: dict[str, int]) -> None:
+    """Личные уведомления о стоке, который истёк: «Истёк 🔴», как в группе."""
+    if not sent or not old.get("items"):
+        return
+    body = await stock_text(kind, old, False)
+    for uid, message_id in sent.items():
+        known = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", int(uid))
+        who = mention(int(uid), known and known["username"], known and known["full_name"])
+        try:
+            await B().edit_message_text(R(f"{who} этот сток больше не активен.\n{body}"),
+                                        chat_id=int(uid), message_id=message_id)
+        except Exception as exc:
+            if "not modified" not in str(exc).lower():
+                LOG.debug("expire stock dm failed: %s", exc)
+        await asyncio.sleep(0.05)
 
 
 STOCK_MENU_TEXT = (f"{e(74)} <b>Сток</b>\n<blockquote>Отметьте фрукты. Когда любой из них появится в Normal "
@@ -3885,7 +4121,7 @@ async def main() -> None:
             BotCommand(command="report", description="Репорт (ответом на сообщение)"),
             BotCommand(command="cancel", description="Отменить действие"),
         ])
-        if STOCK_API_URL:
+        if STOCK_ACCOUNTS:
             _stock_task = asyncio.create_task(stock_loop())
         else:
             LOG.info("STOCK_API_URL не задан — автосток выключен (работает ручная команда /stock)")
