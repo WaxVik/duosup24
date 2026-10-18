@@ -46,7 +46,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.2.0"
+BOT_VERSION = "3.3.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -2047,7 +2047,7 @@ async def menu_nav(cb: CallbackQuery):
     text = (f"({{61}})<b>Навигация и правила</b>\n"
             f"• {link('Рейды', LINKS['raids'])}\n• {link('Трейды', LINKS['trades'])}\n"
             f"• {link('Морские ивенты', LINKS['sea'])}\n• {link('Триалы', LINKS['trials'])}\n")
-    if rules_row:
+    if rules_row and visible_len(rules_row["rule_text"]) <= 2500:  # длинные правила не помещаются — они в теме «Правила»
         text += (f"\n{rules_row['rule_text']}" if rules_row["is_html"]
                  else f"\n<blockquote>{esc(rules_row['rule_text'])}</blockquote>")
     else:
@@ -2055,28 +2055,100 @@ async def menu_nav(cb: CallbackQuery):
     await edit(cb, text, back_only())
 
 
+_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)[^>]*>")
+
+
+def visible_len(text: str) -> int:
+    """Длина текста без HTML-тегов (именно её считает Telegram)."""
+    return len(html.unescape(re.sub(r"<[^>]+>", "", text or "")))
+
+
+def split_html(text: str, limit: int = 3500) -> list[str]:
+    """Режет длинный HTML на части по строкам вне открытых тегов — цитаты и форматирование не ломаются."""
+    blocks, buf, stack = [], [], []
+    for line in text.split("\n"):
+        for m in _TAG_RE.finditer(line):
+            name = m.group(2).lower()
+            if m.group(1):
+                if name in stack:
+                    del stack[len(stack) - 1 - stack[::-1].index(name)]
+            else:
+                stack.append(name)
+        buf.append(line)
+        if not stack:
+            blocks.append("\n".join(buf))
+            buf = []
+    if buf:
+        blocks.append("\n".join(buf))
+    chunks, cur = [], ""
+    for block in blocks:
+        cand = f"{cur}\n{block}" if cur else block
+        if cur and visible_len(cand) > limit:
+            chunks.append(cur)
+            cur = block
+        else:
+            cur = cand
+    if cur:
+        chunks.append(cur)
+    out = []
+    for chunk in chunks:  # один сплошной блок длиннее лимита Telegram — режем по пробелам
+        while visible_len(chunk) > 3900:
+            cut = max(chunk.rfind("\n", 0, 3800), chunk.rfind(" ", 0, 3800))
+            cut = cut if cut > 0 else 3800
+            out.append(chunk[:cut])
+            chunk = chunk[cut:].lstrip()
+        out.append(chunk)
+    return out or [""]
+
+
+async def _send_html_safe(chat_id: int, body: str, thread_id: int | None):
+    try:
+        return await B().send_message(chat_id, body, message_thread_id=thread_id)
+    except Exception as exc:
+        if "parse" not in str(exc).lower() and "entities" not in str(exc).lower():
+            raise
+        plain = html.unescape(re.sub(r"<[^>]+>", "", body))  # если разметка сломалась — отправляем без неё
+        return await B().send_message(chat_id, plain[:4096], message_thread_id=thread_id, parse_mode=None)
+
+
 async def publish_rules(version: str, text: str, is_html: bool = False) -> None:
-    """Правила -> тема «Правила», оповещение -> тема «Оповещения»."""
+    """Правила -> тема «Правила» (длинный текст в нескольких сообщениях), оповещение -> тема «Оповещения»."""
     chat_id = await main_chat()
     if not chat_id:
         return
-    shown = text if is_html else esc(text)  # is_html: текст уже с Premium Emoji и цитатами, как его прислал создатель
-    body = R(f"{e(61)} <b>Правила сообщества HuBBlox</b> • v{esc(version)}\n{SEP}\n{shown}")
-    posted = None
-    saved = await get_config("rules_msg_id")
-    if saved:
-        try:
-            await B().edit_message_text(body, chat_id=chat_id, message_id=int(saved))
-            posted = int(saved)
-        except Exception as exc:
-            if "not modified" in str(exc).lower():
-                posted = int(saved)
+    shown = text if is_html else esc(text)  # is_html: уже с Premium Emoji и цитатами, как прислал создатель
+    header = f"{e(61)} <b>Правила сообщества HuBBlox</b> • v{esc(version)}\n{SEP}\n"
+    bodies = [R((header if i == 0 else "") + part) for i, part in enumerate(split_html(shown))]
+    raw = await get_config("rules_msg_ids")
     try:
-        if not posted:
-            sent = await B().send_message(chat_id, body, message_thread_id=thread(TOPICS["rules"]))
-            posted = sent.message_id
-            await set_config("rules_msg_id", posted)
-        url = msg_url(chat_id, posted)
+        old_ids = [int(x) for x in json.loads(raw)] if raw else []
+    except ValueError:
+        old_ids = []
+    legacy = await get_config("rules_msg_id")
+    if not old_ids and legacy:
+        old_ids = [int(legacy)]
+    try:
+        new_ids = []
+        for i, body in enumerate(bodies):
+            posted = None
+            if i < len(old_ids):
+                try:
+                    await B().edit_message_text(body, chat_id=chat_id, message_id=old_ids[i])
+                    posted = old_ids[i]
+                except Exception as exc:
+                    if "not modified" in str(exc).lower():
+                        posted = old_ids[i]
+            if posted is None:
+                posted = (await _send_html_safe(chat_id, body, thread(TOPICS["rules"]))).message_id
+            new_ids.append(posted)
+        for extra in old_ids[len(bodies):]:  # правила стали короче — лишние сообщения убираем
+            try:
+                await B().delete_message(chat_id, extra)
+            except Exception:
+                pass
+        await set_config("rules_msg_ids", json.dumps(new_ids))
+        await set_config("rules_msg_id", new_ids[0])
+        url = msg_url(chat_id, new_ids[0])
         await B().send_message(chat_id, R(f"{e(26)} <b>Правила обновлены</b> (версия {esc(version)})\nОзнакомьтесь с изменениями."),
                                message_thread_id=thread(TOPICS["announce"]),
                                reply_markup=kb([btn("({26}) Открыть правила", url=url)]) if url else None)
@@ -2094,9 +2166,6 @@ async def setrules_cmd(msg: Message, state: FSMContext):
 
 @dp.message(RulesSt.text, F.text, ~F.text.startswith("/"))
 async def setrules_text(msg: Message, state: FSMContext):
-    if len(msg.text) > 3500:
-        await reply(msg, "({8})Текст слишком длинный (максимум 3500 символов). Сократите и отправьте снова или /cancel.")
-        return
     await state.clear()
     rules_html = msg.html_text.strip()  # сохраняет Premium Emoji, цитаты, жирный/курсив и ссылки
     version = str(1 + int(await pool().fetchval("SELECT COUNT(*) FROM rules") or 0))
@@ -4146,8 +4215,10 @@ async def auto_warn(msg: Message, reason: str) -> None:
         await say(msg, ban_text(m, "Достигнут лимит варнов (4/4)", ban_no, None), appeal_markup([("ban", ban_no)]))
 
 
-SPAM_MSGS = 7        # больше 6 сообщений
-SPAM_WINDOW = 3.0    # за 3 секунды
+SPAM_MSGS = 5        # больше 4 сообщений
+SPAM_WINDOW = 5.0    # за 5 секунд
+SPAM_TYPES = {"text", "photo", "video", "sticker", "animation", "voice", "video_note", "audio",
+              "document", "dice", "poll", "contact", "location", "venue"}  # служебные сообщения не считаются
 _spam_hist: dict[tuple, deque] = {}
 _spam_group: dict[tuple, str] = {}
 
@@ -4155,6 +4226,8 @@ _spam_group: dict[tuple, str] = {}
 async def spam_check(msg: Message) -> None:
     user = msg.from_user
     if not user or user.is_bot or msg.sender_chat or msg.chat.type not in ("group", "supergroup"):
+        return
+    if str(getattr(msg.content_type, "value", msg.content_type)) not in SPAM_TYPES:
         return
     key = (msg.chat.id, user.id)
     if msg.media_group_id:  # альбом из нескольких фото — это одно сообщение
@@ -4255,14 +4328,28 @@ async def panel_list():
         """SELECT m.user_id, m.username, m.level, m.role, k.full_name FROM moderators m
            LEFT JOIN known_users k ON k.user_id = m.user_id
            WHERE m.level>0 AND m.user_id<>$1 ORDER BY m.level DESC, m.user_id""", CREATOR_ID)
-    buttons = []
-    for r in rows:
+    uniques = await pool().fetch(
+        """SELECT u.user_id, u.username, u.role, k.full_name FROM unique_roles u
+           LEFT JOIN known_users k ON k.user_id = u.user_id ORDER BY u.created_at""")
+    buttons, seen = [], {CREATOR_ID}
+
+    def label(r, role):
         name = r["full_name"] or (f"@{r['username']}" if r["username"] else str(r["user_id"]))
-        role = r["role"] or RANK_NAMES[rank_from_level(int(r["level"]))]
-        buttons.append([InlineKeyboardButton(text=f"{name} — {role}"[:60], callback_data=f"ap_u_{r['user_id']}")])
-    buttons.append([InlineKeyboardButton(text="✖️ Закрыть", callback_data="ap_close")])
-    text = (f"{e(21)} <b>Админ-панель</b>\n<blockquote>Выберите администратора.</blockquote>" if rows
-            else f"{e(21)} <b>Админ-панель</b>\nАдминов пока нет.")
+        return f"{name} — {role}"[:60]
+
+    for r in rows:
+        seen.add(r["user_id"])
+        rank = rank_from_level(int(r["level"]))
+        buttons.append([btn(label(r, r["role"] or RANK_NAMES[rank]), f"ap_u_{r['user_id']}",
+                            icon_id=PREMIUM_EMOJI[30 if rank == 2 else 28])])
+    for r in uniques:  # люди с уникальными ролями — тоже в списке
+        if r["user_id"] in seen:
+            continue
+        seen.add(r["user_id"])
+        buttons.append([btn(label(r, r["role"] or "Уникальная роль"), f"ap_u_{r['user_id']}", icon_id=PREMIUM_EMOJI[75])])
+    buttons.append([btn("({14}) Закрыть", "ap_close")])
+    text = (f"{e(21)} <b>Админ-панель</b>\n<blockquote>Выберите человека: админы, главные админы и уникальные роли.</blockquote>"
+            if len(buttons) > 1 else f"{e(21)} <b>Админ-панель</b>\nСписок пуст.")
     return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -4279,7 +4366,9 @@ async def adminpanel_cmd(msg: Message):
         await reply(msg, "({8})Админ-панель работает только в чате администрации.")
         return
     text, markup = await panel_list()
-    await msg.answer(R(text), reply_markup=markup, **thread_kwargs(msg))
+    # панель — в той теме админ-чата, где написана команда; из общей темы — в тему «Чат админов»
+    tid = topic_of(msg) or thread(TOPICS["mod_chat"])
+    await B().send_message(msg.chat.id, R(text), reply_markup=markup, message_thread_id=tid)
 
 
 @dp.callback_query(F.data == "ap_close")
@@ -4306,21 +4395,19 @@ async def ap_user(cb: CallbackQuery):
         await cb.answer("⛔ Только создатель.", show_alert=True)
         return
     uid = int(cb.data.removeprefix("ap_u_"))
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Telegram разрешения", callback_data=f"ap_tg_{uid}")],
-        [InlineKeyboardButton(text="DuoSup разрешения", callback_data=f"ap_ds_{uid}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="ap_list")],
-    ])
+    markup = kb([btn("({21}) Telegram разрешения", f"ap_tg_{uid}")],
+                [btn("({40}) DuoSup разрешения", f"ap_ds_{uid}")],
+                [btn("({63}) Назад", "ap_list")])
     await edit(cb, f"{e(21)} <b>Админ:</b> {await person_html(uid)}\n<blockquote>Выберите раздел разрешений.</blockquote>", markup)
 
 
 async def tg_rights_view(uid: int):
     rights = await get_rights(uid)
     rows = []
-    for key, title, _, _ in PERM_RIGHTS:
-        mark = "✅" if rights.get(key) else "❌"
-        rows.append([InlineKeyboardButton(text=f"{mark} {title}", callback_data=f"ap_tgt_{uid}_{key}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ap_u_{uid}")])
+    for key, title, emoji_n, _ in PERM_RIGHTS:
+        mark = "✅ " if rights.get(key) else "❌ "
+        rows.append([btn(f"({{{emoji_n}}}) {mark}{title}", f"ap_tgt_{uid}_{key}")])
+    rows.append([btn("({63}) Назад", f"ap_u_{uid}")])
     text = (f"{e(21)} <b>Telegram разрешения</b>\n{await person_html(uid)}\n"
             "<blockquote>Нажмите на право, чтобы включить или выключить. "
             "Изменения сразу применяются во всех чатах.</blockquote>")
@@ -4349,7 +4436,8 @@ async def ap_tg_toggle(cb: CallbackQuery):
     rights = await get_rights(uid)
     rights[key] = not rights.get(key)
     role = (await pool().fetchval("SELECT role FROM admin_rights WHERE user_id=$1", uid)
-            or await pool().fetchval("SELECT role FROM moderators WHERE user_id=$1", uid) or "Админ")
+            or await pool().fetchval("SELECT role FROM moderators WHERE user_id=$1", uid)
+            or await pool().fetchval("SELECT role FROM unique_roles WHERE user_id=$1", uid) or "Админ")
     await pool().execute(
         """INSERT INTO admin_rights (user_id, role, rights, updated_at) VALUES ($1,$2,$3::jsonb,$4)
            ON CONFLICT (user_id) DO UPDATE SET rights=$3::jsonb, updated_at=$4""",
@@ -4371,8 +4459,8 @@ async def ds_view(uid: int):
     rows = []
     for key, title, min_rank in CMD_PERMS:
         allowed = override.get(key, rank >= min_rank)
-        rows.append([InlineKeyboardButton(text=f"{'✅' if allowed else '❌'} {title}", callback_data=f"ap_dst_{uid}_{key}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ap_u_{uid}")])
+        rows.append([btn(f"({{{20 if allowed else 14}}}) {title}", f"ap_dst_{uid}_{key}")])
+    rows.append([btn("({63}) Назад", f"ap_u_{uid}")])
     text = (f"{e(21)} <b>DuoSup разрешения</b>\n{await person_html(uid)}\n"
             "<blockquote>✅ — команда разрешена, ❌ — запрещена. Нажмите, чтобы переключить.</blockquote>")
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
