@@ -46,7 +46,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.3.0"
+BOT_VERSION = "3.3.1"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -3693,14 +3693,18 @@ async def _request_stock(acc: dict):
         name, _, value = pair.partition(":")  # формат: Имя:значение,Имя2:значение2
         if name.strip() and value.strip():
             headers[name.strip()] = value.strip()
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(acc["url"], headers=headers) as resp:
-            body = await resp.text()
-            if _credits_exhausted(resp.status, body):
-                raise StockCreditsOut()
-            if resp.status >= 400:
-                raise RuntimeError(f"HTTP {resp.status}: {body[:200]}")
+    limit = env_int("STOCK_API_TIMEOUT", 90)  # Parse.bot собирает данные «вживую», это бывает долго
+    timeout = aiohttp.ClientTimeout(total=limit)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(acc["url"], headers=headers) as resp:
+                body = await resp.text()
+                if _credits_exhausted(resp.status, body):
+                    raise StockCreditsOut()
+                if resp.status >= 400:
+                    raise RuntimeError(f"HTTP {resp.status}: {body[:200]}")
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(f"источник (аккаунт {acc['n']}) не ответил за {limit} с — Parse.bot не успел собрать данные") from exc
     try:
         data = json.loads(body)
     except ValueError as exc:
@@ -3928,8 +3932,10 @@ async def _notify_stock_error(text: str) -> None:
     if now - _err_notice.get(text, 0) < 6 * 3600:
         return
     _err_notice[text] = now
-    await dm(CREATOR_ID, f"{e(8)} <b>Автосток: ошибка</b>\n<blockquote>{esc(text)[:600]}</blockquote>\n"
-                         "Проверьте: бот админ в основном чате, тема «Стоки 24/7» существует, чаты связаны (/link_hublox).")
+    hint = ("Это не проблема чатов: источник не успел ответить. Бот повторит проверку сам."
+            if "не ответил" in text else
+            "Проверьте: бот админ в основном чате, тема «Стоки 24/7» существует, чаты связаны (/link_hublox).")
+    await dm(CREATOR_ID, f"{e(8)} <b>Автосток: ошибка</b>\n<blockquote>{esc(text)[:600]}</blockquote>\n{hint}")
 
 
 async def stock_loop() -> None:
