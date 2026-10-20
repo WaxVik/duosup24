@@ -46,7 +46,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.3.2"
+BOT_VERSION = "3.4.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -3684,7 +3684,7 @@ def _credits_exhausted(status: int, body: str) -> bool:
     return status >= 400 and ("credit" in low or "quota" in low)
 
 
-def _stock_headers(acc: dict) -> dict:
+async def _request_stock(acc: dict):
     headers = {STOCK_API_KEY_HEADER: acc["key"]} if acc["key"] else {}
     snapshot = os.getenv("STOCK_API_SNAPSHOT", "").strip()  # нужен только если в curl-примере API есть API-Snapshot-Version
     if snapshot:
@@ -3693,37 +3693,14 @@ def _stock_headers(acc: dict) -> dict:
         name, _, value = pair.partition(":")  # формат: Имя:значение,Имя2:значение2
         if name.strip() and value.strip():
             headers[name.strip()] = value.strip()
-    return headers
-
-
-async def probe_account(acc: dict, limit: int = 60) -> tuple[str, str]:
-    """Диагностика одного аккаунта: что отвечает адрес и за сколько. Данные не разбираются и не сохраняются."""
-    started = _time.monotonic()
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=limit)) as session:
-            async with session.get(acc["url"], headers=_stock_headers(acc)) as resp:
-                body = await resp.text()
-                return f"HTTP {resp.status} за {_time.monotonic() - started:.1f} с", body[:700]
-    except asyncio.TimeoutError:
-        return f"нет ответа за {limit} с", ""
-    except Exception as exc:
-        return f"{type(exc).__name__}: {exc} (за {_time.monotonic() - started:.1f} с)", ""
-
-
-async def _request_stock(acc: dict):
-    headers = _stock_headers(acc)
-    limit = env_int("STOCK_API_TIMEOUT", 90)  # Parse.bot собирает данные «вживую», это бывает долго
-    timeout = aiohttp.ClientTimeout(total=limit)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(acc["url"], headers=headers) as resp:
-                body = await resp.text()
-                if _credits_exhausted(resp.status, body):
-                    raise StockCreditsOut()
-                if resp.status >= 400:
-                    raise RuntimeError(f"HTTP {resp.status}: {body[:200]}")
-    except asyncio.TimeoutError as exc:
-        raise RuntimeError(f"источник (аккаунт {acc['n']}) не ответил за {limit} с — Parse.bot не успел собрать данные") from exc
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(acc["url"], headers=headers) as resp:
+            body = await resp.text()
+            if _credits_exhausted(resp.status, body):
+                raise StockCreditsOut()
+            if resp.status >= 400:
+                raise RuntimeError(f"HTTP {resp.status}: {body[:200]}")
     try:
         data = json.loads(body)
     except ValueError as exc:
@@ -3825,6 +3802,12 @@ async def publish_stock(kind: str, items: list, force: bool = False, epoch: int 
             started = datetime.fromtimestamp(epoch - STOCK_NEXT_HOURS[kind] * 3600, MSK).strftime("%H:%M")
         else:
             started = datetime.now(MSK).strftime("%H:00")
+        for extra_id in old.get("old_msgs", []):  # повторные публикации, которые не удалось стереть
+            try:
+                await B().edit_message_text(R(await stock_text(kind, old, False)), chat_id=chat_id,
+                                            message_id=extra_id, reply_markup=None)
+            except Exception:
+                pass
         old_dms = await take_stock_dms(kind)  # личные уведомления о прошлом стоке
         state = {"keys": keys, "items": resolved, "time": started, "epoch": epoch, "msg": None}
         sent = await B().send_message(chat_id, R(await stock_text(kind, state, True)),
@@ -3951,10 +3934,8 @@ async def _notify_stock_error(text: str) -> None:
     if now - _err_notice.get(text, 0) < 6 * 3600:
         return
     _err_notice[text] = now
-    hint = ("Это не проблема чатов: источник не успел ответить. Бот повторит проверку сам."
-            if "не ответил" in text else
-            "Проверьте: бот админ в основном чате, тема «Стоки 24/7» существует, чаты связаны (/link_hublox).")
-    await dm(CREATOR_ID, f"{e(8)} <b>Автосток: ошибка</b>\n<blockquote>{esc(text)[:600]}</blockquote>\n{hint}")
+    await dm(CREATOR_ID, f"{e(8)} <b>Автосток: ошибка</b>\n<blockquote>{esc(text)[:600]}</blockquote>\n"
+                         "Проверьте: бот админ в основном чате, тема «Стоки 24/7» существует, чаты связаны (/link_hublox).")
 
 
 async def stock_loop() -> None:
@@ -4005,6 +3986,46 @@ async def stock_cmd(msg: Message):
     period = STOCK_NEXT_HOURS[kind] * 3600
     await publish_stock(kind, items, force=True, epoch=(now_ts() // period + 1) * period)
     await reply(msg, f"({{20}})Сток {kind} опубликован.")
+
+
+@dp.message(Command("stockpublish"))
+async def stockpublish_cmd(msg: Message):
+    """/stockpublish [normal|mirage] — ещё раз отправить текущий сток. Время, таймер и автопроверка не меняются."""
+    import json
+    if not await redact_zone(msg):
+        return
+    chat_id = await main_chat()
+    if not chat_id:
+        await reply(msg, "({8})Основной чат ещё не привязан (/link_hublox).")
+        return
+    kinds = [a.lower() for a in command_args(msg) if a.lower() in STOCK_NEXT_HOURS] or list(STOCK_NEXT_HOURS)
+    done, skipped = [], []
+    for kind in kinds:
+        async with lock_for("stock", kind):
+            state = await stock_state(kind)
+            if not state.get("items"):
+                skipped.append(f"{kind}: сток ещё не публиковался")
+                continue
+            epoch = state.get("epoch")
+            if epoch and epoch <= now_ts():  # не выкладываем сток, который уже сменился
+                skipped.append(f"{kind}: этот сток уже закончился, ждите новый")
+                continue
+            old_id = state.get("msg")
+            sent = await B().send_message(chat_id, R(await stock_text(kind, state, True)),
+                                          message_thread_id=thread(TOPICS["stock"]))
+            if old_id:
+                try:
+                    await B().delete_message(chat_id, old_id)
+                except Exception:  # не удалилось — запомним, чтобы пометить «Истёк», когда сток сменится
+                    state.setdefault("old_msgs", []).append(old_id)
+            state["msg"] = sent.message_id  # время, таймер и список фруктов остаются прежними
+            await set_config(f"stock_{kind}", json.dumps(state))
+            done.append(kind)
+    lines = []
+    if done:
+        lines.append(f"({{20}})Сток отправлен ещё раз: <b>{esc(', '.join(done))}</b>. Таймер не менялся.")
+    lines += [f"({{8}}){esc(x)}" for x in skipped]
+    await reply(msg, "\n".join(lines))
 
 
 @dp.message(Command("startstock"))
@@ -4105,21 +4126,10 @@ async def stockcheck_cmd(msg: Message):
                          "(и <code>STOCK_API_KEY</code>, если нужен ключ).")
         return
     import json
-    args = command_args(msg)
-    if args and args[0].isdigit():  # /stockcheck 2 — проверить конкретный аккаунт (запрос может потратить кредит Parse)
-        acc = next((a for a in STOCK_ACCOUNTS if a["n"] == int(args[0])), None)
-        if not acc:
-            await reply(msg, f"({{8}})Аккаунта {esc(args[0])} нет. Подключено: {len(STOCK_ACCOUNTS)}.")
-            return
-        verdict, body = await probe_account(acc)
-        await reply(msg, f"({{39}})<b>Аккаунт {acc['n']}</b>\n<blockquote>{esc(verdict)}</blockquote>"
-                         + (f"\n<b>Ответ (начало):</b>\n<pre>{esc(body)}</pre>" if body else ""))
-        return
     try:
         data = await fetch_stock_json()
     except Exception as exc:
-        await reply(msg, f"({{14}})Источник не ответил: <code>{esc(exc)}</code>\n"
-                         "Проверить аккаунт отдельно: <code>/stockcheck 1</code> (или 2, 3, 4).")
+        await reply(msg, f"({{14}})Источник не ответил: <code>{esc(exc)}</code>")
         return
     parsed = extract_stock(data)
     resets = extract_resets(data)
