@@ -46,7 +46,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.3.1"
+BOT_VERSION = "3.3.2"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -3684,7 +3684,7 @@ def _credits_exhausted(status: int, body: str) -> bool:
     return status >= 400 and ("credit" in low or "quota" in low)
 
 
-async def _request_stock(acc: dict):
+def _stock_headers(acc: dict) -> dict:
     headers = {STOCK_API_KEY_HEADER: acc["key"]} if acc["key"] else {}
     snapshot = os.getenv("STOCK_API_SNAPSHOT", "").strip()  # нужен только если в curl-примере API есть API-Snapshot-Version
     if snapshot:
@@ -3693,6 +3693,25 @@ async def _request_stock(acc: dict):
         name, _, value = pair.partition(":")  # формат: Имя:значение,Имя2:значение2
         if name.strip() and value.strip():
             headers[name.strip()] = value.strip()
+    return headers
+
+
+async def probe_account(acc: dict, limit: int = 60) -> tuple[str, str]:
+    """Диагностика одного аккаунта: что отвечает адрес и за сколько. Данные не разбираются и не сохраняются."""
+    started = _time.monotonic()
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=limit)) as session:
+            async with session.get(acc["url"], headers=_stock_headers(acc)) as resp:
+                body = await resp.text()
+                return f"HTTP {resp.status} за {_time.monotonic() - started:.1f} с", body[:700]
+    except asyncio.TimeoutError:
+        return f"нет ответа за {limit} с", ""
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc} (за {_time.monotonic() - started:.1f} с)", ""
+
+
+async def _request_stock(acc: dict):
+    headers = _stock_headers(acc)
     limit = env_int("STOCK_API_TIMEOUT", 90)  # Parse.bot собирает данные «вживую», это бывает долго
     timeout = aiohttp.ClientTimeout(total=limit)
     try:
@@ -4086,10 +4105,21 @@ async def stockcheck_cmd(msg: Message):
                          "(и <code>STOCK_API_KEY</code>, если нужен ключ).")
         return
     import json
+    args = command_args(msg)
+    if args and args[0].isdigit():  # /stockcheck 2 — проверить конкретный аккаунт (запрос может потратить кредит Parse)
+        acc = next((a for a in STOCK_ACCOUNTS if a["n"] == int(args[0])), None)
+        if not acc:
+            await reply(msg, f"({{8}})Аккаунта {esc(args[0])} нет. Подключено: {len(STOCK_ACCOUNTS)}.")
+            return
+        verdict, body = await probe_account(acc)
+        await reply(msg, f"({{39}})<b>Аккаунт {acc['n']}</b>\n<blockquote>{esc(verdict)}</blockquote>"
+                         + (f"\n<b>Ответ (начало):</b>\n<pre>{esc(body)}</pre>" if body else ""))
+        return
     try:
         data = await fetch_stock_json()
     except Exception as exc:
-        await reply(msg, f"({{14}})Источник не ответил: <code>{esc(exc)}</code>")
+        await reply(msg, f"({{14}})Источник не ответил: <code>{esc(exc)}</code>\n"
+                         "Проверить аккаунт отдельно: <code>/stockcheck 1</code> (или 2, 3, 4).")
         return
     parsed = extract_stock(data)
     resets = extract_resets(data)
