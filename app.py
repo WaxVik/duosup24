@@ -46,7 +46,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.4.0"
+BOT_VERSION = "3.4.1"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -3783,6 +3783,8 @@ async def publish_stock(kind: str, items: list, force: bool = False, epoch: int 
     async with lock_for("stock", kind):
         old = await stock_state(kind)
         if not force:
+            if epoch is not None and old.get("epoch") and epoch < old["epoch"]:
+                return False  # это более старый сток, чем уже опубликованный
             if epoch is not None and old.get("epoch") is None and old.get("keys") == keys and old.get("msg"):
                 old["epoch"] = epoch  # тот же сток, опубликованный вручную — не дублируем
                 await set_config(f"stock_{kind}", json.dumps(old))
@@ -3854,6 +3856,7 @@ async def stock_tick() -> int:
     parsed = extract_stock(data)
     resets = extract_resets(data)  # источник может не отдавать время смены — тогда считаем по часам
     stale_clock = False
+    stale_src = False
     for kind in ("mirage", "normal"):
         items = parsed.get(kind) or []
         if len(items) < STOCK_MIN_ITEMS:
@@ -3861,6 +3864,11 @@ async def stock_tick() -> int:
                 LOG.warning("stock %s: слишком мало фруктов (%s) — пропускаю", kind, len(items))
             continue
         epoch = resets.get(kind)
+        if epoch is not None and epoch <= now:
+            # источник отдал сток, у которого время смены уже прошло, — это прошлый сток, не публикуем
+            stale_src = True
+            LOG.warning("stock %s: источник вернул уже закончившийся сток — пропускаю", kind)
+            continue
         if epoch is None:
             period = STOCK_NEXT_HOURS[kind] * 3600
             epoch = (now // period + 1) * period  # ближайшая смена (Normal каждые 4 ч, Mirage каждые 2 ч по UTC)
@@ -3871,6 +3879,10 @@ async def stock_tick() -> int:
                 continue
         if await publish_stock(kind, items, epoch=epoch):
             LOG.info("stock %s опубликован: %s", kind, ", ".join(k for k, _ in items))
+    if stale_src and _stale < STOCK_RETRY_TRIES:  # источник ещё не обновился — быстро проверим снова
+        _stale += 1
+        _cached = None
+        return STOCK_RETRY_SECONDS
     anchor = await get_config("stock_anchor")
     if anchor:  # расписание задано командой /startstock: проверки каждые 2 часа от указанной минуты (МСК)
         if stale_clock and _stale < STOCK_RETRY_TRIES:
