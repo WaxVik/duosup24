@@ -46,7 +46,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.4.1"
+BOT_VERSION = "3.5.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -561,7 +561,18 @@ CMD_PERMS = [  # (ключ, название, ранг, которому ком�
     ("unban", "/unban — снять бан", 2),
     ("del", "/del — удалить сообщение", 2),
     ("award", "Наградить — выдать награду", 1),
+    ("appeals", "Апелляции — рассматривать", 2),
+    ("reports", "Репорты — рассматривать", 1),
+    ("questions", "Вопросы — отвечать", 2),
 ]
+PERMS_DEFAULT_OFF = {"appeals", "reports", "questions"}  # эти права по умолчанию выключены у всех, кроме создателя
+PERMS_ALL_OFF = os.getenv("PERMS_ALL_OFF", "").strip().lower() in ("1", "true", "yes")  # =1 — выключить по умолчанию вообще всё
+
+
+async def perm_default(user_id: int, cmd: str, min_rank: int) -> bool:
+    if PERMS_ALL_OFF or cmd in PERMS_DEFAULT_OFF:
+        return False
+    return await rank_of(user_id) >= min_rank
 
 
 async def cmd_overrides(user_id: int) -> dict:
@@ -579,7 +590,7 @@ async def can_use(user_id: int, cmd: str, min_rank: int) -> bool:
     override = await cmd_overrides(user_id)
     if cmd in override:
         return bool(override[cmd])
-    return await rank_of(user_id) >= min_rank
+    return await perm_default(user_id, cmd, min_rank)
 
 
 async def user_row(user_id: int):
@@ -3063,14 +3074,17 @@ async def appeal_text(msg: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("apd_"))
 async def appeal_decide(cb: CallbackQuery):
-    if await rank_of(cb.from_user.id) < 2:
-        await cb.answer("⛔ Апелляции рассматривают главные админы и создатель.", show_alert=True)
+    if not await can_use(cb.from_user.id, "appeals", 2):
+        await cb.answer("⛔ У вас нет права рассматривать апелляции.", show_alert=True)
         return
     _, verdict, appeal_id = cb.data.split("_")
     async with lock_for("appeal", int(appeal_id)):
         ap = await pool().fetchrow("SELECT * FROM appeals WHERE id=$1", int(appeal_id))
         if not ap or ap["status"] != "pending":
             await cb.answer("Апелляция уже рассмотрена.", show_alert=True)
+            return
+        if ap["user_id"] == cb.from_user.id:  # защита: свою апелляцию рассматривать нельзя
+            await cb.answer("⛔ Нельзя рассматривать собственную апелляцию. Её рассмотрит другой админ.", show_alert=True)
             return
         approved = verdict == "y"
         await pool().execute("UPDATE appeals SET status=$2 WHERE id=$1", ap["id"], "approved" if approved else "rejected")
@@ -3151,8 +3165,8 @@ async def report_cmd(msg: Message):
 
 @dp.callback_query(F.data.startswith("rep_done_"))
 async def report_done(cb: CallbackQuery):
-    if await rank_of(cb.from_user.id) < 1:
-        await cb.answer("⛔ Недостаточно прав.", show_alert=True)
+    if not await can_use(cb.from_user.id, "reports", 1):
+        await cb.answer("⛔ У вас нет права рассматривать репорты.", show_alert=True)
         return
     rid = int(cb.data.split("_")[2])
     row = await pool().fetchrow("SELECT * FROM reports WHERE id=$1", rid)
@@ -3170,14 +3184,34 @@ async def report_done(cb: CallbackQuery):
 
 
 # ============================ ВОПРОС | ОТВЕТ ============================
+QUESTION_COOLDOWN = 15 * 60  # вопрос можно задавать раз в 15 минут
+
+
+async def question_wait(user_id: int) -> int:
+    """Сколько секунд осталось до следующего вопроса (0 — можно)."""
+    if user_id == CREATOR_ID:
+        return 0
+    last = await pool().fetchval("SELECT MAX(created_at) FROM questions WHERE user_id=$1", user_id)
+    return max(0, int(last) + QUESTION_COOLDOWN - now_ts()) if last else 0
+
+
 @dp.callback_query(F.data == "menu_question")
 async def menu_question(cb: CallbackQuery, state: FSMContext):
+    wait = await question_wait(cb.from_user.id)
+    if wait:
+        await cb.answer(f"⏳ Следующий вопрос можно задать через {-(-wait // 60)} мин.", show_alert=True)
+        return
     await state.set_state(QuestionSt.text)
     await edit(cb, "({60})<b>Вопрос | ответ</b>\nНапишите ваш вопрос одним сообщением.", back_only())
 
 
 @dp.message(QuestionSt.text, F.text, ~F.text.startswith("/"))
 async def question_text(msg: Message, state: FSMContext):
+    wait = await question_wait(msg.from_user.id)
+    if wait:
+        await state.clear()
+        await reply(msg, f"({{8}})Следующий вопрос можно задать через {-(-wait // 60)} мин.", main_menu())
+        return
     text = msg.text.strip()[:1000]
     user = msg.from_user
     async with pool().acquire() as conn:
@@ -3196,8 +3230,8 @@ async def question_text(msg: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("qans_"))
 async def question_answer_start(cb: CallbackQuery, state: FSMContext):
-    if await rank_of(cb.from_user.id) < 2:
-        await cb.answer("⛔ На вопросы отвечают главные админы и создатель.", show_alert=True)
+    if not await can_use(cb.from_user.id, "questions", 2):
+        await cb.answer("⛔ У вас нет права отвечать на вопросы.", show_alert=True)
         return
     qid = int(cb.data.split("_")[1])
     q = await pool().fetchrow("SELECT * FROM questions WHERE id=$1", qid)
@@ -3772,8 +3806,87 @@ async def stock_text(kind: str, state: dict, active: bool) -> str:
     return f"{head}\n{title}\n<blockquote>{body}</blockquote>\n{stock_footer()}"
 
 
+async def stock_section(kind: str, state: dict) -> str:
+    """Блок одного вида стока: текущий (Активен/Истёк) и под ним, свёрнуто, прошлый сток."""
+    icons = await fruit_icons()
+    names = dict(FRUITS)
+
+    def body(items) -> str:
+        lines = []
+        for key, price in sorted(items, key=lambda x: x[1]):
+            price_text = f"${price:,}" if price else "—"
+            lines.append(f"{custom_emoji_html(icons.get(key), '▪️')} {esc(names.get(key, key))} • {price_text}")
+        return "\n".join(lines)
+
+    def title(when: str) -> str:
+        return (f"{e(30)} Mirage Stock" if kind == "mirage" else f"{e(74)} Normal Stock") + f" ({esc(when)} МСК)"
+
+    epoch = state.get("epoch")
+    active = not (epoch and epoch <= now_ts())  # время смены прошло, нового стока ещё нет — показываем «Истёк»
+    head = f"Активен {e(62)}" if active else f"Истёк {e(76)}"
+    text = f"{head}\\n{title(state['time'])}\\n<blockquote>{body(state['items'])}</blockquote>"
+    prev = state.get("prev")
+    if prev and prev.get("items"):
+        text += f"\\nИстёк {e(76)}\\n{title(prev['time'])}\\n<blockquote expandable>{body(prev['items'])}</blockquote>"
+    return text
+
+
+async def render_stock_message() -> str | None:
+    blocks, upcoming = [], []
+    for kind in ("normal", "mirage"):
+        st = await stock_state(kind)
+        if not st.get("items"):
+            continue
+        blocks.append(await stock_section(kind, st))
+        if st.get("epoch") and st["epoch"] > now_ts():
+            upcoming.append(f"{kind.capitalize()} в {datetime.fromtimestamp(st['epoch'], MSK).strftime('%H:%M')}")
+    if not blocks:
+        return None
+    tail = f"\\n\\n{e(11)} <i>Следующее обновление: {' • '.join(upcoming)} МСК</i>" if upcoming else ""
+    return "\\n\\n".join(blocks) + f"\\n\\n{stock_footer()}" + tail
+
+
+async def refresh_stock_message(chat_id: int | None, resend: bool = False) -> int | None:
+    """Единое сообщение стока: правит существующее (или отправляет заново, если resend / его удалили)."""
+    import json
+    if not chat_id:
+        return None
+    text = await render_stock_message()
+    if not text:
+        return None
+    async with lock_for("stock_msg"):
+        mid = int(await get_config("stock_msg") or 0)
+        if mid and not resend:
+            try:
+                await B().edit_message_text(R(text), chat_id=chat_id, message_id=mid, reply_markup=None)
+                return mid
+            except Exception as exc:
+                low = str(exc).lower()
+                if "not modified" in low:
+                    return mid
+                if not any(w in low for w in ("not found", "can't be edited", "message_id_invalid")):
+                    raise  # временный сбой — новое сообщение не плодим
+        elif mid:
+            try:
+                await B().delete_message(chat_id, mid)
+            except Exception:
+                pass
+        sent = await B().send_message(chat_id, R(text), message_thread_id=thread(TOPICS["stock"]))
+        await set_config("stock_msg", sent.message_id)
+        for kind in ("normal", "mirage"):  # прежние отдельные посты (до единого сообщения) убираем
+            st = await stock_state(kind)
+            if st.get("msg"):
+                try:
+                    await B().delete_message(chat_id, st["msg"])
+                except Exception:
+                    pass
+                st["msg"] = None
+                await set_config(f"stock_{kind}", json.dumps(st))
+        return sent.message_id
+
+
 async def publish_stock(kind: str, items: list, force: bool = False, epoch: int | None = None) -> bool:
-    """Старый пост -> «Истёк 🔴», новый -> «Активен 🟢». False, если сток не изменился."""
+    """Обновляет единое сообщение стока: прошлый сток этого вида -> «Истёк 🔴», новый -> «Активен 🟢». False, если сток не изменился."""
     import json
     chat_id = await main_chat()
     if not chat_id:
@@ -3785,7 +3898,7 @@ async def publish_stock(kind: str, items: list, force: bool = False, epoch: int 
         if not force:
             if epoch is not None and old.get("epoch") and epoch < old["epoch"]:
                 return False  # это более старый сток, чем уже опубликованный
-            if epoch is not None and old.get("epoch") is None and old.get("keys") == keys and old.get("msg"):
+            if epoch is not None and old.get("epoch") is None and old.get("keys") == keys and old.get("items"):
                 old["epoch"] = epoch  # тот же сток, опубликованный вручную — не дублируем
                 await set_config(f"stock_{kind}", json.dumps(old))
                 return False
@@ -3793,29 +3906,19 @@ async def publish_stock(kind: str, items: list, force: bool = False, epoch: int 
                 return False
             if epoch is None and old.get("keys") == keys:
                 return False
-        if old.get("msg"):
-            try:
-                await B().edit_message_text(R(await stock_text(kind, old, False)), chat_id=chat_id,
-                                            message_id=old["msg"], reply_markup=None)
-            except Exception as exc:
-                if "not modified" not in str(exc).lower():
-                    LOG.warning("expire stock failed: %s", exc)
         if epoch:  # сток начался за период до следующей смены
             started = datetime.fromtimestamp(epoch - STOCK_NEXT_HOURS[kind] * 3600, MSK).strftime("%H:%M")
         else:
             started = datetime.now(MSK).strftime("%H:00")
-        for extra_id in old.get("old_msgs", []):  # повторные публикации, которые не удалось стереть
-            try:
-                await B().edit_message_text(R(await stock_text(kind, old, False)), chat_id=chat_id,
-                                            message_id=extra_id, reply_markup=None)
-            except Exception:
-                pass
-        old_dms = await take_stock_dms(kind)  # личные уведомления о прошлом стоке
-        state = {"keys": keys, "items": resolved, "time": started, "epoch": epoch, "msg": None}
-        sent = await B().send_message(chat_id, R(await stock_text(kind, state, True)),
-                                      message_thread_id=thread(TOPICS["stock"]))
-        state["msg"] = sent.message_id
+        prev = {"items": old["items"], "time": old["time"]} if old.get("items") else None
+        state = {"keys": keys, "items": resolved, "time": started, "epoch": epoch, "msg": None, "prev": prev}
         await set_config(f"stock_{kind}", json.dumps(state))
+        try:
+            await refresh_stock_message(chat_id)
+        except Exception:
+            await set_config(f"stock_{kind}", json.dumps(old))  # откат — повторим при следующей проверке
+            raise
+        old_dms = await take_stock_dms(kind)  # личные уведомления о прошлом стоке
     try:
         await expire_stock_dms(kind, old, old_dms)
     except Exception:
@@ -3879,6 +3982,10 @@ async def stock_tick() -> int:
                 continue
         if await publish_stock(kind, items, epoch=epoch):
             LOG.info("stock %s опубликован: %s", kind, ", ".join(k for k, _ in items))
+    try:  # сток, у которого время смены прошло, помечается «Истёк» в едином сообщении
+        await refresh_stock_message(await main_chat())
+    except Exception as exc:
+        LOG.warning("stock message refresh failed: %s", exc)
     if stale_src and _stale < STOCK_RETRY_TRIES:  # источник ещё не обновился — быстро проверим снова
         _stale += 1
         _cached = None
@@ -4002,42 +4109,18 @@ async def stock_cmd(msg: Message):
 
 @dp.message(Command("stockpublish"))
 async def stockpublish_cmd(msg: Message):
-    """/stockpublish [normal|mirage] — ещё раз отправить текущий сток. Время, таймер и автопроверка не меняются."""
-    import json
+    """/stockpublish — отправить единое сообщение стока ещё раз. Время, таймер и автопроверка не меняются."""
     if not await redact_zone(msg):
         return
     chat_id = await main_chat()
     if not chat_id:
         await reply(msg, "({8})Основной чат ещё не привязан (/link_hublox).")
         return
-    kinds = [a.lower() for a in command_args(msg) if a.lower() in STOCK_NEXT_HOURS] or list(STOCK_NEXT_HOURS)
-    done, skipped = [], []
-    for kind in kinds:
-        async with lock_for("stock", kind):
-            state = await stock_state(kind)
-            if not state.get("items"):
-                skipped.append(f"{kind}: сток ещё не публиковался")
-                continue
-            epoch = state.get("epoch")
-            if epoch and epoch <= now_ts():  # не выкладываем сток, который уже сменился
-                skipped.append(f"{kind}: этот сток уже закончился, ждите новый")
-                continue
-            old_id = state.get("msg")
-            sent = await B().send_message(chat_id, R(await stock_text(kind, state, True)),
-                                          message_thread_id=thread(TOPICS["stock"]))
-            if old_id:
-                try:
-                    await B().delete_message(chat_id, old_id)
-                except Exception:  # не удалилось — запомним, чтобы пометить «Истёк», когда сток сменится
-                    state.setdefault("old_msgs", []).append(old_id)
-            state["msg"] = sent.message_id  # время, таймер и список фруктов остаются прежними
-            await set_config(f"stock_{kind}", json.dumps(state))
-            done.append(kind)
-    lines = []
-    if done:
-        lines.append(f"({{20}})Сток отправлен ещё раз: <b>{esc(', '.join(done))}</b>. Таймер не менялся.")
-    lines += [f"({{8}}){esc(x)}" for x in skipped]
-    await reply(msg, "\n".join(lines))
+    if not await render_stock_message():
+        await reply(msg, "({8})Сток ещё не публиковался.")
+        return
+    await refresh_stock_message(chat_id, resend=True)
+    await reply(msg, "({20})Сток отправлен ещё раз одним сообщением. Таймер не менялся.")
 
 
 @dp.message(Command("startstock"))
@@ -4117,12 +4200,14 @@ async def stockstatus_cmd(msg: Message):
     chat_id = await main_chat()
     for kind in ("normal", "mirage"):
         st = await stock_state(kind)
-        if st.get("msg"):
-            url = msg_url(chat_id or 0, st["msg"])
+        if st.get("items"):
             nxt = fmt(st["epoch"]) if st.get("epoch") else "—"
-            lines.append(f"{kind}: пост {st['time']} МСК, след. смена {nxt}" + (f" • {url}" if url else ""))
+            lines.append(f"{kind}: сток {st['time']} МСК, след. смена {nxt}")
         else:
             lines.append(f"{kind}: ещё не публиковался")
+    stock_mid = await get_config("stock_msg")
+    if stock_mid and chat_id and msg_url(chat_id, int(stock_mid)):
+        lines.append(f"Сообщение стока: {msg_url(chat_id, int(stock_mid))}")
     if not chat_id:
         lines.append("ВНИМАНИЕ: основной чат не привязан (/link_hublox)")
     await reply(msg, "({21})<b>Автосток</b>\n<blockquote>" + "\n".join(esc(x) for x in lines) + "</blockquote>")
@@ -4275,8 +4360,8 @@ async def auto_warn(msg: Message, reason: str) -> None:
 
 SPAM_MSGS = 5        # больше 4 сообщений
 SPAM_WINDOW = 5.0    # за 5 секунд
-SPAM_TYPES = {"text", "photo", "video", "sticker", "animation", "voice", "video_note", "audio",
-              "document", "dice", "poll", "contact", "location", "venue"}  # служебные сообщения не считаются
+SPAM_TYPES = {"text", "sticker", "animation", "voice", "video_note", "audio",
+              "document", "dice", "poll", "contact", "location", "venue"}  # фото и видео не считаются  # служебные сообщения не считаются
 _spam_hist: dict[tuple, deque] = {}
 _spam_group: dict[tuple, str] = {}
 
@@ -4304,10 +4389,13 @@ async def spam_check(msg: Message) -> None:
     hist.clear()
     if msg.chat.id != await main_chat():
         return
-    if user.id == CREATOR_ID or await rank_of(user.id) > 0 or await is_tg_admin(msg.chat.id, user.id):
+    if user.id == CREATOR_ID:  # создатель неприкосновенен; админы и главные админы проверяются как все
         return
-    row = await user_row(user.id)
-    if not (row and row["verified"]) or await is_banned(user.id):
+    if await rank_of(user.id) == 0:
+        row = await user_row(user.id)
+        if not (row and row["verified"]):
+            return
+    if await is_banned(user.id):
         return
     await auto_warn(msg, "1.16 Спам")
 
@@ -4513,14 +4601,14 @@ async def ap_tg_toggle(cb: CallbackQuery):
 
 async def ds_view(uid: int):
     override = await cmd_overrides(uid)
-    rank = await rank_of(uid)
     rows = []
     for key, title, min_rank in CMD_PERMS:
-        allowed = override.get(key, rank >= min_rank)
+        allowed = override.get(key, await perm_default(uid, key, min_rank))
         rows.append([btn(f"({{{20 if allowed else 14}}}) {title}", f"ap_dst_{uid}_{key}")])
     rows.append([btn("({63}) Назад", f"ap_u_{uid}")])
     text = (f"{e(21)} <b>DuoSup разрешения</b>\n{await person_html(uid)}\n"
-            "<blockquote>✅ — команда разрешена, ❌ — запрещена. Нажмите, чтобы переключить.</blockquote>")
+            "<blockquote>✅ — разрешено, ❌ — запрещено. Нажмите, чтобы переключить.\n"
+            "Апелляции, репорты и вопросы по умолчанию выключены.</blockquote>")
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -4545,7 +4633,7 @@ async def ap_ds_toggle(cb: CallbackQuery):
         await cb.answer("Неизвестная команда", show_alert=True)
         return
     override = await cmd_overrides(uid)
-    default = await rank_of(uid) >= spec[2]
+    default = await perm_default(uid, key, spec[2])
     now_allowed = override.get(key, default)
     new = not now_allowed
     if new == default:
