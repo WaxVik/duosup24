@@ -46,7 +46,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.5.1"
+BOT_VERSION = "3.5.2"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -3824,10 +3824,10 @@ async def stock_section(kind: str, state: dict) -> str:
     epoch = state.get("epoch")
     active = not (epoch and epoch <= now_ts())  # время смены прошло, нового стока ещё нет — показываем «Истёк»
     head = f"Активен {e(62)}" if active else f"Истёк {e(76)}"
-    text = f"{head}\\n{title(state['time'])}\\n<blockquote>{body(state['items'])}</blockquote>"
+    text = f"{head}\n{title(state['time'])}\n<blockquote>{body(state['items'])}</blockquote>"
     prev = state.get("prev")
     if prev and prev.get("items"):
-        text += f"\\nИстёк {e(76)}\\n{title(prev['time'])}\\n<blockquote expandable>{body(prev['items'])}</blockquote>"
+        text += f"\nИстёк {e(76)}\n{title(prev['time'])}\n<blockquote expandable>{body(prev['items'])}</blockquote>"
     return text
 
 
@@ -3842,8 +3842,8 @@ async def render_stock_message() -> str | None:
             upcoming.append(f"{kind.capitalize()} в {datetime.fromtimestamp(st['epoch'], MSK).strftime('%H:%M')}")
     if not blocks:
         return None
-    tail = f"\\n\\n{e(11)} <i>Следующее обновление: {' • '.join(upcoming)} МСК</i>" if upcoming else ""
-    return "\\n\\n".join(blocks) + f"\\n\\n{stock_footer()}" + tail
+    tail = f"\n\n{e(11)} <i>Следующее обновление: {' • '.join(upcoming)} МСК</i>" if upcoming else ""
+    return "\n\n".join(blocks) + f"\n\n{stock_footer()}" + tail
 
 
 async def refresh_stock_message(chat_id: int | None, resend: bool = False) -> int | None:
@@ -4132,6 +4132,12 @@ async def stockpublish_cmd(msg: Message):
     if not await render_stock_message():
         await reply(msg, "({8})Сток ещё не публиковался.")
         return
+    states = [await stock_state(k) for k in ("normal", "mirage")]
+    if all((st.get("epoch") and st["epoch"] <= now_ts()) for st in states if st.get("items")):
+        await reply(msg, "({8})Сохранённый сток уже закончился, повторять нечего. "
+                         "Чтобы получить и опубликовать новый, отправьте /stocknow (1 кредит). "
+                         "/stockcheck только показывает данные источника и ничего не публикует.")
+        return
     await refresh_stock_message(chat_id, resend=True)
     await reply(msg, "({20})Сток отправлен ещё раз одним сообщением. Таймер не менялся.")
 
@@ -4181,12 +4187,27 @@ async def stocknow_cmd(msg: Message):
     if not STOCK_ACCOUNTS:
         await reply(msg, "({8})Источник не настроен: добавьте STOCK_API_URL и STOCK_API_KEY в Railway Variables.")
         return
+    async def snapshot() -> dict:
+        out = {}
+        for k in ("normal", "mirage"):
+            st = await stock_state(k)
+            out[k] = (st.get("keys"), st.get("epoch"), st.get("time"))
+        return out
+
+    before = await snapshot()
     try:
         wait = await stock_tick()
     except Exception as exc:
         await reply(msg, f"({{14}})Ошибка: <code>{esc(f'{type(exc).__name__}: {exc}')}</code>")
         return
-    await reply(msg, f"({{20}})Проверено. Автопроверка снова через {max(1, wait // 60)} мин.\nПосты смотрите в теме «Стоки 24/7».")
+    after = await snapshot()
+    changed = [k for k in before if before[k] != after[k]]
+    if changed:
+        result = f"({{20}})Опубликован новый сток: <b>{esc(', '.join(changed))}</b> (тема «Стоки 24/7»)."
+    else:
+        result = ("({8})Новый сток не опубликован: источник отдал тот же сток или данные ещё не обновились "
+                  "(время смены у него уже прошло). Попробуйте позже.")
+    await reply(msg, f"{result}\nАвтопроверка снова через {max(1, wait // 60)} мин.")
 
 
 @dp.message(Command("stockstatus"))
