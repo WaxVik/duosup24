@@ -46,7 +46,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.5.0"
+BOT_VERSION = "3.5.1"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -4047,14 +4047,27 @@ async def _sleep_or_wake(seconds: int) -> bool:
     return True
 
 
+def next_stock_slot(now: int | None = None) -> int:
+    """Секунд до ближайшей плановой проверки: нечётные часы по МСК в :02 (01:02, 03:02, 05:02 … 23:02)."""
+    now_dt = datetime.fromtimestamp(now or now_ts(), MSK)
+    slot = now_dt.replace(minute=2, second=0, microsecond=0)
+    if slot.hour % 2 == 0:
+        slot += timedelta(hours=1)
+    while slot <= now_dt:
+        slot += timedelta(hours=2)
+    return max(60, int((slot - now_dt).total_seconds()))
+
+
 async def _notify_stock_error(text: str) -> None:
-    """Сообщает создателю об ошибке автостока (не чаще раза в 6 часов на одинаковую ошибку)."""
+    """Сообщает создателю об ошибке автостока. Повторных попыток нет: обновить можно вручную или дождаться плановой проверки."""
     now = now_ts()
-    if now - _err_notice.get(text, 0) < 6 * 3600:
+    if now - _err_notice.get(text, 0) < 3600:
         return
     _err_notice[text] = now
+    nxt = datetime.fromtimestamp(now + next_stock_slot(now), MSK).strftime("%H:%M")
     await dm(CREATOR_ID, f"{e(8)} <b>Автосток: ошибка</b>\n<blockquote>{esc(text)[:600]}</blockquote>\n"
-                         "Проверьте: бот админ в основном чате, тема «Стоки 24/7» существует, чаты связаны (/link_hublox).")
+                         f"Повторных попыток не будет. Обновить сейчас: /stocknow (1 кредит). "
+                         f"Если не обновите, бот сам проверит в {nxt} МСК.")
 
 
 async def stock_loop() -> None:
@@ -4072,7 +4085,7 @@ async def stock_loop() -> None:
                 _stock_status["error"] = text
                 LOG.warning("stock tick failed: %s", text)
                 await _notify_stock_error(text)
-                wait = 600
+                wait = next_stock_slot()  # без повторов: ручное обновление или плановая проверка (нечётные часы МСК, :02)
             _stock_status["last_check"] = now_ts()
         _stock_status["next_check"] = now_ts() + max(60, wait)
         LOG.info("stock: следующая проверка через %s мин", max(1, wait // 60))
