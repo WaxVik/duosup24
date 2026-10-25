@@ -46,7 +46,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.5.2"
+BOT_VERSION = "3.6.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -3806,83 +3806,159 @@ async def stock_text(kind: str, state: dict, active: bool) -> str:
     return f"{head}\n{title}\n<blockquote>{body}</blockquote>\n{stock_footer()}"
 
 
-async def stock_section(kind: str, state: dict) -> str:
-    """Блок одного вида стока: текущий (Активен/Истёк) и под ним, свёрнуто, прошлый сток."""
+async def load_board() -> dict:
+    import json
+    raw = await get_config("stock_board")
+    try:
+        return json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+
+
+async def save_board(board: dict) -> None:
+    import json
+    await set_config("stock_board", json.dumps(board))
+
+
+def _stock_block(kind: str, state: dict, active: bool, icons: dict, names: dict) -> str:
+    lines = []
+    for key, price in sorted(state["items"], key=lambda x: x[1]):
+        price_text = f"${price:,}" if price else "—"
+        lines.append(f"{custom_emoji_html(icons.get(key), '▪️')} {esc(names.get(key, key))} • {price_text}")
+    head = f"Активен {e(62)}" if active else f"Истёк {e(76)}"
+    title = (f"{e(30)} Mirage Stock" if kind == "mirage" else f"{e(74)} Normal Stock") + f" ({esc(state['time'])} МСК)"
+    return f"{head}\n{title}\n<blockquote>" + "\n".join(lines) + "</blockquote>"
+
+
+async def render_board(board: dict, closed: bool = False) -> str | None:
+    """Одно сообщение периода Normal: Normal + Mirage этого периода (прошлый Mirage — «Истёк», текущий — «Активен»)."""
     icons = await fruit_icons()
     names = dict(FRUITS)
-
-    def body(items) -> str:
-        lines = []
-        for key, price in sorted(items, key=lambda x: x[1]):
-            price_text = f"${price:,}" if price else "—"
-            lines.append(f"{custom_emoji_html(icons.get(key), '▪️')} {esc(names.get(key, key))} • {price_text}")
-        return "\n".join(lines)
-
-    def title(when: str) -> str:
-        return (f"{e(30)} Mirage Stock" if kind == "mirage" else f"{e(74)} Normal Stock") + f" ({esc(when)} МСК)"
-
-    epoch = state.get("epoch")
-    active = not (epoch and epoch <= now_ts())  # время смены прошло, нового стока ещё нет — показываем «Истёк»
-    head = f"Активен {e(62)}" if active else f"Истёк {e(76)}"
-    text = f"{head}\n{title(state['time'])}\n<blockquote>{body(state['items'])}</blockquote>"
-    prev = state.get("prev")
-    if prev and prev.get("items"):
-        text += f"\nИстёк {e(76)}\n{title(prev['time'])}\n<blockquote expandable>{body(prev['items'])}</blockquote>"
+    now = now_ts()
+    parts, upcoming = [], []
+    normal = board.get("normal")
+    if normal and normal.get("items"):
+        alive = not closed and not (normal.get("epoch") and normal["epoch"] <= now)
+        parts.append(_stock_block("normal", normal, alive, icons, names))
+        if alive and normal.get("epoch"):
+            upcoming.append(f"Normal в {datetime.fromtimestamp(normal['epoch'], MSK).strftime('%H:%M')}")
+    mirages = board.get("mirages") or []
+    for i, m in enumerate(mirages):
+        last = i == len(mirages) - 1
+        alive = not closed and last and not (m.get("epoch") and m["epoch"] <= now)
+        parts.append(_stock_block("mirage", m, alive, icons, names))
+        if alive and m.get("epoch"):
+            upcoming.append(f"Mirage в {datetime.fromtimestamp(m['epoch'], MSK).strftime('%H:%M')}")
+    if not parts:
+        return None
+    text = "\n\n".join(parts) + f"\n\n{stock_footer()}"
+    if upcoming:
+        text += f"\n\n{e(11)} <i>Следующее обновление: {' • '.join(upcoming)} МСК</i>"
     return text
 
 
 async def render_stock_message() -> str | None:
-    blocks, upcoming = [], []
+    return await render_board(await load_board())
+
+
+async def _send_board_message(chat_id: int, board: dict, text: str) -> None:
+    sent = await B().send_message(chat_id, R(text), message_thread_id=thread(TOPICS["stock"]))
+    board["msg"] = sent.message_id
+    await save_board(board)
+
+
+async def _edit_board_message(chat_id: int, board: dict, text: str) -> bool:
+    """True — сообщение обновлено. False — его нет (удалено), нужно отправить заново."""
+    try:
+        await B().edit_message_text(R(text), chat_id=chat_id, message_id=board["msg"], reply_markup=None)
+        return True
+    except Exception as exc:
+        low = str(exc).lower()
+        if "not modified" in low:
+            return True
+        if any(w in low for w in ("not found", "can't be edited", "message_id_invalid")):
+            return False
+        raise  # временный сбой — новое сообщение не плодим
+
+
+async def _cleanup_legacy_stock_posts(chat_id: int) -> None:
+    """Убирает посты прежних форматов (отдельные сообщения, единое сообщение 3.5.x)."""
+    legacy = await get_config("stock_msg")
+    if legacy:
+        try:
+            await B().delete_message(chat_id, int(legacy))
+        except Exception:
+            pass
+        await set_config("stock_msg", "")
     for kind in ("normal", "mirage"):
         st = await stock_state(kind)
-        if not st.get("items"):
-            continue
-        blocks.append(await stock_section(kind, st))
-        if st.get("epoch") and st["epoch"] > now_ts():
-            upcoming.append(f"{kind.capitalize()} в {datetime.fromtimestamp(st['epoch'], MSK).strftime('%H:%M')}")
-    if not blocks:
-        return None
-    tail = f"\n\n{e(11)} <i>Следующее обновление: {' • '.join(upcoming)} МСК</i>" if upcoming else ""
-    return "\n\n".join(blocks) + f"\n\n{stock_footer()}" + tail
+        if st.get("msg"):
+            try:
+                await B().delete_message(chat_id, st["msg"])
+            except Exception:
+                pass
+            st["msg"] = None
+            await set_config(f"stock_{kind}", json.dumps(st))
+
+
+async def board_update(chat_id: int, kind: str, state: dict) -> None:
+    """Новый Normal -> новое сообщение (прошлое закрывается). Новый Mirage -> дописывается в текущее сообщение."""
+    async with lock_for("stock_board"):
+        board = await load_board()
+        if kind == "normal":
+            if board.get("msg"):  # прошлое сообщение: всё в нём теперь «Истёк»
+                try:
+                    old_text = await render_board(board, closed=True)
+                    if old_text:
+                        await _edit_board_message(chat_id, board, old_text)
+                except Exception as exc:
+                    LOG.warning("stock: не удалось закрыть прошлое сообщение: %s", exc)
+            new_board = {"msg": None, "normal": state, "mirages": []}
+            mir = await stock_state("mirage")  # Mirage, который уже начался в этом периоде Normal
+            if mir.get("items") and mir.get("epoch") and state.get("epoch") \
+                    and mir["epoch"] - STOCK_NEXT_HOURS["mirage"] * 3600 >= state["epoch"] - STOCK_NEXT_HOURS["normal"] * 3600:
+                new_board["mirages"].append(mir)
+            await _cleanup_legacy_stock_posts(chat_id)
+            await _send_board_message(chat_id, new_board, await render_board(new_board))
+            return
+        if not board.get("msg"):  # сообщения ещё нет — начинаем с текущего Normal
+            normal = await stock_state("normal")
+            board = {"msg": None, "normal": normal if normal.get("items") else None, "mirages": [state]}
+            await _cleanup_legacy_stock_posts(chat_id)
+            await _send_board_message(chat_id, board, await render_board(board))
+            return
+        mirages = board.get("mirages") or []
+        if mirages and mirages[-1].get("epoch") == state.get("epoch") and state.get("epoch"):
+            mirages[-1] = state
+        else:
+            mirages.append(state)
+        board["mirages"] = mirages[-3:]
+        text = await render_board(board)
+        if not await _edit_board_message(chat_id, board, text):
+            await _send_board_message(chat_id, board, text)
+        else:
+            await save_board(board)
 
 
 async def refresh_stock_message(chat_id: int | None, resend: bool = False) -> int | None:
-    """Единое сообщение стока: правит существующее (или отправляет заново, если resend / его удалили)."""
-    import json
+    """Перерисовывает текущее сообщение стока (чтобы закончившийся сток стал «Истёк»); resend — отправить заново."""
     if not chat_id:
         return None
-    text = await render_stock_message()
-    if not text:
-        return None
-    async with lock_for("stock_msg"):
-        mid = int(await get_config("stock_msg") or 0)
-        if mid and not resend:
+    async with lock_for("stock_board"):
+        board = await load_board()
+        text = await render_board(board)
+        if not text:
+            return None
+        if board.get("msg") and not resend:
+            if await _edit_board_message(chat_id, board, text):
+                return board["msg"]
+        elif board.get("msg"):
             try:
-                await B().edit_message_text(R(text), chat_id=chat_id, message_id=mid, reply_markup=None)
-                return mid
-            except Exception as exc:
-                low = str(exc).lower()
-                if "not modified" in low:
-                    return mid
-                if not any(w in low for w in ("not found", "can't be edited", "message_id_invalid")):
-                    raise  # временный сбой — новое сообщение не плодим
-        elif mid:
-            try:
-                await B().delete_message(chat_id, mid)
+                await B().delete_message(chat_id, board["msg"])
             except Exception:
                 pass
-        sent = await B().send_message(chat_id, R(text), message_thread_id=thread(TOPICS["stock"]))
-        await set_config("stock_msg", sent.message_id)
-        for kind in ("normal", "mirage"):  # прежние отдельные посты (до единого сообщения) убираем
-            st = await stock_state(kind)
-            if st.get("msg"):
-                try:
-                    await B().delete_message(chat_id, st["msg"])
-                except Exception:
-                    pass
-                st["msg"] = None
-                await set_config(f"stock_{kind}", json.dumps(st))
-        return sent.message_id
+        await _send_board_message(chat_id, board, text)
+        return board["msg"]
 
 
 async def publish_stock(kind: str, items: list, force: bool = False, epoch: int | None = None) -> bool:
@@ -3914,7 +3990,7 @@ async def publish_stock(kind: str, items: list, force: bool = False, epoch: int 
         state = {"keys": keys, "items": resolved, "time": started, "epoch": epoch, "msg": None, "prev": prev}
         await set_config(f"stock_{kind}", json.dumps(state))
         try:
-            await refresh_stock_message(chat_id)
+            await board_update(chat_id, kind, state)
         except Exception:
             await set_config(f"stock_{kind}", json.dumps(old))  # откат — повторим при следующей проверке
             raise
@@ -3960,7 +4036,7 @@ async def stock_tick() -> int:
     resets = extract_resets(data)  # источник может не отдавать время смены — тогда считаем по часам
     stale_clock = False
     stale_src = False
-    for kind in ("mirage", "normal"):
+    for kind in ("normal", "mirage"):
         items = parsed.get(kind) or []
         if len(items) < STOCK_MIN_ITEMS:
             if items:
@@ -4239,7 +4315,7 @@ async def stockstatus_cmd(msg: Message):
             lines.append(f"{kind}: сток {st['time']} МСК, след. смена {nxt}")
         else:
             lines.append(f"{kind}: ещё не публиковался")
-    stock_mid = await get_config("stock_msg")
+    stock_mid = (await load_board()).get("msg")
     if stock_mid and chat_id and msg_url(chat_id, int(stock_mid)):
         lines.append(f"Сообщение стока: {msg_url(chat_id, int(stock_mid))}")
     if not chat_id:
