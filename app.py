@@ -20,6 +20,7 @@ import asyncio
 import html
 import logging
 import os
+import difflib
 import re
 import secrets
 import string
@@ -46,7 +47,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.6.0"
+BOT_VERSION = "3.7.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -423,6 +424,16 @@ async def init_db() -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS roblox_prompt_pending BOOL NOT NULL DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS achievements TEXT",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS is_html BOOL NOT NULL DEFAULT FALSE",
+        """CREATE TABLE IF NOT EXISTS wiki_entries (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            norm TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL DEFAULT 'Другое',
+            aliases TEXT NOT NULL DEFAULT '[]',
+            obtain TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            photos TEXT NOT NULL DEFAULT '[]',
+            updated_at BIGINT NOT NULL DEFAULT 0)""",
         """CREATE TABLE IF NOT EXISTS applications (
             id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, kind TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active', chat_message_id BIGINT,
@@ -2025,6 +2036,17 @@ async def start_cmd(msg: Message, state: FSMContext):
     m = re.fullmatch(r"appeal_(warn|ban)_(-\d{5})", payload)
     if m:
         await begin_appeal(msg, state, msg.from_user.id, m.group(1), "#" + m.group(2))
+        return
+    m = re.fullmatch(r"w_(\d{1,9})", payload)
+    if m:  # ссылка из статьи вики: бот рассказывает об этом предмете в личке
+        if not (await wiki_index())["on"] and msg.from_user.id != CREATOR_ID:
+            await reply(msg, "({8})Режим вики сейчас выключен.")
+            return
+        entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", int(m.group(1)))
+        if entry:
+            await wiki_send(msg.chat.id, entry)
+        else:
+            await reply(msg, "({8})Такой статьи нет.")
         return
     await say(msg, MAIN_TEXT, main_menu())
     row = await user_row(msg.from_user.id)
@@ -4756,6 +4778,621 @@ async def ap_ds_toggle(cb: CallbackQuery):
     await cb.answer(f"{spec[1]}: {'разрешено' if new else 'запрещено'}")
 
 
+# ================================== ВИКИ ==================================
+WIKI_CATEGORIES = ["Фрукт", "Аксессуар", "Предмет", "Меч", "NPC", "Босс", "Остров", "Событие", "Другое"]
+WIKI_COOLDOWN = 10  # секунд между автоответами вики одному человеку
+WIKI_SEED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiki_seed.json")
+_wiki_index: dict = {"at": 0, "keys": {}, "on": False}
+_wiki_last: dict[int, int] = {}
+
+
+class WikiSt(StatesGroup):
+    title = State()
+    category = State()
+    aliases = State()
+    obtain = State()
+    description = State()
+    photos = State()
+    edit_value = State()
+    edit_photos = State()
+    import_file = State()
+
+
+def wiki_norm(text: str) -> str:
+    t = (text or "").lower().replace("ё", "е")
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", t)).strip()
+
+
+def wiki_dirty() -> None:
+    _wiki_index["at"] = 0
+
+
+async def wiki_index() -> dict:
+    """Режим вики и словарь «название/псевдоним -> id записи» (кэш на 20 секунд)."""
+    now = now_ts()
+    if now - _wiki_index["at"] > 20:
+        keys: dict[str, int] = {}
+        for r in await pool().fetch("SELECT id, title, aliases FROM wiki_entries ORDER BY id"):
+            try:
+                names = [r["title"], *json.loads(r["aliases"] or "[]")]
+            except ValueError:
+                names = [r["title"]]
+            for name in names:
+                n = wiki_norm(name)
+                if n:
+                    keys.setdefault(n, r["id"])
+        _wiki_index.update(at=now, keys=keys, on=(await get_config("wiki_on")) == "1")
+    return _wiki_index
+
+
+def wiki_split_aliases(text: str) -> list[str]:
+    return [a.strip() for a in re.split(r"[,\n;]", text or "") if a.strip()][:20]
+
+
+def wiki_text_html(raw: str, keys: dict) -> str:
+    """[[Название]] и [[Название|подпись]] превращаются в ссылку: она открывает ЛС бота, и бот рассказывает об этом предмете."""
+    def repl(m):
+        target, _, label = m.group(1).partition("|")
+        label = label or target
+        eid = keys.get(wiki_norm(target))
+        return f'<a href="https://t.me/{BOT_USERNAME}?start=w_{eid}">{label}</a>' if eid else label
+    return re.sub(r"\[\[([^\[\]]{1,80})\]\]", repl, raw or "")
+
+
+def wiki_paragraphs(raw: str, keys: dict) -> str:
+    return "".join(f"<p>{line}</p>" for line in wiki_text_html(raw, keys).split("\n") if line.strip())
+
+
+async def wiki_rich_payload(entry) -> tuple[str, dict]:
+    """Rich HTML: заголовок, слайдшоу из фото (листаются в сторону), под ним «Как получить» и описание."""
+    keys = (await wiki_index())["keys"]
+    photos = json.loads(entry["photos"] or "[]")[:10]
+    media = {f"p{i}": fid for i, fid in enumerate(photos)}
+    parts = [f"<h2>{esc(entry['title'])}</h2>", f"<p><i>{esc(entry['category'])}</i></p>"]
+    if photos:
+        imgs = "".join(f'<img src="tg://photo?id={k}"/>' for k in media)
+        tag = "tg-slideshow" if len(photos) > 1 else "figure"
+        parts.append(f"<{tag}>{imgs}<figcaption>{esc(entry['title'])}</figcaption></{tag}>")
+    if entry["obtain"].strip():
+        parts.append("<h3>Как получить</h3>" + wiki_paragraphs(entry["obtain"], keys))
+    if entry["description"].strip():
+        parts.append("<h3>Описание</h3>" + wiki_paragraphs(entry["description"], keys))
+    if not entry["obtain"].strip() and not entry["description"].strip():
+        parts.append("<p><i>Информация пока не добавлена.</i></p>")
+    return "".join(parts), media
+
+
+async def wiki_plain_html(entry) -> str:
+    """Запасной вариант (обычное сообщение), если Rich-сообщение не отправилось."""
+    keys = (await wiki_index())["keys"]
+    text = f"<b>{esc(entry['title'])}</b>\n<i>{esc(entry['category'])}</i>"
+    if entry["obtain"].strip():
+        text += "\n\n<b>Как получить</b>\n" + wiki_text_html(entry["obtain"], keys)
+    if entry["description"].strip():
+        text += "\n\n<b>Описание</b>\n" + wiki_text_html(entry["description"], keys)
+    return text[:4000]
+
+
+async def send_rich(chat_id: int, html_text: str, media: dict, thread_id: int | None = None,
+                    reply_to: int | None = None) -> None:
+    """sendRichMessage (Bot API 10.1+) напрямую: библиотека может его не знать."""
+    rich: dict = {"html": html_text, "skip_entity_detection": True}
+    if media:
+        rich["media"] = [{"id": k, "media": {"type": "photo", "media": v}} for k, v in media.items()]
+    payload: dict = {"chat_id": chat_id, "rich_message": rich}
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+    if reply_to:
+        payload["reply_parameters"] = {"message_id": reply_to}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        async with session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendRichMessage", json=payload) as resp:
+            data = await resp.json(content_type=None)
+    if not data.get("ok"):
+        raise RuntimeError(data.get("description", "sendRichMessage failed"))
+
+
+async def wiki_send(chat_id: int, entry, thread_id: int | None = None, reply_to: int | None = None) -> None:
+    try:
+        html_text, media = await wiki_rich_payload(entry)
+        await send_rich(chat_id, html_text, media, thread_id, reply_to)
+        return
+    except Exception as exc:
+        LOG.warning("wiki: Rich-сообщение не отправилось (%s), отправляю обычным", exc)
+    from aiogram.types import InputMediaPhoto
+    extra: dict = {}
+    if thread_id:
+        extra["message_thread_id"] = thread_id
+    if reply_to:
+        extra["reply_parameters"] = {"message_id": reply_to}
+    photos = json.loads(entry["photos"] or "[]")[:10]
+    try:
+        if len(photos) == 1:
+            await B().send_photo(chat_id, photos[0], **extra)
+        elif photos:
+            await B().send_media_group(chat_id, [InputMediaPhoto(media=f) for f in photos], **extra)
+    except Exception:
+        LOG.exception("wiki: фото не отправились")
+    await B().send_message(chat_id, R(await wiki_plain_html(entry)), **extra)
+
+
+def wiki_suggest(query: str, keys: dict) -> str:
+    near = difflib.get_close_matches(wiki_norm(query), list(keys), n=3, cutoff=0.55)
+    return ("Возможно, вы искали: " + ", ".join(near)) if near else "Проверьте название."
+
+
+async def wiki_where_ok(msg: Message) -> bool:
+    """Вики работает в личке и в основном чате (во всех темах); создателю — ещё и в админ-чате."""
+    if msg.chat.type == "private":
+        return True
+    if msg.chat.id == await main_chat():
+        return True
+    return bool(msg.from_user) and msg.from_user.id == CREATOR_ID and msg.chat.id == await admin_chat()
+
+
+# ---------- ответы пользователям ----------
+@dp.message(Command("wiki"))
+async def wiki_cmd(msg: Message):
+    args = command_args(msg)
+    uid = msg.from_user.id if msg.from_user else 0
+    if len(args) == 1 and args[0].lower() in ("on", "off", "вкл", "выкл"):
+        if uid != CREATOR_ID:
+            await reply(msg, "({15})У вас недостаточно прав")
+            return
+        on = args[0].lower() in ("on", "вкл")
+        await set_config("wiki_on", "1" if on else "0")
+        wiki_dirty()
+        await reply(msg, f"({{20}})Режим вики {'включён' if on else 'выключен'}.")
+        return
+    if not await wiki_where_ok(msg):
+        return
+    idx = await wiki_index()
+    if not idx["on"] and uid != CREATOR_ID:
+        await reply(msg, "({8})Режим вики сейчас выключен.")
+        return
+    query = " ".join(args)
+    if not query:
+        await reply(msg, f"({{39}})<b>Вики</b>\\nНапишите <code>/wiki название</code>. В базе записей: {len(set(idx['keys'].values()))}.")
+        return
+    eid = idx["keys"].get(wiki_norm(query))
+    if not eid:
+        await reply(msg, f"({{8}})Не нашёл «{esc(query)}». {esc(wiki_suggest(query, idx['keys']))}")
+        return
+    entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", eid)
+    await wiki_send(msg.chat.id, entry, topic_of(msg), msg.message_id)
+
+
+async def wiki_trigger(msg: Message):
+    """Режим вики включён: сообщение, которое целиком совпадает с названием записи, получает ответ."""
+    if not msg.text or not msg.from_user or msg.from_user.is_bot or msg.text.startswith("/") or len(msg.text) > 60:
+        return False
+    idx = await wiki_index()
+    eid = idx["keys"].get(wiki_norm(msg.text)) if idx["on"] else None
+    if not eid or not await wiki_where_ok(msg):
+        return False
+    return {"wiki_id": eid}
+
+
+@dp.message(wiki_trigger)
+async def wiki_auto(msg: Message, wiki_id: int):
+    uid = msg.from_user.id
+    now = now_ts()
+    if uid != CREATOR_ID and now - _wiki_last.get(uid, 0) < WIKI_COOLDOWN:
+        return
+    _wiki_last[uid] = now
+    entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", wiki_id)
+    if entry:
+        await wiki_send(msg.chat.id, entry, topic_of(msg), msg.message_id)
+
+
+# ---------- наполнение: только создатель ----------
+def wk_creator(cb: CallbackQuery) -> bool:
+    return cb.from_user.id == CREATOR_ID
+
+
+def wk_category_markup(prefix: str) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for i, name in enumerate(WIKI_CATEGORIES):
+        row.append(InlineKeyboardButton(text=name, callback_data=f"{prefix}{i}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def wiki_upsert(title: str, category: str, aliases: list, obtain: str, description: str, photos: list) -> int:
+    row = await pool().fetchrow(
+        """INSERT INTO wiki_entries (title, norm, category, aliases, obtain, description, photos, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (norm) DO UPDATE SET title=$1, category=$3, aliases=$4, obtain=$5, description=$6,
+                                            photos=$7, updated_at=$8 RETURNING id""",
+        title, wiki_norm(title), category, json.dumps(aliases, ensure_ascii=False), obtain, description,
+        json.dumps(photos), now_ts())
+    wiki_dirty()
+    return row["id"]
+
+
+async def wiki_find(msg: Message, query: str):
+    idx = await wiki_index()
+    eid = idx["keys"].get(wiki_norm(query))
+    if not eid:
+        await reply(msg, f"({{8}})Не нашёл «{esc(query)}». {esc(wiki_suggest(query, idx['keys']))}")
+        return None
+    return await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", eid)
+
+
+async def wiki_finish_add(msg: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    eid = await wiki_upsert(data["title"], data.get("category", "Другое"), data.get("aliases", []),
+                            data.get("obtain", ""), data.get("description", ""), data.get("photos", []))
+    entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", eid)
+    await reply(msg, f"({{20}})Запись <b>{esc(entry['title'])}</b> сохранена. Так она выглядит у участников:")
+    await wiki_send(msg.chat.id, entry, topic_of(msg))
+
+
+@dp.message(Command("wikiadd"))
+async def wikiadd_cmd(msg: Message, state: FSMContext):
+    if not await redact_zone(msg):
+        return
+    await state.clear()
+    title = " ".join(command_args(msg)).strip()[:80]
+    if title:
+        await state.update_data(title=title)
+        await state.set_state(WikiSt.category)
+        await reply(msg, f"({{39}})<b>{esc(title)}</b>\\nВыберите категорию (или напишите свою).", wiki_category_cb_markup())
+    else:
+        await state.set_state(WikiSt.title)
+        await reply(msg, "({39})Название новой записи? (/cancel — отмена)")
+
+
+def wiki_category_cb_markup() -> InlineKeyboardMarkup:
+    return wk_category_markup("wk_cat_")
+
+
+@dp.message(WikiSt.title, F.text, ~F.text.startswith("/"))
+async def wk_title(msg: Message, state: FSMContext):
+    await state.update_data(title=msg.text.strip()[:80])
+    await state.set_state(WikiSt.category)
+    await reply(msg, "({39})Выберите категорию (или напишите свою).", wiki_category_cb_markup())
+
+
+async def wk_to_aliases(msg: Message, state: FSMContext, category: str) -> None:
+    await state.update_data(category=category[:30])
+    await state.set_state(WikiSt.aliases)
+    await reply(msg, "({39})Другие названия для поиска (через запятую: русское, сокращения). «-» — пропустить.")
+
+
+@dp.callback_query(WikiSt.category, F.data.startswith("wk_cat_"))
+async def wk_cat_cb(cb: CallbackQuery, state: FSMContext):
+    if not wk_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await cb.answer()
+    await wk_to_aliases(cb.message, state, WIKI_CATEGORIES[int(cb.data.removeprefix("wk_cat_"))])
+
+
+@dp.message(WikiSt.category, F.text, ~F.text.startswith("/"))
+async def wk_cat_text(msg: Message, state: FSMContext):
+    await wk_to_aliases(msg, state, msg.text.strip())
+
+
+@dp.message(WikiSt.aliases, F.text, ~F.text.startswith("/"))
+async def wk_aliases(msg: Message, state: FSMContext):
+    await state.update_data(aliases=[] if msg.text.strip() == "-" else wiki_split_aliases(msg.text))
+    await state.set_state(WikiSt.obtain)
+    await reply(msg, "({39})<b>Как получить</b> — коротко и понятно. Ссылки на другие записи: <code>[[Mirror Fractal]]</code>. «-» — пропустить.")
+
+
+@dp.message(WikiSt.obtain, F.text, ~F.text.startswith("/"))
+async def wk_obtain(msg: Message, state: FSMContext):
+    await state.update_data(obtain="" if msg.text.strip() == "-" else msg.html_text.strip())
+    await state.set_state(WikiSt.description)
+    await reply(msg, "({39})<b>Описание</b> (можно с Premium Emoji, цитатами и ссылками <code>[[...]]</code>). «-» — пропустить.")
+
+
+@dp.message(WikiSt.description, F.text, ~F.text.startswith("/"))
+async def wk_description(msg: Message, state: FSMContext):
+    await state.update_data(description="" if msg.text.strip() == "-" else msg.html_text.strip(), photos=[])
+    await state.set_state(WikiSt.photos)
+    await reply(msg, "({39})Отправьте <b>фото</b> по одному (они будут слайд-шоу). Когда закончите — /done. «-» — без фото.")
+
+
+@dp.message(WikiSt.photos, F.photo)
+async def wk_photo(msg: Message, state: FSMContext):
+    photos = (await state.get_data()).get("photos", [])
+    photos.append(msg.photo[-1].file_id)
+    await state.update_data(photos=photos[:10])
+    await reply(msg, f"({{20}})Фото {len(photos[:10])}/10 добавлено. Ещё фото или /done.")
+
+
+@dp.message(WikiSt.photos, Command("done"))
+async def wk_photos_done(msg: Message, state: FSMContext):
+    await wiki_finish_add(msg, state)
+
+
+@dp.message(WikiSt.photos, F.text == "-")
+async def wk_photos_skip(msg: Message, state: FSMContext):
+    await wiki_finish_add(msg, state)
+
+
+def wiki_card(entry) -> str:
+    aliases = ", ".join(json.loads(entry["aliases"] or "[]")) or "—"
+    photos = len(json.loads(entry["photos"] or "[]"))
+    obtain = "есть" if entry["obtain"].strip() else "нет"
+    desc = "есть" if entry["description"].strip() else "нет"
+    return (f"({{39}})<b>{esc(entry['title'])}</b> • {esc(entry['category'])}\\n"
+            f"<blockquote>Другие названия: {esc(aliases)}\\nФото: {photos}\\nКак получить: {obtain}\\nОписание: {desc}</blockquote>")
+
+
+def wiki_edit_markup(eid: int) -> InlineKeyboardMarkup:
+    def b(text, field):
+        return InlineKeyboardButton(text=text, callback_data=f"wk_e_{eid}_{field}")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [b("✏️ Название", "title"), b("🏷 Др. названия", "aliases")],
+        [b("📂 Категория", "category")],
+        [b("🧭 Как получить", "obtain"), b("📝 Описание", "description")],
+        [b("🖼 Фото: заменить", "photos"), b("➕ Фото: добавить", "photosadd")],
+        [b("👁 Показать как у участников", "show"), b("🗑 Удалить", "del")],
+    ])
+
+
+@dp.message(Command("wikiedit"))
+async def wikiedit_cmd(msg: Message, state: FSMContext):
+    if not await redact_zone(msg):
+        return
+    await state.clear()
+    query = " ".join(command_args(msg))
+    if not query:
+        await reply(msg, "({8})Укажите запись: <code>/wikiedit Kitsune</code>")
+        return
+    entry = await wiki_find(msg, query)
+    if entry:
+        await reply(msg, wiki_card(entry), wiki_edit_markup(entry["id"]))
+
+
+@dp.message(Command("wikidel"))
+async def wikidel_cmd(msg: Message, state: FSMContext):
+    if not await redact_zone(msg):
+        return
+    query = " ".join(command_args(msg))
+    entry = await wiki_find(msg, query) if query else None
+    if not entry:
+        if not query:
+            await reply(msg, "({8})Укажите запись: <code>/wikidel Kitsune</code>")
+        return
+    await reply(msg, f"({{8}})Удалить запись <b>{esc(entry['title'])}</b>?",
+                kb([btn("({20}) Да, удалить", f"wk_del_{entry['id']}"), btn("({14}) Отмена", "wk_cancel")]))
+
+
+@dp.callback_query(F.data == "wk_cancel")
+async def wk_cancel(cb: CallbackQuery):
+    if wk_creator(cb):
+        await cb.answer("Отменено")
+        await _delete_quiet(cb.message)
+
+
+@dp.callback_query(F.data.startswith("wk_del_"))
+async def wk_del(cb: CallbackQuery):
+    if not wk_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await pool().execute("DELETE FROM wiki_entries WHERE id=$1", int(cb.data.removeprefix("wk_del_")))
+    wiki_dirty()
+    await cb.answer("Удалено")
+    await edit(cb, "({20})Запись удалена.", None)
+
+
+@dp.callback_query(F.data.startswith("wk_e_"))
+async def wk_edit_cb(cb: CallbackQuery, state: FSMContext):
+    if not wk_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    _, _, eid_s, field = cb.data.split("_", 3)
+    eid = int(eid_s)
+    entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", eid)
+    if not entry:
+        await cb.answer("Записи уже нет", show_alert=True)
+        return
+    await cb.answer()
+    if field == "show":
+        await wiki_send(cb.message.chat.id, entry, getattr(cb.message, "message_thread_id", None) if cb.message.is_topic_message else None)
+    elif field == "del":
+        await cb.message.answer(R(f"({{8}})Удалить запись <b>{esc(entry['title'])}</b>?"),
+                                reply_markup=kb([btn("({20}) Да, удалить", f"wk_del_{eid}"), btn("({14}) Отмена", "wk_cancel")]),
+                                **({"message_thread_id": cb.message.message_thread_id} if cb.message.is_topic_message else {}))
+    elif field == "category":
+        await cb.message.edit_reply_markup(reply_markup=wk_category_markup(f"wk_ec_{eid}_"))
+    elif field in ("photos", "photosadd"):
+        await state.set_state(WikiSt.edit_photos)
+        await state.update_data(eid=eid, photos=[], add=(field == "photosadd"))
+        await cb.message.answer(R("({39})Отправьте фото по одному, затем /done. "
+                                  + ("Они добавятся к текущим." if field == "photosadd" else "Они заменят текущие.")),
+                                **({"message_thread_id": cb.message.message_thread_id} if cb.message.is_topic_message else {}))
+    else:
+        await state.set_state(WikiSt.edit_value)
+        await state.update_data(eid=eid, field=field)
+        hint = {"title": "новое название", "aliases": "другие названия через запятую", "obtain": "текст «Как получить»",
+                "description": "текст описания"}[field]
+        await cb.message.answer(R(f"({{39}})Отправьте {hint}. «-» — очистить."),
+                                **({"message_thread_id": cb.message.message_thread_id} if cb.message.is_topic_message else {}))
+
+
+@dp.callback_query(F.data.startswith("wk_ec_"))
+async def wk_edit_category(cb: CallbackQuery):
+    if not wk_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    _, _, eid_s, idx_s = cb.data.split("_", 3)
+    await pool().execute("UPDATE wiki_entries SET category=$1, updated_at=$2 WHERE id=$3",
+                         WIKI_CATEGORIES[int(idx_s)], now_ts(), int(eid_s))
+    wiki_dirty()
+    entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", int(eid_s))
+    await cb.answer("Готово")
+    await edit(cb, wiki_card(entry), wiki_edit_markup(int(eid_s)))
+
+
+@dp.message(WikiSt.edit_value, F.text, ~F.text.startswith("/"))
+async def wk_edit_value(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    eid, field = data["eid"], data["field"]
+    text = msg.text.strip()
+    if field == "title":
+        if text == "-":
+            await reply(msg, "({8})Название нельзя очистить.")
+            return
+        norm = wiki_norm(text[:80])
+        taken = await pool().fetchval("SELECT id FROM wiki_entries WHERE norm=$1 AND id<>$2", norm, eid)
+        if taken:
+            await reply(msg, "({8})Запись с таким названием уже есть.")
+            return
+        await pool().execute("UPDATE wiki_entries SET title=$1, norm=$2, updated_at=$3 WHERE id=$4",
+                             text[:80], norm, now_ts(), eid)
+    elif field == "aliases":
+        await pool().execute("UPDATE wiki_entries SET aliases=$1, updated_at=$2 WHERE id=$3",
+                             json.dumps([] if text == "-" else wiki_split_aliases(text), ensure_ascii=False), now_ts(), eid)
+    else:  # obtain / description: сохраняем как прислали (Premium Emoji, цитаты, жирный)
+        value = "" if text == "-" else msg.html_text.strip()
+        await pool().execute(f"UPDATE wiki_entries SET {field}=$1, updated_at=$2 WHERE id=$3", value, now_ts(), eid)
+    wiki_dirty()
+    await state.clear()
+    entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", eid)
+    await reply(msg, wiki_card(entry), wiki_edit_markup(eid))
+
+
+@dp.message(WikiSt.edit_photos, F.photo)
+async def wk_edit_photo(msg: Message, state: FSMContext):
+    photos = (await state.get_data()).get("photos", [])
+    photos.append(msg.photo[-1].file_id)
+    await state.update_data(photos=photos[:10])
+    await reply(msg, f"({{20}})Принято фото: {len(photos[:10])}. Ещё или /done.")
+
+
+@dp.message(WikiSt.edit_photos, Command("done"))
+async def wk_edit_photos_done(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+    new = data.get("photos", [])
+    if not new:
+        await reply(msg, "({8})Фото не получено, ничего не изменено.")
+        return
+    entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", data["eid"])
+    photos = (json.loads(entry["photos"] or "[]") + new)[:10] if data.get("add") else new
+    await pool().execute("UPDATE wiki_entries SET photos=$1, updated_at=$2 WHERE id=$3",
+                         json.dumps(photos), now_ts(), data["eid"])
+    wiki_dirty()
+    entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", data["eid"])
+    await reply(msg, wiki_card(entry), wiki_edit_markup(data["eid"]))
+    await wiki_send(msg.chat.id, entry, topic_of(msg))
+
+
+@dp.message(Command("wikilist"))
+async def wikilist_cmd(msg: Message):
+    if not await redact_zone(msg):
+        return
+    cat = " ".join(command_args(msg)).strip().lower()
+    rows = await pool().fetch("SELECT title, category, obtain, description, photos FROM wiki_entries ORDER BY category, title")
+    rows = [r for r in rows if not cat or r["category"].lower() == cat]
+    if not rows:
+        await reply(msg, "({8})Записей нет.")
+        return
+    lines, last = [], None
+    for r in rows:
+        if r["category"] != last:
+            lines.append(f"\\n<b>{esc(r['category'])}</b>")
+            last = r["category"]
+        flags = ("🖼" if json.loads(r["photos"] or "[]") else "▫️") + ("🧭" if r["obtain"].strip() else "▫️") + ("📝" if r["description"].strip() else "▫️")
+        lines.append(f"{flags} {esc(r['title'])}")
+    text, chunk = "", []
+    for line in lines:
+        if len("\\n".join(chunk + [line])) > 3500:
+            await reply(msg, "\\n".join(chunk))
+            chunk = []
+        chunk.append(line)
+    header = f"({{39}})<b>Вики: записей {len(rows)}</b> (🖼 фото • 🧭 как получить • 📝 описание)"
+    await reply(msg, header + "\\n" + "\\n".join(chunk))
+
+
+async def wiki_import(entries: list) -> tuple[int, int, int]:
+    """Загрузка из JSON. Поля, которых нет в записи, не трогаются. format: "html" — текст уже с разметкой."""
+    added = updated = skipped = 0
+    for e_ in entries:
+        if not isinstance(e_, dict) or not str(e_.get("title", "")).strip():
+            skipped += 1
+            continue
+        title = str(e_["title"]).strip()[:80]
+        old = await pool().fetchrow("SELECT * FROM wiki_entries WHERE norm=$1", wiki_norm(title))
+        as_html = str(e_.get("format", "")).lower() == "html"
+
+        def text_of(key: str, current: str) -> str:
+            if key not in e_:
+                return current
+            value = str(e_[key] or "").strip()
+            return value if as_html else esc(value)
+
+        aliases = e_["aliases"] if "aliases" in e_ else (json.loads(old["aliases"]) if old else [])
+        if isinstance(aliases, str):
+            aliases = wiki_split_aliases(aliases)
+        photos = e_["photos"] if isinstance(e_.get("photos"), list) else (json.loads(old["photos"]) if old else [])
+        await wiki_upsert(title, str(e_.get("category") or (old["category"] if old else "Другое"))[:30],
+                          [str(a) for a in aliases][:20], text_of("obtain", old["obtain"] if old else ""),
+                          text_of("description", old["description"] if old else ""), [str(p) for p in photos][:10])
+        if old:
+            updated += 1
+        else:
+            added += 1
+    return added, updated, skipped
+
+
+async def wiki_seed_if_empty() -> None:
+    """Первый запуск: если база вики пуста и рядом лежит wiki_seed.json — загружаем заготовку (фрукты, аксессуары)."""
+    if await pool().fetchval("SELECT COUNT(*) FROM wiki_entries") or not os.path.exists(WIKI_SEED):
+        return
+    with open(WIKI_SEED, encoding="utf-8") as f:
+        added, updated, skipped = await wiki_import(json.load(f))
+    LOG.info("wiki: загружена заготовка: %s записей", added + updated)
+
+
+@dp.message(Command("wikiimport"))
+async def wikiimport_cmd(msg: Message, state: FSMContext):
+    if not await redact_zone(msg):
+        return
+    await state.set_state(WikiSt.import_file)
+    await reply(msg, "({39})Отправьте файл <b>.json</b> со списком записей (как в /wikiexport). /cancel — отмена.")
+
+
+@dp.message(WikiSt.import_file, F.document)
+async def wiki_import_file(msg: Message, state: FSMContext):
+    try:
+        file = await B().get_file(msg.document.file_id)
+        raw = (await B().download_file(file.file_path)).read()
+        entries = json.loads(raw.decode("utf-8-sig"))
+        if not isinstance(entries, list):
+            raise ValueError("ожидается список записей [ {...}, {...} ]")
+    except Exception as exc:
+        await reply(msg, f"({{14}})Не удалось прочитать файл: <code>{esc(exc)}</code>")
+        return
+    await state.clear()
+    added, updated, skipped = await wiki_import(entries)
+    await reply(msg, f"({{20}})Импорт завершён: добавлено {added}, обновлено {updated}, пропущено {skipped}.")
+
+
+@dp.message(Command("wikiexport"))
+async def wikiexport_cmd(msg: Message):
+    if not await redact_zone(msg):
+        return
+    from aiogram.types import BufferedInputFile
+    rows = await pool().fetch("SELECT * FROM wiki_entries ORDER BY category, title")
+    out = [{"title": r["title"], "category": r["category"], "aliases": json.loads(r["aliases"] or "[]"),
+            "obtain": r["obtain"], "description": r["description"], "photos": json.loads(r["photos"] or "[]"),
+            "format": "html"} for r in rows]
+    data = json.dumps(out, ensure_ascii=False, indent=1).encode("utf-8")
+    await B().send_document(msg.chat.id, BufferedInputFile(data, filename="wiki_export.json"),
+                            caption=f"Записей: {len(out)}. Текст в формате html (Premium Emoji и цитаты сохранены).",
+                            **({"message_thread_id": topic_of(msg)} if topic_of(msg) else {}))
+
+
 # Автоварн — самым последним: он реагирует на любые групповые сообщения со ссылками.
 dp.message.register(autowarn_handler, F.chat.type.in_({"group", "supergroup"}))
 
@@ -4792,6 +5429,10 @@ async def main() -> None:
         else:
             LOG.info("STOCK_API_URL не задан — автосток выключен (работает ручная команда /stock)")
         spawn(applications_expiry_loop())
+        try:
+            await wiki_seed_if_empty()
+        except Exception:
+            LOG.exception("wiki seed failed")
         LOG.info("DuoSup %s запущен как @%s (id=%s)", BOT_VERSION, BOT_USERNAME, me.id)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
