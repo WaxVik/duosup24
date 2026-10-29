@@ -43,11 +43,13 @@ from aiogram.types import (
     ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.9.0"
+BOT_VERSION = "3.10.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -1995,7 +1997,7 @@ async def refresh_icon_cache() -> None:
     ICON_CACHE["gas"] = (await fruit_icons()).get("gas")
 
 
-def main_menu() -> InlineKeyboardMarkup:
+def old_main_menu() -> InlineKeyboardMarkup:
     return kb(
         [btn("({72}) Ивенты", "menu_events")],
         [btn("({74}) Сток", "menu_stock", icon_id=ICON_CACHE.get("gas"))],
@@ -2010,6 +2012,11 @@ def main_menu() -> InlineKeyboardMarkup:
         [btn("({60}) Вопрос | ответ", "menu_question")],
         [btn("({61}) Навигация и правила", "menu_nav")],
     )
+
+
+def main_menu():
+    """Главное меню теперь — кнопки под строкой ввода (reply_menu), инлайн-меню не нужно."""
+    return None
 
 
 def back_only() -> InlineKeyboardMarkup:
@@ -2031,6 +2038,167 @@ def json_payload(value) -> dict:
     if isinstance(value, str):
         return json.loads(value or "{}")
     return dict(value or {})
+
+
+
+# ======================= МЕНЮ ПОД СТРОКОЙ ВВОДА (reply-клавиатура) =======================
+# id Premium Emoji для иконок кнопок. У ✍️ id пока нет — иконка обычным эмодзи.
+RM_ICONS = {
+    "stock": "5451882707875276247", "notify": "5458603043203327669", "profile": "5413843793147373433",
+    "create": "5397916757333654639", "wiki": "5282843764451195532", "lang": "5447410659077661506",
+    "nav": "5985479497586053461", "next": "5875506366050734240", "violations": "5771695636411847302",
+    "faq": "5314504236132747481", "admin": "5224736245665511429", "find": "5188217332748527444",
+    "games": "5361741454685256344", "back": "5875082500023258804", "refresh": "5375338737028841420",
+    "history": "5413879192267805083", "roblox": "5220186290456120696",
+}
+JOIN = "\u2060"  # невидимый символ: отличает «Дальше» на 2-й странице от «Дальше» на 1-й
+
+
+def rb(label: str, icon: str | None = None, style: str | None = None) -> KeyboardButton:
+    """Кнопка reply-меню. style: 'danger' = красная, 'success' = зелёная, None = серая."""
+    kwargs: dict = {}
+    if icon:
+        kwargs["icon_custom_emoji_id"] = RM_ICONS[icon]
+    if style:
+        kwargs["style"] = style
+    return KeyboardButton(text=label, **kwargs)
+
+
+def reply_menu(page: int = 1) -> ReplyKeyboardMarkup:
+    if page == 2:
+        rows = [
+            [rb("Мои нарушения", "violations"), rb("Вопрос | Ответ", "faq")],
+            [rb("✍️ Правила"), rb("О наборах в админ", "admin")],
+            [rb("Язык / Language", "lang")],
+            [rb("Назад", "back", "danger"), rb(f"Дал{JOIN}ьше", "next", "success")],
+        ]
+    else:
+        rows = [
+            [rb("Сток", "stock"), rb("Мини игры", "games")],
+            [rb("Создать заявку", "create"), rb("Найти заявку", "find")],
+            [rb("Профиль", "profile"), rb("Вики", "wiki")],
+            [rb("Навигация", "nav"), rb("Дальше", "next", "success")],
+        ]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
+
+
+RM_LABELS = {  # текст кнопки (без эмодзи) -> ключ
+    "Сток": "stock", "Мини игры": "games", "Создать заявку": "create", "Найти заявку": "find",
+    "Профиль": "profile", "Вики": "wiki", "Навигация": "nav", "Дальше": "next1",
+    f"Дал{JOIN}ьше": "next2", "Мои нарушения": "violations", "Вопрос | Ответ": "faq", "Правила": "rules",
+    "О наборах в админ": "admin", "Язык / Language": "lang", "Назад": "back",
+}
+
+
+async def menu_button_filter(msg: Message):
+    if msg.chat.type != "private" or not msg.text or msg.text.startswith("/"):
+        return False
+    key = RM_LABELS.get(re.sub(r"^[^\w]+", "", msg.text).strip())
+    return {"menu_key": key} if key else False
+
+
+class MenuSt(StatesGroup):
+    wiki = State()
+
+
+def type_menu(prefix_cb: dict[str, str], title: str) -> tuple[str, InlineKeyboardMarkup]:
+    return title, kb(
+        [btn("({49}) Морские ивенты", prefix_cb["sea"])], [btn("({48}) Трейды", prefix_cb["trade"])],
+        [btn("({69}) Рейды", prefix_cb["raid"])], [btn("({71}) Триалы", prefix_cb["trial"])], [BACK()])
+
+
+async def violations_html(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    warns = await pool().fetch("SELECT * FROM warn_logs WHERE user_id=$1 AND is_active ORDER BY id", uid)
+    ban = None
+    if await is_banned(uid):
+        ban = await pool().fetchrow("SELECT * FROM ban_logs WHERE user_id=$1 ORDER BY id DESC LIMIT 1", uid)
+    if not warns and not ban:
+        return "({20})У вас нет активных нарушений.", None
+    lines, buttons = [], []
+    bot_id = B().id
+    for i, w in enumerate(warns, 1):
+        lines.append(f"<b>Варн {esc(w['warn_number'])} — {i}/{MAX_WARNS}</b>\n"
+                     f"Выдан: {fmt_dt(w['created_at'])}\n<blockquote>{esc(w['reason'])}</blockquote>")
+        url = msg_url(w["chat_id"], w["message_id"])
+        if url and w["moderator_id"] != bot_id:
+            buttons.append([btn(f"({{26}}) Перейти к сообщению {w['warn_number']}", url=url)])
+    if ban:
+        lines.append(f"<b>Бан {esc(ban['ban_number'])}</b>\nВыдан: {fmt_dt(ban['created_at'])}\n"
+                     f"<blockquote>{esc(ban['reason'])}</blockquote>")
+        url = msg_url(ban["chat_id"], ban["message_id"])
+        if url and ban["moderator_id"] != bot_id:
+            buttons.append([btn(f"({{26}}) Перейти к сообщению {ban['ban_number']}", url=url)])
+    if await appealable(uid):
+        buttons.append([btn("({10}) Подать апелляцию", "menu_appeal")])
+    return "({62})<b>Ваши нарушения</b>\n" + "\n".join(lines), (InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None)
+
+
+@dp.message(menu_button_filter)
+async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
+    await state.clear()
+    uid = msg.from_user.id
+    if menu_key == "next1":
+        await say(msg, "<blockquote>Страница 2</blockquote>", reply_menu(2))
+    elif menu_key in ("back", "next2"):  # на 2-й странице «Дальше» пока замыкает круг (3-й страницы нет)
+        await say(msg, "<blockquote>Страница 1</blockquote>", reply_menu(1))
+    elif menu_key == "stock":
+        await say(msg, STOCK_MENU_TEXT, await stock_menu_markup(uid))
+    elif menu_key == "games":
+        await say(msg, "({72})<b>Мини игры</b>\nСкоро: гача, ПВП и комбо-ПВП.")
+    elif menu_key == "create":
+        t, m = type_menu({"sea": "menu_sea", "trade": "trade_create", "raid": "menu_raid", "trial": "menu_trial"},
+                         "({61})<b>Создать заявку</b>\nВыберите тип заявки:")
+        await say(msg, t, m)
+    elif menu_key == "find":
+        t, m = type_menu({"sea": "sea_find", "trade": "trade_find", "raid": "raid_find", "trial": "trial_find"},
+                         "({39})<b>Найти заявку</b>\nВыберите тип заявки:")
+        await say(msg, t, m)
+    elif menu_key == "profile":
+        await say(msg, await profile_html(uid), kb([btn("Редактировать профиль ({24})", "profile_edit")], [BACK()]))
+    elif menu_key == "wiki":
+        idx = await wiki_index()
+        if not idx["on"] and uid != CREATOR_ID:
+            await say(msg, "({8})Режим вики сейчас выключен.")
+            return
+        await state.set_state(MenuSt.wiki)
+        await say(msg, "({39})<b>Вики</b>\nНазовите предмет, аксессуар или тип — и я расскажу о нём.\n<i>Выйти: /cancel или любая кнопка меню.</i>")
+    elif menu_key == "nav":
+        await say(msg, await nav_text(), back_only())
+    elif menu_key == "violations":
+        text, markup = await violations_html(uid)
+        await say(msg, text, markup)
+    elif menu_key == "faq":
+        wait = await question_wait(uid)
+        if wait:
+            await say(msg, f"⏳ Следующий вопрос можно задать через {-(-wait // 60)} мин.")
+            return
+        await state.set_state(QuestionSt.text)
+        sent = await say(msg, "({60})<b>Вопрос | ответ</b>\nНапишите ваш вопрос одним сообщением.", back_only())
+        await state.update_data(prompt_id=sent.message_id)
+    elif menu_key == "rules":
+        row = await pool().fetchrow("SELECT rule_text, is_html FROM rules ORDER BY created_at DESC LIMIT 1")
+        if not row:
+            await say(msg, "({8})Правила пока не опубликованы.")
+            return
+        body = row["rule_text"] if row["is_html"] else esc(row["rule_text"])
+        for part in split_html(body):
+            await _send_html_safe(msg.chat.id, R(part), None)
+    elif menu_key == "admin":
+        await say(msg, "({61})<b>О наборах в админ</b>\nСейчас набор закрыт. Когда он откроется — бот напишет об этом.")
+    elif menu_key == "lang":
+        await say(msg, "({8})Выбор языка появится в одном из ближайших обновлений.")
+
+
+@dp.message(MenuSt.wiki, F.chat.type == "private", F.text, ~F.text.startswith("/"))
+async def menu_wiki_query(msg: Message, state: FSMContext):
+    idx = await wiki_index()
+    eid = idx["keys"].get(wiki_norm(msg.text))
+    if not eid:
+        await say(msg, f"({{8}})Не нашёл «{esc(msg.text.strip()[:60])}». {esc(wiki_suggest(msg.text, idx['keys']))}")
+        return
+    entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", eid)
+    await state.clear()
+    await wiki_send(msg.chat.id, entry)
 
 
 # ---------------------------- /start, /cancel ----------------------------
@@ -2057,7 +2225,7 @@ async def start_cmd(msg: Message, state: FSMContext):
         else:
             await reply(msg, "({8})Такой статьи нет.")
         return
-    await say(msg, MAIN_TEXT, main_menu())
+    await say(msg, MAIN_TEXT, reply_menu(1))
     row = await user_row(msg.from_user.id)
     if row and row["roblox_prompt_pending"] and not row["roblox_username"]:
         await say(msg, "({24})Укажите ваш ник в Roblox.")
@@ -2075,7 +2243,11 @@ async def cancel_cmd(msg: Message, state: FSMContext):
 @dp.callback_query(F.data == "menu_back")
 async def menu_back(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await edit(cb, MAIN_TEXT, main_menu())
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+    await cb.answer()
 
 
 @dp.callback_query(F.data == "menu_events")
@@ -2083,8 +2255,7 @@ async def menu_events(cb: CallbackQuery):
     await edit(cb, "({72})<b>Ивенты</b>\nСкоро здесь появится новая функция.", back_only())
 
 
-@dp.callback_query(F.data == "menu_nav")
-async def menu_nav(cb: CallbackQuery):
+async def nav_text() -> str:
     rules_row = await pool().fetchrow("SELECT rule_text, is_html FROM rules ORDER BY created_at DESC LIMIT 1")
     text = (f"({{61}})<b>Навигация и правила</b>\n"
             f"• {link('Рейды', LINKS['raids'])}\n• {link('Трейды', LINKS['trades'])}\n"
@@ -2094,7 +2265,12 @@ async def menu_nav(cb: CallbackQuery):
                  else f"\n<blockquote>{esc(rules_row['rule_text'])}</blockquote>")
     else:
         text += "\nПравила сообщества опубликованы в теме «Правила»."
-    await edit(cb, text, back_only())
+    return text
+
+
+@dp.callback_query(F.data == "menu_nav")
+async def menu_nav(cb: CallbackQuery):
+    await edit(cb, await nav_text(), back_only())
 
 
 _TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)[^>]*>")
@@ -3628,7 +3804,7 @@ async def private_text(msg: Message):
         if await save_roblox(msg):
             await reply(msg, f"({{20}})Ник Roblox сохранён: <b>{esc(msg.text.strip())}</b>", main_menu())
         return
-    await say(msg, MAIN_TEXT, main_menu())
+    await say(msg, MAIN_TEXT, reply_menu(1))
 
 
 # ================================ СТОК ================================
