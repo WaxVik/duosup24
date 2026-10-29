@@ -1,813 +1,1594 @@
 [
  {
   "title": "Rocket",
+  "ru": "Ракета",
   "category": "Фрукт",
-  "aliases": [],
+  "aliases": [
+   "Ракета"
+  ],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $5,000."
+  "description": "",
+  "stats": "Цена у Дилера: $5,000.",
+  "notes": ""
  },
  {
   "title": "Spin",
+  "ru": "Вращение",
   "category": "Фрукт",
-  "aliases": [],
+  "aliases": [
+   "Волчок"
+  ],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $7,500."
+  "description": "",
+  "stats": "Цена у Дилера: $7,500.",
+  "notes": ""
  },
  {
   "title": "Blade",
+  "ru": "Клинок",
   "category": "Фрукт",
-  "aliases": [],
+  "aliases": [
+   "Лезвие"
+  ],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $30,000."
+  "description": "",
+  "stats": "Цена у Дилера: $30,000.",
+  "notes": ""
  },
  {
   "title": "Spring",
+  "ru": "Пружина",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $60,000."
+  "description": "",
+  "stats": "Цена у Дилера: $60,000.",
+  "notes": ""
  },
  {
   "title": "Bomb",
+  "ru": "Бомба",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $80,000."
+  "description": "",
+  "stats": "Цена у Дилера: $80,000.",
+  "notes": ""
  },
  {
   "title": "Smoke",
+  "ru": "Дым",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $100,000."
+  "description": "",
+  "stats": "Цена у Дилера: $100,000.",
+  "notes": ""
  },
  {
   "title": "Spike",
+  "ru": "Шип",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $180,000."
+  "description": "",
+  "stats": "Цена у Дилера: $180,000.",
+  "notes": ""
  },
  {
   "title": "Flame",
+  "ru": "Пламя",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $250,000."
+  "description": "",
+  "stats": "Цена у Дилера: $250,000.",
+  "notes": ""
  },
  {
   "title": "Ice",
+  "ru": "Лёд",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $350,000."
+  "description": "",
+  "stats": "Цена у Дилера: $350,000.",
+  "notes": ""
  },
  {
   "title": "Sand",
+  "ru": "Песок",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $420,000."
+  "description": "",
+  "stats": "Цена у Дилера: $420,000.",
+  "notes": ""
  },
  {
   "title": "Dark",
+  "ru": "Тьма",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $500,000."
+  "description": "",
+  "stats": "Цена у Дилера: $500,000.",
+  "notes": ""
  },
  {
   "title": "Eagle",
+  "ru": "Орёл",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $550,000."
+  "description": "",
+  "stats": "Цена у Дилера: $550,000.",
+  "notes": ""
  },
  {
   "title": "Diamond",
+  "ru": "Алмаз",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $600,000."
+  "description": "",
+  "stats": "Цена у Дилера: $600,000.",
+  "notes": ""
  },
  {
   "title": "Light",
+  "ru": "Свет",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $650,000."
+  "description": "",
+  "stats": "Цена у Дилера: $650,000.",
+  "notes": ""
  },
  {
   "title": "Rubber",
+  "ru": "Резина",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $750,000."
+  "description": "",
+  "stats": "Цена у Дилера: $750,000.",
+  "notes": ""
  },
  {
   "title": "Ghost",
+  "ru": "Призрак",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $940,000."
+  "description": "",
+  "stats": "Цена у Дилера: $940,000.",
+  "notes": ""
  },
  {
   "title": "Magma",
+  "ru": "Магма",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $960,000."
+  "description": "",
+  "stats": "Цена у Дилера: $960,000.",
+  "notes": ""
  },
  {
   "title": "Quake",
+  "ru": "Землетрясение",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $1,000,000."
+  "description": "",
+  "stats": "Цена у Дилера: $1,000,000.",
+  "notes": ""
  },
  {
   "title": "Buddha",
+  "ru": "Будда",
   "category": "Фрукт",
-  "aliases": [],
+  "aliases": [
+   "Будда"
+  ],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $1,200,000."
+  "description": "",
+  "stats": "Цена у Дилера: $1,200,000.",
+  "notes": ""
  },
  {
   "title": "Love",
+  "ru": "Любовь",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $1,300,000."
+  "description": "",
+  "stats": "Цена у Дилера: $1,300,000.",
+  "notes": ""
  },
  {
   "title": "Creation",
+  "ru": "Созидание",
   "category": "Фрукт",
-  "aliases": [],
+  "aliases": [
+   "Создание"
+  ],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $1,400,000."
+  "description": "",
+  "stats": "Цена у Дилера: $1,400,000.",
+  "notes": ""
  },
  {
   "title": "Spider",
+  "ru": "Паук",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $1,500,000."
+  "description": "",
+  "stats": "Цена у Дилера: $1,500,000.",
+  "notes": ""
  },
  {
   "title": "Sound",
+  "ru": "Звук",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $1,700,000."
+  "description": "",
+  "stats": "Цена у Дилера: $1,700,000.",
+  "notes": ""
  },
  {
   "title": "Phoenix",
+  "ru": "Феникс",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $1,800,000."
+  "description": "",
+  "stats": "Цена у Дилера: $1,800,000.",
+  "notes": ""
  },
  {
   "title": "Portal",
+  "ru": "Портал",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $1,900,000."
+  "description": "",
+  "stats": "Цена у Дилера: $1,900,000.",
+  "notes": ""
  },
  {
   "title": "Lightning",
+  "ru": "Молния",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $2,100,000."
+  "description": "",
+  "stats": "Цена у Дилера: $2,100,000.",
+  "notes": ""
  },
  {
   "title": "Pain",
+  "ru": "Боль",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $2,300,000."
+  "description": "",
+  "stats": "Цена у Дилера: $2,300,000.",
+  "notes": ""
  },
  {
   "title": "Blizzard",
+  "ru": "Метель",
   "category": "Фрукт",
-  "aliases": [],
+  "aliases": [
+   "Близзард"
+  ],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $2,400,000."
+  "description": "",
+  "stats": "Цена у Дилера: $2,400,000.",
+  "notes": ""
  },
  {
   "title": "Gravity",
+  "ru": "Гравитация",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $2,500,000."
+  "description": "",
+  "stats": "Цена у Дилера: $2,500,000.",
+  "notes": ""
  },
  {
   "title": "Mammoth",
+  "ru": "Мамонт",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $2,700,000."
+  "description": "",
+  "stats": "Цена у Дилера: $2,700,000.",
+  "notes": ""
  },
  {
   "title": "T-Rex",
+  "ru": "Ти-Рекс",
   "category": "Фрукт",
   "aliases": [
    "T Rex",
-   "TRex"
+   "TRex",
+   "Т-Рекс",
+   "Тирекс"
   ],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $2,700,000."
+  "description": "",
+  "stats": "Цена у Дилера: $2,700,000.",
+  "notes": ""
  },
  {
   "title": "Dough",
+  "ru": "Тесто",
   "category": "Фрукт",
-  "aliases": [],
+  "aliases": [
+   "Тесто"
+  ],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $2,800,000."
+  "description": "",
+  "stats": "Цена у Дилера: $2,800,000.",
+  "notes": ""
  },
  {
   "title": "Shadow",
+  "ru": "Тень",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $2,900,000."
+  "description": "",
+  "stats": "Цена у Дилера: $2,900,000.",
+  "notes": ""
  },
  {
   "title": "Venom",
+  "ru": "Яд",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $3,000,000."
+  "description": "",
+  "stats": "Цена у Дилера: $3,000,000.",
+  "notes": ""
  },
  {
   "title": "Gas",
+  "ru": "Газ",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $3,200,000."
+  "description": "",
+  "stats": "Цена у Дилера: $3,200,000.",
+  "notes": ""
  },
  {
   "title": "Spirit",
+  "ru": "Дух",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $3,400,000."
+  "description": "",
+  "stats": "Цена у Дилера: $3,400,000.",
+  "notes": ""
  },
  {
   "title": "Leopard",
+  "ru": "Леопард",
   "category": "Фрукт",
   "aliases": [
    "Tiger",
-   "tiger"
+   "tiger",
+   "Тигр"
   ],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $5,000,000."
+  "description": "",
+  "stats": "Цена у Дилера: $5,000,000.",
+  "notes": ""
  },
  {
   "title": "Yeti",
+  "ru": "Йети",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $5,000,000."
+  "description": "",
+  "stats": "Цена у Дилера: $5,000,000.",
+  "notes": ""
  },
  {
   "title": "Kitsune",
+  "ru": "Китсуне",
   "category": "Фрукт",
-  "aliases": [],
+  "aliases": [
+   "Кицунэ",
+   "Лиса"
+  ],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $8,000,000."
+  "description": "",
+  "stats": "Цена у Дилера: $8,000,000.",
+  "notes": ""
  },
  {
   "title": "Control",
+  "ru": "Контроль",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $3,200,000."
+  "description": "",
+  "stats": "Цена у Дилера: $3,200,000.",
+  "notes": ""
  },
  {
   "title": "Dragon",
+  "ru": "Дракон",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": "Цена у Дилера: $15,000,000."
+  "description": "",
+  "stats": "Цена у Дилера: $15,000,000.",
+  "notes": ""
  },
  {
   "title": "Magnet",
+  "ru": "Магнит",
   "category": "Фрукт",
   "aliases": [],
   "obtain": "Купите у Дилера Blox Fruit, когда фрукт есть в стоке (актуальный сток — в теме «Стоки 24/7»). Также он может выпасть из гачи или появиться на карте случайным спавном.",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "50b Party Hat",
+  "ru": "Праздничная шляпа 50B",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Bandanna (Black)",
+  "ru": "Бандана (Чёрная)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Bandanna (Green)",
+  "ru": "Бандана (Зелёная)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Bandanna (Red)",
+  "ru": "Бандана (Красная)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Bear Ears",
+  "ru": "Медвежьи уши",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "Можно получить из «Random Surprise» у Death King за 50 Bones (Haunted Castle, Третье море).",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Black Cape",
+  "ru": "Чёрный плащ",
   "category": "Аксессуар",
-  "aliases": [
-   "Black Cape"
-  ],
+  "aliases": [],
   "obtain": "Купите у NPC Parlus в Marine Fortress (Первое море) за 50 000 Beli.",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Black Spikey Coat",
+  "ru": "Чёрное шипастое пальто",
   "category": "Аксессуар",
   "aliases": [
    "Black Spiky Coat"
   ],
   "obtain": "Выпадает с босса Jeremy (Второе море).",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Blue Spikey Coat",
+  "ru": "Синее шипастое пальто",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Red Spikey Coat",
+  "ru": "Красное шипастое пальто",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Celestial Helmet",
+  "ru": "Небесный шлем",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Choppa",
+  "ru": "Чоппа",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Coat",
+  "ru": "Пальто",
   "category": "Аксессуар",
   "aliases": [
    "Vice Admiral's Coat",
-   "Vice Admirals Coat"
+   "Vice Admirals Coat",
+   "Пальто вице-адмирала"
   ],
   "obtain": "Выпадает с босса Vice Admiral в Marine Fortress (Первое море), шанс около 10%.",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Cool Shades",
+  "ru": "Крутые очки",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Coven Witch Hat",
+  "ru": "Шляпа ведьмы шабаша",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Cracked Egg Helmet",
+  "ru": "Шлем из треснувшего яйца",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Cupid's Coat",
+  "ru": "Пальто Купидона",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Cupid's Top Hat",
+  "ru": "Цилиндр Купидона",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "D.S. Coat",
+  "ru": "Пальто D.S.",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Dark Coat",
+  "ru": "Тёмное пальто",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Dino Hood",
+  "ru": "Капюшон динозавра",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Divine Cloak",
+  "ru": "Божественный плащ",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Dragon Mantle",
+  "ru": "Мантия дракона",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Easter Bunny Cape",
+  "ru": "Плащ пасхального кролика",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Elf Hat",
+  "ru": "Шапка эльфа",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "Купите у Santa Claws за 250 конфет (во время рождественского ивента).",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Feathered Visage",
+  "ru": "Пернатая маска",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Frosty Helmet",
+  "ru": "Морозный шлем",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Ghoul Mask",
+  "ru": "Маска гуля",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "Купите у NPC El Perro за 50 Ectoplasm на Cursed Ship (Второе море).",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Golden Sunhat",
+  "ru": "Золотая панама",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Heart Shades",
+  "ru": "Очки-сердечки",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Holiday Cloak",
+  "ru": "Праздничный плащ",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Holy Crown",
+  "ru": "Святая корона",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Hunter Cape (Black)",
+  "ru": "Плащ охотника (Чёрный)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Jaw Shield",
+  "ru": "Щит-челюсть",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Kitsune Mask",
+  "ru": "Маска Китсуне",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Kitsune Ribbon",
+  "ru": "Лента Китсуне",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Lei",
+  "ru": "Лей",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Leviathan Crown",
+  "ru": "Корона Левиафана",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Leviathan Shield",
+  "ru": "Щит Левиафана",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Marine Cap",
+  "ru": "Фуражка морпеха",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Musketeer Hat",
+  "ru": "Шляпа мушкетёра",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Oni Helmet",
+  "ru": "Шлем они",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Pale Scarf",
+  "ru": "Бледный шарф",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Party Hat",
+  "ru": "Праздничная шляпа",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Peppermint Helmet",
+  "ru": "Мятный шлем",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Pilot Helmet",
+  "ru": "Шлем пилота",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Pink Coat",
+  "ru": "Розовое пальто",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Pretty Helmet",
+  "ru": "Красивый шлем",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Pumpkin Mask",
+  "ru": "Тыквенная маска",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Red Ribbon",
+  "ru": "Красная лента",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Romantic Bouquet",
+  "ru": "Романтический букет",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Sanguine Cloak",
+  "ru": "Кровавый плащ",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Santa Hat",
+  "ru": "Шапка Санты",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Shark Tooth Necklace",
+  "ru": "Ожерелье из акульих зубов",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Swan Glasses",
+  "ru": "Лебединые очки",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Swordsman Hat",
+  "ru": "Шляпа мечника",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "T-Rex Skull",
+  "ru": "Череп Ти-Рекса",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Terror Jaw",
+  "ru": "Челюсть ужаса",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Tomoe Ring",
+  "ru": "Кольцо томоэ",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Top Hat",
+  "ru": "Цилиндр",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Usoap's Hat",
+  "ru": "Шляпа Усоппа",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Uzoth's Cloak",
+  "ru": "Плащ Узота",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Valkyrie Helm",
+  "ru": "Шлем валькирии",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Warrior Helmet",
+  "ru": "Шлем воина",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Zebra Cap",
+  "ru": "Кепка зебры",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Headband (Black)",
+  "ru": "Головная повязка (Чёрная)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Headband (Blue)",
+  "ru": "Головная повязка (Синяя)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Headband (Green)",
+  "ru": "Головная повязка (Зелёная)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Headband (Orange)",
+  "ru": "Головная повязка (Оранжевая)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Headband (Purple)",
+  "ru": "Головная повязка (Фиолетовая)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Headband (Red)",
+  "ru": "Головная повязка (Красная)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Headband (White)",
+  "ru": "Головная повязка (Белая)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
  },
  {
   "title": "Headband (Yellow)",
+  "ru": "Головная повязка (Жёлтая)",
   "category": "Аксессуар",
   "aliases": [],
   "obtain": "",
-  "description": ""
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Combat",
+  "ru": "Боевой стиль",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Dark Step",
+  "ru": "Тёмный шаг",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Electric",
+  "ru": "Электро",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Water Kung Fu",
+  "ru": "Водное кунг-фу",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Dragon Breath",
+  "ru": "Дыхание дракона",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Superhuman",
+  "ru": "Сверхчеловек",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Death Step",
+  "ru": "Шаг смерти",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Sharkman Karate",
+  "ru": "Каратэ человека-акулы",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Electric Claw",
+  "ru": "Электрический коготь",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Dragon Talon",
+  "ru": "Коготь дракона",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Godhuman",
+  "ru": "Годхьюман",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Sanguine Art",
+  "ru": "Кровавое искусство",
+  "category": "Боевой стиль",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Katana",
+  "ru": "Катана",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Cutlass",
+  "ru": "Абордажная сабля",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Dual-Headed Blade",
+  "ru": "Двуглавый клинок",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Iron Mace",
+  "ru": "Железная булава",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Triple Katana",
+  "ru": "Тройная катана",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Pipe",
+  "ru": "Труба",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Soul Cane",
+  "ru": "Трость души",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Bisento",
+  "ru": "Бизенто",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Wando",
+  "ru": "Ванд",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Saddi",
+  "ru": "Сэдди",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Shisui",
+  "ru": "Шисуи",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Yama",
+  "ru": "Яма",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Tushita",
+  "ru": "Тушита",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Dark Blade",
+  "ru": "Тёмный клинок",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Dark Dagger",
+  "ru": "Тёмный кинжал",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Koko",
+  "ru": "Коко",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Buddy Sword",
+  "ru": "Меч-приятель",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Canvander",
+  "ru": "Канвандер",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Dragonheart",
+  "ru": "Сердце дракона",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Dragon Trident",
+  "ru": "Трезубец дракона",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Midnight Blade",
+  "ru": "Полуночный клинок",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Pole (1st Form)",
+  "ru": "Шест (1-я форма)",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Pole (2nd Form)",
+  "ru": "Шест (2-я форма)",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Hallow Scythe",
+  "ru": "Священная коса",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Cursed Dual Katana",
+  "ru": "Проклятая двойная катана",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "True Triple Katana",
+  "ru": "Истинная тройная катана",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Shark Anchor",
+  "ru": "Акулий якорь",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Rengoku",
+  "ru": "Ренгоку",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Spikey Trident",
+  "ru": "Шипастый трезубец",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
+ },
+ {
+  "title": "Jitte",
+  "ru": "Дзиттэ",
+  "category": "Меч",
+  "aliases": [],
+  "obtain": "",
+  "description": "",
+  "stats": "",
+  "notes": ""
  }
 ]

@@ -47,7 +47,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.8.0"
+BOT_VERSION = "3.9.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -436,6 +436,8 @@ async def init_db() -> None:
             updated_at BIGINT NOT NULL DEFAULT 0)""",
         "ALTER TABLE wiki_entries ADD COLUMN IF NOT EXISTS videos TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE wiki_entries ADD COLUMN IF NOT EXISTS skills TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE wiki_entries ADD COLUMN IF NOT EXISTS stats TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE wiki_entries ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE questions ADD COLUMN IF NOT EXISTS claimed_by BIGINT",
         "ALTER TABLE questions ADD COLUMN IF NOT EXISTS claimed_at BIGINT",
         "ALTER TABLE questions ADD COLUMN IF NOT EXISTS dm_msg BIGINT",
@@ -4909,9 +4911,11 @@ async def ap_ds_toggle(cb: CallbackQuery):
 
 # ================================== ВИКИ ==================================
 WIKI_CATEGORIES = ["Фрукт", "Аксессуар", "Предмет", "Меч", "Оружие", "Боевой стиль", "NPC", "Босс", "Остров", "Событие", "Другое"]
+WIKI_SECTIONS = [("description", "Описание"), ("obtain", "Как получить"), ("stats", "Характеристика"), ("notes", "Примечания")]
+SKILL_LABELS = ["Клики M1", "Z", "X", "C", "V", "F"]
 WIKI_COOLDOWN = 10  # секунд между автоответами вики одному человеку
 WIKI_MAX_MEDIA = 10
-WIKI_MAX_SKILLS = 12
+WIKI_MAX_SKILLS = 30
 WIKI_SEED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiki_seed.json")
 _wiki_index: dict = {"at": 0, "keys": {}, "on": False}
 _wiki_last: dict[int, int] = {}
@@ -4927,6 +4931,9 @@ class WikiSt(StatesGroup):
     edit_value = State()
     edit_photos = State()
     import_file = State()
+    stats = State()
+    notes = State()
+    sk_form = State()
     sk_label = State()
     sk_text = State()
     sk_media = State()
@@ -5037,27 +5044,57 @@ def wiki_media_html(items: list, prefix: str, caption: str) -> tuple[str, dict]:
 
 
 async def wiki_rich_payload(entry) -> tuple[str, dict]:
-    """Карточка записи: заголовок, слайдшоу из фото и видео, под ним «Как получить» и описание."""
+    """Карточка: название, фото/видео слайдшоу, затем описание, как получить, характеристика, примечания."""
     keys = (await wiki_index())["keys"]
     parts = [f"<h2>{esc(entry['title'])}</h2>", f"<p><i>{esc(entry['category'])}</i></p>"]
     media_html, media = wiki_media_html(wiki_media_of(entry), "m", entry["title"])
     parts.append(media_html)
-    if entry["obtain"].strip():
-        parts.append("<h3>Как получить</h3>" + wiki_rich_html(entry["obtain"], keys))
-    if entry["description"].strip():
-        parts.append("<h3>Описание</h3>" + wiki_rich_html(entry["description"], keys))
-    if not entry["obtain"].strip() and not entry["description"].strip():
+    filled = False
+    for field, title in WIKI_SECTIONS:
+        if (entry[field] or "").strip():
+            parts.append(f"<h3>{title}</h3>" + wiki_rich_html(entry[field], keys))
+            filled = True
+    if not filled:
         parts.append("<p><i>Информация пока не добавлена.</i></p>")
     return "".join(parts), media
 
 
-async def wiki_skill_payload(entry, page: int) -> tuple[str, dict]:
+SKILL_ORDER = ["M1", "Z", "X", "C", "V", "F"]
+_LOOKALIKE = str.maketrans({"М": "M", "С": "C", "Х": "X", "Ф": "F"})
+
+
+def skill_rank(label: str) -> int:
+    t = (label or "").strip().upper().translate(_LOOKALIKE)
+    if t.startswith("КЛИК") or t.startswith("M1") or t.startswith("M 1"):
+        return 0
+    for i, k in enumerate(SKILL_ORDER[1:], 1):
+        if t[:1] == k and (len(t) == 1 or not t[1].isalnum()):
+            return i
+    return 50
+
+
+def wiki_skill_pages(entry, form: int) -> list:
+    pages = [sk for sk in json.loads(entry["skills"] or "[]") if int(sk.get("form", 1)) == form]
+    return sorted(pages, key=lambda sk: skill_rank(sk.get("label", "")))  # порядок M1, Z, X, C, V, F; остальное — как добавили
+
+
+def wiki_forms(entry) -> list:
+    return sorted({int(sk.get("form", 1)) for sk in json.loads(entry["skills"] or "[]")})
+
+
+async def wiki_skill_payload(entry, form: int) -> tuple[str, dict]:
+    """Одно Rich-сообщение: у каждого приёма заголовок, несколько фото/видео и описание (характеристика, урон)."""
     keys = (await wiki_index())["keys"]
-    sk = json.loads(entry["skills"] or "[]")[page]
-    items = [(m.get("t", "video"), m["id"]) for m in sk.get("media", []) if isinstance(m, dict) and m.get("id")]
-    media_html, media = wiki_media_html(items[:WIKI_MAX_MEDIA], "s", sk["label"])
-    parts = [f"<h2>{esc(entry['title'])} — скиллы</h2>", f"<p><i>{esc(sk['label'])}</i></p>", media_html,
-             wiki_rich_html(sk.get("text", ""), keys)]
+    pages = wiki_skill_pages(entry, form)
+    parts, media = [f"<h2>{esc(entry['title'])} — скиллы{' (V2)' if form == 2 else ''}</h2>"], {}
+    for i, sk in enumerate(pages):
+        parts.append(f"<h3>{esc(sk['label'])}</h3>")
+        items = [(m.get("t", "video"), m["id"]) for m in sk.get("media", []) if isinstance(m, dict) and m.get("id")]
+        media_html, m = wiki_media_html(items[:WIKI_MAX_MEDIA], f"s{i}_", sk["label"])
+        parts.append(media_html)
+        media.update(m)
+        if (sk.get("text") or "").strip():
+            parts.append(wiki_rich_html(sk["text"], keys))
     return "".join(parts), media
 
 
@@ -5065,30 +5102,28 @@ async def wiki_plain_html(entry) -> str:
     """Запасной вариант (обычное сообщение), если Rich-сообщение не отправилось."""
     keys = (await wiki_index())["keys"]
     text = f"<b>{esc(entry['title'])}</b>\n<i>{esc(entry['category'])}</i>"
-    if entry["obtain"].strip():
-        text += "\n\n<b>Как получить</b>\n" + wiki_text_html(entry["obtain"], keys)
-    if entry["description"].strip():
-        text += "\n\n<b>Описание</b>\n" + wiki_text_html(entry["description"], keys)
+    for field, title in WIKI_SECTIONS:
+        if (entry[field] or "").strip():
+            text += f"\n\n<b>{title}</b>\n" + wiki_text_html(entry[field], keys)
     return text[:4000]
 
 
 def wiki_entry_markup(entry, viewer: int = 0):
-    """Под карточкой — кнопка «Скиллы» (если они есть). viewer: кто открыл, чужие нажатия не принимаются."""
-    if not json.loads(entry["skills"] or "[]"):
+    """Под карточкой — кнопка «Посмотреть скиллы» (если они есть). viewer: чужие нажатия не принимаются."""
+    forms = wiki_forms(entry)
+    if not forms:
         return None
-    return kb([btn("({21}) Скиллы", f"wk_s_{entry['id']}_0_{viewer}")])
+    return kb([btn("({21}) Посмотреть скиллы", f"wk_s_{entry['id']}_{forms[0]}_{viewer}")])
 
 
-def wiki_skill_nav(eid: int, skills: list, page: int, viewer: int):
-    rows, row = [], []
-    for i, sk in enumerate(skills):
-        row.append(btn(("▪️ " if i == page else "") + sk["label"][:24], f"wk_s_{eid}_{i}_{viewer}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([btn("({63}) Назад", f"wk_b_{eid}_{viewer}")])
+def wiki_skill_nav(entry, form: int, viewer: int):
+    forms = wiki_forms(entry)
+    rows = []
+    if form == 1 and 2 in forms:
+        rows.append([btn("({21}) Посмотреть V2 форму", f"wk_s_{entry['id']}_2_{viewer}")])
+    if form == 2 and 1 in forms:
+        rows.append([btn("({21}) Вернуться к V1", f"wk_s_{entry['id']}_1_{viewer}")])
+    rows.append([btn("({63}) Назад", f"wk_b_{entry['id']}_{viewer}")])
     return kb(*rows)
 
 
@@ -5249,22 +5284,22 @@ async def wiki_edit_view(cb: CallbackQuery, html_text: str, media: dict, markup,
 
 @dp.callback_query(F.data.startswith("wk_s_"))
 async def wk_skill_view(cb: CallbackQuery):
-    _, _, eid_s, page_s, viewer_s = cb.data.split("_", 4)
+    _, _, eid_s, form_s, viewer_s = cb.data.split("_", 4)
     viewer = int(viewer_s)
     if viewer and cb.from_user.id not in (viewer, CREATOR_ID):
         await cb.answer("Это сообщение открыл другой участник. Напишите свой запрос.", show_alert=True)
         return
     entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", int(eid_s))
-    skills = json.loads(entry["skills"] or "[]") if entry else []
-    if not skills:
+    form = int(form_s)
+    pages = wiki_skill_pages(entry, form) if entry else []
+    if not pages:
         await cb.answer("Скиллов пока нет.", show_alert=True)
         return
-    page = max(0, min(int(page_s), len(skills) - 1))
-    html_text, media = await wiki_skill_payload(entry, page)
+    html_text, media = await wiki_skill_payload(entry, form)
     keys = (await wiki_index())["keys"]
-    plain = (f"<b>{esc(entry['title'])}</b> — {esc(skills[page]['label'])}\n\n"
-             + wiki_text_html(skills[page].get("text", ""), keys))
-    await wiki_edit_view(cb, html_text, media, wiki_skill_nav(entry["id"], skills, page, viewer), plain)
+    plain = f"<b>{esc(entry['title'])}</b> — скиллы{' (V2)' if form == 2 else ''}" + "".join(
+        f"\n\n<b>{esc(sk['label'])}</b>\n" + wiki_text_html(sk.get("text", ""), keys) for sk in pages)
+    await wiki_edit_view(cb, html_text, media, wiki_skill_nav(entry, form, viewer), plain)
 
 
 @dp.callback_query(F.data.startswith("wk_b_"))
@@ -5310,17 +5345,20 @@ def wk_media_item(msg: Message):
 
 
 async def wiki_upsert(title: str, category: str, aliases: list, obtain: str, description: str, photos: list,
-                      videos: list | None = None, skills: list | None = None) -> int:
-    """videos / skills = None — оставить как есть у существующей записи."""
+                      videos: list | None = None, skills: list | None = None,
+                      stats: str | None = None, notes: str | None = None) -> int:
+    """videos / skills / stats / notes = None — оставить как есть у существующей записи."""
     row = await pool().fetchrow(
-        """INSERT INTO wiki_entries (title, norm, category, aliases, obtain, description, photos, videos, skills, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,'[]'),COALESCE($9,'[]'),$10)
+        """INSERT INTO wiki_entries (title, norm, category, aliases, obtain, description, photos, videos, skills,
+                                     stats, notes, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,'[]'),COALESCE($9,'[]'),COALESCE($10,''),COALESCE($11,''),$12)
            ON CONFLICT (norm) DO UPDATE SET title=$1, category=$3, aliases=$4, obtain=$5, description=$6, photos=$7,
-                videos=COALESCE($8, wiki_entries.videos), skills=COALESCE($9, wiki_entries.skills), updated_at=$10
+                videos=COALESCE($8, wiki_entries.videos), skills=COALESCE($9, wiki_entries.skills),
+                stats=COALESCE($10, wiki_entries.stats), notes=COALESCE($11, wiki_entries.notes), updated_at=$12
            RETURNING id""",
         title, wiki_norm(title), category, json.dumps(aliases, ensure_ascii=False), obtain, description,
         json.dumps(photos), None if videos is None else json.dumps(videos),
-        None if skills is None else json.dumps(skills, ensure_ascii=False), now_ts())
+        None if skills is None else json.dumps(skills, ensure_ascii=False), stats, notes, now_ts())
     wiki_dirty()
     return row["id"]
 
@@ -5339,7 +5377,8 @@ async def wiki_finish_add(msg: Message, state: FSMContext) -> None:
     await state.clear()
     photos, videos = wiki_split_media(data.get("media", []))
     eid = await wiki_upsert(data["title"], data.get("category", "Другое"), data.get("aliases", []),
-                            data.get("obtain", ""), data.get("description", ""), photos, videos)
+                            data.get("obtain", ""), data.get("description", ""), photos, videos,
+                            stats=data.get("stats", ""), notes=data.get("notes", ""))
     entry = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", eid)
     await reply(msg, f"({{20}})Запись <b>{esc(entry['title'])}</b> сохранена. Так она выглядит у участников:")
     await wiki_send(msg.chat.id, entry, topic_of(msg))
@@ -5390,21 +5429,35 @@ async def wk_cat_text(msg: Message, state: FSMContext):
 @dp.message(WikiSt.aliases, F.text, ~F.text.startswith("/"))
 async def wk_aliases(msg: Message, state: FSMContext):
     await state.update_data(aliases=[] if msg.text.strip() == "-" else wiki_split_aliases(msg.text))
-    await state.set_state(WikiSt.obtain)
-    await reply(msg, "({39})<b>Как получить</b> — коротко и понятно. Бот скопирует сообщение как есть (Premium Emoji, цитаты, ссылки). "
+    await state.set_state(WikiSt.description)
+    await reply(msg, "({39})<b>Описание</b> — бот скопирует сообщение как есть (Premium Emoji, цитаты, ссылки). "
                      "Ссылки на другие записи: <code>[[Mirror Fractal]]</code>. «-» — пропустить.")
+
+
+@dp.message(WikiSt.description, F.text, ~F.text.startswith("/"))
+async def wk_description(msg: Message, state: FSMContext):
+    await state.update_data(description="" if msg.text.strip() == "-" else msg.html_text.strip())
+    await state.set_state(WikiSt.obtain)
+    await reply(msg, "({39})<b>Как получить</b> — коротко и понятно. «-» — пропустить.")
 
 
 @dp.message(WikiSt.obtain, F.text, ~F.text.startswith("/"))
 async def wk_obtain(msg: Message, state: FSMContext):
     await state.update_data(obtain="" if msg.text.strip() == "-" else msg.html_text.strip())
-    await state.set_state(WikiSt.description)
-    await reply(msg, "({39})<b>Описание</b> — тоже копируется как есть. «-» — пропустить.")
+    await state.set_state(WikiSt.stats)
+    await reply(msg, "({39})<b>Характеристика</b> (например бонусы аксессуара, урон, кулдаун). «-» — пропустить.")
 
 
-@dp.message(WikiSt.description, F.text, ~F.text.startswith("/"))
-async def wk_description(msg: Message, state: FSMContext):
-    await state.update_data(description="" if msg.text.strip() == "-" else msg.html_text.strip(), media=[])
+@dp.message(WikiSt.stats, F.text, ~F.text.startswith("/"))
+async def wk_stats(msg: Message, state: FSMContext):
+    await state.update_data(stats="" if msg.text.strip() == "-" else msg.html_text.strip())
+    await state.set_state(WikiSt.notes)
+    await reply(msg, "({39})<b>Примечания</b>. «-» — пропустить.")
+
+
+@dp.message(WikiSt.notes, F.text, ~F.text.startswith("/"))
+async def wk_notes(msg: Message, state: FSMContext):
+    await state.update_data(notes="" if msg.text.strip() == "-" else msg.html_text.strip(), media=[])
     await state.set_state(WikiSt.photos)
     await reply(msg, "({39})Отправьте <b>фото и видео</b> по одному (они будут слайд-шоу). Когда закончите — /done. «-» — без медиа.")
 
@@ -5431,12 +5484,15 @@ async def wk_photos_skip(msg: Message, state: FSMContext):
 def wiki_card(entry) -> str:
     aliases = ", ".join(json.loads(entry["aliases"] or "[]")) or "—"
     media = len(wiki_media_of(entry))
-    obtain = "есть" if entry["obtain"].strip() else "нет"
-    desc = "есть" if entry["description"].strip() else "нет"
-    skills = len(json.loads(entry["skills"] or "[]"))
+    def has(field: str) -> str:
+        return "есть" if (entry[field] or "").strip() else "нет"
+    skills = json.loads(entry["skills"] or "[]")
+    v2 = sum(1 for sk in skills if int(sk.get("form", 1)) == 2)
     return (f"({{39}})<b>{esc(entry['title'])}</b> • {esc(entry['category'])}\n"
-            f"<blockquote>Другие названия: {esc(aliases)}\nФото и видео: {media}\nКак получить: {obtain}\n"
-            f"Описание: {desc}\nСтраниц скиллов: {skills}</blockquote>")
+            f"<blockquote>Другие названия: {esc(aliases)}\nФото и видео: {media}\n"
+            f"Описание: {has('description')} • Как получить: {has('obtain')}\n"
+            f"Характеристика: {has('stats')} • Примечания: {has('notes')}\n"
+            f"Скиллы: {len(skills) - v2} (V2: {v2})</blockquote>")
 
 
 def wiki_edit_markup(eid: int) -> InlineKeyboardMarkup:
@@ -5445,7 +5501,8 @@ def wiki_edit_markup(eid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [b("✏️ Название", "title"), b("🏷 Др. названия", "aliases")],
         [b("📂 Категория", "category"), b("⚔️ Скиллы", "skills")],
-        [b("🧭 Как получить", "obtain"), b("📝 Описание", "description")],
+        [b("📝 Описание", "description"), b("🧭 Как получить", "obtain")],
+        [b("📊 Характеристика", "stats"), b("🗒 Примечания", "notes")],
         [b("🖼 Медиа: заменить", "photos"), b("➕ Медиа: добавить", "photosadd")],
         [b("👁 Показать как у участников", "show"), b("🗑 Удалить", "del")],
     ])
@@ -5534,7 +5591,8 @@ async def wk_edit_cb(cb: CallbackQuery, state: FSMContext):
         await state.set_state(WikiSt.edit_value)
         await state.update_data(eid=eid, field=field)
         hint = {"title": "новое название", "aliases": "другие названия через запятую",
-                "obtain": "текст «Как получить» (скопирую как есть)", "description": "текст описания (скопирую как есть)"}[field]
+                "obtain": "текст «Как получить» (скопирую как есть)", "description": "текст описания (скопирую как есть)",
+                "stats": "текст «Характеристика» (скопирую как есть)", "notes": "текст «Примечания» (скопирую как есть)"}[field]
         await cb.message.answer(R(f"({{39}})Отправьте {hint}. «-» — очистить."), **wk_thread(cb))
 
 
@@ -5608,16 +5666,17 @@ async def wk_edit_photos_done(msg: Message, state: FSMContext):
     await wiki_send(msg.chat.id, entry, topic_of(msg))
 
 
-# ---------- скиллы: страницы (например «X — на земле», «X — в воздухе», «Z») ----------
+# ---------- скиллы: приёмы (Клики M1, Z, X, C, V, F), форма V1 и V2 ----------
 def wiki_skills_manager(entry):
     skills = json.loads(entry["skills"] or "[]")
-    lines = [f"{i + 1}. {esc(sk['label'])} — медиа: {len(sk.get('media', []))}" for i, sk in enumerate(skills)]
+    lines = [f"{'V2' if int(sk.get('form', 1)) == 2 else 'V1'} • {esc(sk['label'])} — медиа: {len(sk.get('media', []))}"
+             for sk in skills]
     text = (f"({{39}})<b>{esc(entry['title'])}</b> — скиллы\n"
-            f"<blockquote>{chr(10).join(lines) if lines else 'Страниц пока нет.'}</blockquote>")
-    rows = [[InlineKeyboardButton(text=f"🗑 {i + 1}. {sk['label'][:24]}", callback_data=f"wk_skdel_{entry['id']}_{i}")]
-            for i, sk in enumerate(skills)]
+            f"<blockquote>{chr(10).join(lines) if lines else 'Приёмов пока нет.'}</blockquote>")
+    rows = [[InlineKeyboardButton(text=f"🗑 {'V2' if int(sk.get('form', 1)) == 2 else 'V1'} {sk['label'][:22]}",
+                                  callback_data=f"wk_skdel_{entry['id']}_{i}")] for i, sk in enumerate(skills)]
     if len(skills) < WIKI_MAX_SKILLS:
-        rows.append([InlineKeyboardButton(text="➕ Добавить страницу", callback_data=f"wk_skadd_{entry['id']}")])
+        rows.append([InlineKeyboardButton(text="➕ Добавить приём", callback_data=f"wk_skadd_{entry['id']}")])
     rows.append([InlineKeyboardButton(text="⬅️ К записи", callback_data=f"wk_card_{entry['id']}")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -5655,25 +5714,63 @@ async def wk_skill_add(cb: CallbackQuery, state: FSMContext):
     if not wk_creator(cb):
         await cb.answer("⛔ Только создатель.", show_alert=True)
         return
-    await state.set_state(WikiSt.sk_label)
+    await state.set_state(WikiSt.sk_form)
     await state.update_data(eid=int(cb.data.removeprefix("wk_skadd_")))
     await cb.answer()
-    await cb.message.answer(R("({39})Название страницы — оно будет на кнопке. Например: <code>X — на земле</code>, "
-                              "<code>X — в воздухе</code>, <code>Z</code>."), **wk_thread(cb))
+    await cb.message.answer(R("({39})Для какой формы фрукта этот приём?"),
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                                InlineKeyboardButton(text="V1 (обычная)", callback_data="wk_skf_1"),
+                                InlineKeyboardButton(text="V2 (пробуждённая)", callback_data="wk_skf_2")]]),
+                            **wk_thread(cb))
+
+
+@dp.callback_query(WikiSt.sk_form, F.data.startswith("wk_skf_"))
+async def wk_sk_form(cb: CallbackQuery, state: FSMContext):
+    if not wk_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await state.update_data(form=int(cb.data.removeprefix("wk_skf_")))
+    await state.set_state(WikiSt.sk_label)
+    await cb.answer()
+    rows, row = [], []
+    for i, name in enumerate(SKILL_LABELS):
+        row.append(InlineKeyboardButton(text=name, callback_data=f"wk_skl_{i}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    await cb.message.answer(R("({39})Выберите приём или напишите своё название (например <code>X — в воздухе</code>)."),
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), **wk_thread(cb))
+
+
+async def wk_sk_ask_text(message: Message, state: FSMContext, label: str) -> None:
+    await state.update_data(label=label[:40])
+    await state.set_state(WikiSt.sk_text)
+    await message.answer(R(f"({{39}})<b>{esc(label)}</b>: описание, характеристика и урон одним сообщением. "
+                           "Скопирую как есть (Premium Emoji, цитаты, ссылки). «-» — только медиа."),
+                         **({"message_thread_id": message.message_thread_id} if message.is_topic_message else {}))
+
+
+@dp.callback_query(WikiSt.sk_label, F.data.startswith("wk_skl_"))
+async def wk_sk_label_cb(cb: CallbackQuery, state: FSMContext):
+    if not wk_creator(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await cb.answer()
+    await wk_sk_ask_text(cb.message, state, SKILL_LABELS[int(cb.data.removeprefix("wk_skl_"))])
 
 
 @dp.message(WikiSt.sk_label, F.text, ~F.text.startswith("/"))
 async def wk_sk_label(msg: Message, state: FSMContext):
-    await state.update_data(label=msg.text.strip()[:40])
-    await state.set_state(WikiSt.sk_text)
-    await reply(msg, "({39})Описание скилла: бот скопирует сообщение как есть (Premium Emoji, цитаты, ссылки). «-» — только медиа.")
+    await wk_sk_ask_text(msg, state, msg.text.strip())
 
 
 @dp.message(WikiSt.sk_text, F.text, ~F.text.startswith("/"))
 async def wk_sk_text(msg: Message, state: FSMContext):
     await state.update_data(text="" if msg.text.strip() == "-" else msg.html_text.strip(), media=[])
     await state.set_state(WikiSt.sk_media)
-    await reply(msg, "({39})Теперь видео или фото этого скилла по одному, затем /done. «-» — без медиа.")
+    await reply(msg, "({39})Теперь несколько фото или видео этого приёма по одному, затем /done. «-» — без медиа.")
 
 
 @dp.message(WikiSt.sk_media, F.photo | F.video | F.animation)
@@ -5692,7 +5789,7 @@ async def wk_sk_finish(msg: Message, state: FSMContext) -> None:
     if not entry:
         return
     skills = json.loads(entry["skills"] or "[]")
-    skills.append({"label": data["label"], "text": data.get("text", ""),
+    skills.append({"form": data.get("form", 1), "label": data["label"], "text": data.get("text", ""),
                    "media": [{"t": t, "id": i} for t, i in data.get("media", [])]})
     await pool().execute("UPDATE wiki_entries SET skills=$1, updated_at=$2 WHERE id=$3",
                          json.dumps(skills[:WIKI_MAX_SKILLS], ensure_ascii=False), now_ts(), entry["id"])
@@ -5752,14 +5849,17 @@ async def wiki_import(entries: list) -> tuple[int, int, int]:
         as_html = str(e_.get("format", "")).lower() == "html"
 
         def text_of(key: str, current: str) -> str:
-            if key not in e_:
-                return current
+            if key not in e_ or not str(e_[key] or "").strip():
+                return current  # пустое поле в файле не стирает уже написанный текст
             value = str(e_[key] or "").strip()
             return value if as_html else esc(value)
 
         aliases = e_["aliases"] if "aliases" in e_ else (json.loads(old["aliases"]) if old else [])
         if isinstance(aliases, str):
             aliases = wiki_split_aliases(aliases)
+        if str(e_.get("ru", "")).strip():  # русское название — тоже название для поиска
+            aliases = [*aliases, str(e_["ru"]).strip()]
+        aliases = list(dict.fromkeys(str(a) for a in aliases))
         photos = e_["photos"] if isinstance(e_.get("photos"), list) else (json.loads(old["photos"]) if old else [])
         videos = None
         if isinstance(e_.get("videos"), list):
@@ -5770,13 +5870,16 @@ async def wiki_import(entries: list) -> tuple[int, int, int]:
             for sk in e_["skills"][:WIKI_MAX_SKILLS]:
                 if isinstance(sk, dict) and str(sk.get("label", "")).strip():
                     text = str(sk.get("text", "") or "").strip()
-                    skills.append({"label": str(sk["label"]).strip()[:40], "text": text if as_html else esc(text),
+                    skills.append({"form": 2 if int(sk.get("form", 1) or 1) == 2 else 1,
+                                   "label": str(sk["label"]).strip()[:40], "text": text if as_html else esc(text),
                                    "media": [{"t": str(m.get("t", "video")), "id": str(m["id"])}
                                              for m in sk.get("media", []) if isinstance(m, dict) and m.get("id")]})
         await wiki_upsert(title, str(e_.get("category") or (old["category"] if old else "Другое"))[:30],
                           [str(a) for a in aliases][:20], text_of("obtain", old["obtain"] if old else ""),
                           text_of("description", old["description"] if old else ""), [str(p) for p in photos][:10],
-                          videos, skills)
+                          videos, skills,
+                          stats=text_of("stats", old["stats"] if old else "") if ("stats" in e_ or old) else "",
+                          notes=text_of("notes", old["notes"] if old else "") if ("notes" in e_ or old) else "")
         if old:
             updated += 1
         else:
@@ -5825,6 +5928,7 @@ async def wikiexport_cmd(msg: Message):
     rows = await pool().fetch("SELECT * FROM wiki_entries ORDER BY category, title")
     out = [{"title": r["title"], "category": r["category"], "aliases": json.loads(r["aliases"] or "[]"),
             "obtain": r["obtain"], "description": r["description"], "photos": json.loads(r["photos"] or "[]"),
+            "stats": r["stats"], "notes": r["notes"],
             "videos": json.loads(r["videos"] or "[]"), "skills": json.loads(r["skills"] or "[]"),
             "format": "html"} for r in rows]
     data = json.dumps(out, ensure_ascii=False, indent=1).encode("utf-8")
