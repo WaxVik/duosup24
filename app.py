@@ -20,6 +20,7 @@ import asyncio
 import html
 import logging
 import os
+import random
 import difflib
 import re
 import secrets
@@ -45,11 +46,12 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     Message,
+    PollAnswer,
     ReplyKeyboardMarkup,
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.10.0"
+BOT_VERSION = "3.11.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -89,6 +91,7 @@ TOPICS = {
     "questions": env_int("TOPIC_QUESTIONS", 387),
     "reports": env_int("TOPIC_REPORTS", 258),          # только репорты участников
     "redact": env_int("TOPIC_REDACT", 8),              # Редакт (только создатель)
+    "search": env_int("TOPIC_SEARCH", env_int("TOPIC_MOD_CHAT", 6)),  # заявки на вступление в администрацию
 }
 
 LINKS = {
@@ -445,6 +448,16 @@ async def init_db() -> None:
         "ALTER TABLE questions ADD COLUMN IF NOT EXISTS dm_msg BIGINT",
         "ALTER TABLE questions ADD COLUMN IF NOT EXISTS card_chat BIGINT",
         "ALTER TABLE questions ADD COLUMN IF NOT EXISTS card_msg BIGINT",
+        """CREATE TABLE IF NOT EXISTS admin_test_q (
+            id SERIAL PRIMARY KEY, pos INT NOT NULL DEFAULT 0, kind TEXT NOT NULL, question TEXT NOT NULL,
+            options TEXT NOT NULL DEFAULT '[]', correct INT)""",
+        """CREATE TABLE IF NOT EXISTS admin_search (
+            id SERIAL PRIMARY KEY, opened_at BIGINT NOT NULL, closed_at BIGINT, questions TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS admin_attempt (
+            id SERIAL PRIMARY KEY, search_id INT NOT NULL, user_id BIGINT NOT NULL, started_at BIGINT NOT NULL,
+            finished_at BIGINT, status TEXT NOT NULL DEFAULT 'in_progress', correct INT, total INT,
+            answers TEXT NOT NULL DEFAULT '[]', admin_chat BIGINT, admin_msg BIGINT,
+            decision TEXT, decided_by BIGINT, decided_at BIGINT, UNIQUE (search_id, user_id))""",
         """CREATE TABLE IF NOT EXISTS applications (
             id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, kind TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active', chat_message_id BIGINT,
@@ -2069,7 +2082,7 @@ def reply_menu(page: int = 1) -> ReplyKeyboardMarkup:
         rows = [
             [rb("Мои нарушения", "violations"), rb("Вопрос | Ответ", "faq")],
             [rb("✍️ Правила"), rb("О наборах в админ", "admin")],
-            [rb("Язык / Language", "lang")],
+            [rb("Язык / Language", "lang"), rb("О боте")],
             [rb("Назад", "back", "danger"), rb(f"Дал{JOIN}ьше", "next", "success")],
         ]
     else:
@@ -2086,7 +2099,7 @@ RM_LABELS = {  # текст кнопки (без эмодзи) -> ключ
     "Сток": "stock", "Мини игры": "games", "Создать заявку": "create", "Найти заявку": "find",
     "Профиль": "profile", "Вики": "wiki", "Навигация": "nav", "Дальше": "next1",
     f"Дал{JOIN}ьше": "next2", "Мои нарушения": "violations", "Вопрос | Ответ": "faq", "Правила": "rules",
-    "О наборах в админ": "admin", "Язык / Language": "lang", "Назад": "back",
+    "О наборах в админ": "admin", "Язык / Language": "lang", "О боте": "about", "Назад": "back",
 }
 
 
@@ -2135,6 +2148,9 @@ async def violations_html(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
 
 @dp.message(menu_button_filter)
 async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
+    if msg.from_user.id in _tests:
+        await say(msg, "({8})Сейчас идёт тест набора — сначала завершите его.")
+        return
     await state.clear()
     uid = msg.from_user.id
     if menu_key == "next1":
@@ -2180,11 +2196,18 @@ async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
         if not row:
             await say(msg, "({8})Правила пока не опубликованы.")
             return
-        body = row["rule_text"] if row["is_html"] else esc(row["rule_text"])
-        for part in split_html(body):
-            await _send_html_safe(msg.chat.id, R(part), None)
+        ver = await pool().fetchval("SELECT version FROM rules ORDER BY created_at DESC LIMIT 1")
+        try:
+            await send_rich(msg.chat.id, await rules_rich_html(str(ver), row["rule_text"], row["is_html"]), {})
+        except Exception as exc:
+            LOG.warning("rules in DM: Rich не получился (%s)", exc)
+            body = row["rule_text"] if row["is_html"] else esc(row["rule_text"])
+            for part in split_html(body):
+                await _send_html_safe(msg.chat.id, R(part), None)
     elif menu_key == "admin":
-        await say(msg, "({61})<b>О наборах в админ</b>\nСейчас набор закрыт. Когда он откроется — бот напишет об этом.")
+        await search_info(msg)
+    elif menu_key == "about":
+        await say(msg, about_text())
     elif menu_key == "lang":
         await say(msg, "({8})Выбор языка появится в одном из ближайших обновлений.")
 
@@ -2329,7 +2352,7 @@ async def _send_html_safe(chat_id: int, body: str, thread_id: int | None):
         return await B().send_message(chat_id, plain[:4096], message_thread_id=thread_id, parse_mode=None)
 
 
-async def publish_rules(version: str, text: str, is_html: bool = False) -> None:
+async def publish_rules_html(version: str, text: str, is_html: bool = False) -> None:
     """Правила -> тема «Правила» (длинный текст в нескольких сообщениях), оповещение -> тема «Оповещения»."""
     chat_id = await main_chat()
     if not chat_id:
@@ -2372,6 +2395,40 @@ async def publish_rules(version: str, text: str, is_html: bool = False) -> None:
                                reply_markup=kb([btn("({26}) Открыть правила", url=url)]) if url else None)
     except Exception:
         LOG.exception("publish_rules failed")
+
+
+async def rules_rich_html(version: str, text: str, is_html: bool) -> str:
+    shown = text if is_html else esc(text)
+    return f"<h2>Правила сообщества HuBBlox</h2><p><i>Версия {esc(version)}</i></p>" + wiki_rich_html(shown, {})
+
+
+async def publish_rules(version: str, text: str, is_html: bool = False) -> None:
+    """Правила — Rich-сообщением (Premium Emoji и цитаты сохраняются). Не получилось — обычным (запасной путь)."""
+    chat_id = await main_chat()
+    if not chat_id:
+        return
+    try:
+        raw = await get_config("rules_msg_ids")
+        old_ids = [int(x) for x in json.loads(raw)] if raw else []
+        legacy = await get_config("rules_msg_id")
+        if not old_ids and legacy:
+            old_ids = [int(legacy)]
+        mid = await send_rich(chat_id, await rules_rich_html(version, text, is_html), {}, thread(TOPICS["rules"]))
+        for old in old_ids:
+            try:
+                await B().delete_message(chat_id, old)
+            except Exception:
+                pass
+        await set_config("rules_msg_ids", json.dumps([mid] if mid else []))
+        await set_config("rules_msg_id", mid or "")
+        url = msg_url(chat_id, mid) if mid else None
+        await B().send_message(chat_id, R(f"{e(26)} <b>Правила обновлены</b> (версия {esc(version)})\nОзнакомьтесь с изменениями."),
+                               message_thread_id=thread(TOPICS["announce"]),
+                               reply_markup=kb([btn("({26}) Открыть правила", url=url)]) if url else None)
+        return
+    except Exception as exc:
+        LOG.warning("rules: Rich не получился (%s), публикую обычным сообщением", exc)
+    await publish_rules_html(version, text, is_html)
 
 
 @dp.message(Command("setrules"))
@@ -5321,7 +5378,7 @@ async def _tg_call(method: str, payload: dict) -> dict:
 
 
 async def send_rich(chat_id: int, html_text: str, media: dict, thread_id: int | None = None,
-                    reply_to: int | None = None, markup=None) -> None:
+                    reply_to: int | None = None, markup=None) -> int | None:
     """sendRichMessage (Bot API 10.1+) напрямую: библиотека может его не знать."""
     payload: dict = {"chat_id": chat_id, "rich_message": _rich_body(html_text, media)}
     if thread_id:
@@ -5330,7 +5387,9 @@ async def send_rich(chat_id: int, html_text: str, media: dict, thread_id: int | 
         payload["reply_parameters"] = {"message_id": reply_to}
     if markup is not None:
         payload["reply_markup"] = markup.model_dump(exclude_none=True)
-    await _tg_call("sendRichMessage", payload)
+    data = await _tg_call("sendRichMessage", payload)
+    result = data.get("result")
+    return result.get("message_id") if isinstance(result, dict) else None
 
 
 async def edit_rich(chat_id: int, message_id: int, html_text: str, media: dict, markup=None) -> None:
@@ -6111,6 +6170,474 @@ async def wikiexport_cmd(msg: Message):
     await B().send_document(msg.chat.id, BufferedInputFile(data, filename="wiki_export.json"),
                             caption=f"Записей: {len(out)}. Текст в формате html (Premium Emoji и цитаты сохранены).",
                             **({"message_thread_id": topic_of(msg)} if topic_of(msg) else {}))
+
+
+# ============================ НАБОР В АДМИНИСТРАЦИЮ ============================
+SEARCH_SECONDS = env_int("SEARCH_QUESTION_SECONDS", 60)       # на каждый опрос
+SEARCH_OPEN_SECONDS = env_int("SEARCH_OPEN_SECONDS", SEARCH_SECONDS)  # на развёрнутый вопрос
+SEARCH_MAX_QUESTIONS = 30
+_tests: dict[int, dict] = {}  # user_id -> идущее прохождение теста (в памяти)
+
+
+class SearchSt(StatesGroup):
+    ct_poll_q = State()
+    ct_poll_a = State()
+    ct_open_q = State()
+
+
+def sbtn(text: str, cb: str, style: str | None = None) -> InlineKeyboardButton:
+    """Инлайн-кнопка с цветом (style: success — зелёная, danger — красная) и Premium-иконкой из ({N})."""
+    b = btn(text, cb)
+    kwargs = {"text": b.text, "callback_data": cb}
+    if b.icon_custom_emoji_id:
+        kwargs["icon_custom_emoji_id"] = b.icon_custom_emoji_id
+    if style:
+        kwargs["style"] = style
+    return InlineKeyboardButton(**kwargs)
+
+
+async def test_questions() -> list[dict]:
+    rows = await pool().fetch("SELECT * FROM admin_test_q ORDER BY pos, id")
+    return [{"id": r["id"], "kind": r["kind"], "question": r["question"],
+             "options": json.loads(r["options"] or "[]"), "correct": r["correct"]} for r in rows]
+
+
+def test_summary(qs: list) -> str:
+    if not qs:
+        return "Вопросов пока нет."
+    lines = []
+    for i, q in enumerate(qs, 1):
+        plain = html.unescape(re.sub(r"<[^>]+>", "", q["question"]))[:50]
+        kind = f"опрос, ответов: {len(q['options'])}" if q["kind"] == "poll" else "развёрнутый"
+        lines.append(f"{i}. {esc(plain)}… ({kind})")
+    return "\n".join(lines)
+
+
+def createsearch_markup() -> InlineKeyboardMarkup:
+    return kb([btn("({39}) Добавить опрос", "ct_add_poll")], [btn("({39}) Добавить развёрнутый вопрос", "ct_add_open")],
+              [btn("({14}) Удалить вопрос", "ct_del")], [btn("({39}) Предпросмотр", "ct_view")], [btn("({14}) Закрыть", "ct_close")])
+
+
+async def createsearch_menu_text() -> str:
+    qs = await test_questions()
+    polls = sum(1 for q in qs if q["kind"] == "poll")
+    return (f"({{61}})<b>Тест для набора в администрацию</b>\n<blockquote>{test_summary(qs)}</blockquote>\n"
+            f"Опросов: {polls}, развёрнутых: {len(qs) - polls}. На вопрос — {SEARCH_SECONDS} сек.")
+
+
+def private_creator(msg: Message) -> bool:
+    return msg.chat.type == "private" and bool(msg.from_user) and msg.from_user.id == CREATOR_ID
+
+
+@dp.message(Command("createsearch"))
+async def createsearch_cmd(msg: Message, state: FSMContext):
+    if not private_creator(msg):
+        await reply(msg, "({15})Эта команда доступна только создателю и только в личке с ботом.")
+        return
+    await state.clear()
+    await say(msg, await createsearch_menu_text(), createsearch_markup())
+
+
+async def ct_show_menu(msg: Message) -> None:
+    await say(msg, await createsearch_menu_text(), createsearch_markup())
+
+
+@dp.callback_query(F.data == "ct_close")
+async def ct_close(cb: CallbackQuery):
+    if cb.from_user.id == CREATOR_ID:
+        await _delete_quiet(cb.message)
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "ct_add_poll")
+async def ct_add_poll(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    if len(await test_questions()) >= SEARCH_MAX_QUESTIONS:
+        await cb.answer("Достигнут максимум вопросов.", show_alert=True)
+        return
+    await state.set_state(SearchSt.ct_poll_q)
+    await cb.answer()
+    await say(cb, "({39})<b>Опрос</b>\nПришлите <b>вопрос</b> (до 300 символов).\n"
+              f"<i>Бот отправит его опросом на {SEARCH_SECONDS} сек: один ответ, ответы перемешиваются. /cancel — отмена.</i>")
+
+
+@dp.message(SearchSt.ct_poll_q, F.text, ~F.text.startswith("/"))
+async def ct_poll_question(msg: Message, state: FSMContext):
+    text = msg.text.strip()
+    if len(text) > 300:
+        await reply(msg, "({8})Слишком длинный вопрос (максимум 300 символов). Сократите и отправьте снова.")
+        return
+    await state.update_data(q=text)
+    await state.set_state(SearchSt.ct_poll_a)
+    await reply(msg, "({39})<b>Ответы</b> — каждый с новой строки (от 2 до 10).\n"
+                     "<b>Верный ответ отметьте плюсом в начале</b>, например:\n<blockquote>+Выдать варн по пункту 1.2\nПроигнорировать\nПригласить в личку</blockquote>")
+
+
+@dp.message(SearchSt.ct_poll_a, F.text, ~F.text.startswith("/"))
+async def ct_poll_answers(msg: Message, state: FSMContext):
+    lines = [ln.strip() for ln in msg.text.split("\n") if ln.strip()]
+    correct = [i for i, ln in enumerate(lines) if ln.startswith("+")]
+    options = [ln[1:].strip() if ln.startswith("+") else ln for ln in lines]
+    if not 2 <= len(options) <= 10:
+        await reply(msg, "({8})Нужно от 2 до 10 ответов, каждый с новой строки.")
+        return
+    if len(correct) != 1:
+        await reply(msg, "({8})Отметьте <b>ровно один</b> верный ответ плюсом в начале строки.")
+        return
+    if any(len(o) > 100 or not o for o in options):
+        await reply(msg, "({8})Каждый ответ — от 1 до 100 символов.")
+        return
+    data = await state.get_data()
+    await state.clear()
+    pos = int(await pool().fetchval("SELECT COALESCE(MAX(pos), 0) + 1 FROM admin_test_q"))
+    await pool().execute("INSERT INTO admin_test_q (pos, kind, question, options, correct) VALUES ($1,'poll',$2,$3,$4)",
+                         pos, data["q"], json.dumps(options, ensure_ascii=False), correct[0])
+    await reply(msg, "({20})Опрос добавлен.")
+    await ct_show_menu(msg)
+
+
+@dp.callback_query(F.data == "ct_add_open")
+async def ct_add_open(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    if len(await test_questions()) >= SEARCH_MAX_QUESTIONS:
+        await cb.answer("Достигнут максимум вопросов.", show_alert=True)
+        return
+    await state.set_state(SearchSt.ct_open_q)
+    await cb.answer()
+    await say(cb, "({39})<b>Развёрнутый вопрос</b>\nПришлите ситуацию и вопрос одним сообщением: человек должен описать свои действия. "
+                  f"Бот скопирует текст как есть (Premium Emoji, цитаты).\n<i>На ответ — {SEARCH_OPEN_SECONDS} сек. /cancel — отмена.</i>")
+
+
+@dp.message(SearchSt.ct_open_q, F.text, ~F.text.startswith("/"))
+async def ct_open_question(msg: Message, state: FSMContext):
+    if len(msg.text) > 2500:
+        await reply(msg, "({8})Слишком длинно (максимум 2500 символов).")
+        return
+    await state.clear()
+    pos = int(await pool().fetchval("SELECT COALESCE(MAX(pos), 0) + 1 FROM admin_test_q"))
+    await pool().execute("INSERT INTO admin_test_q (pos, kind, question, options, correct) VALUES ($1,'open',$2,'[]',NULL)",
+                         pos, msg.html_text.strip())
+    await reply(msg, "({20})Развёрнутый вопрос добавлен.")
+    await ct_show_menu(msg)
+
+
+@dp.callback_query(F.data == "ct_del")
+async def ct_delete_list(cb: CallbackQuery):
+    if cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    qs = await test_questions()
+    if not qs:
+        await cb.answer("Вопросов нет.", show_alert=True)
+        return
+    rows = [[InlineKeyboardButton(text=f"🗑 {i}. {html.unescape(re.sub(r'<[^>]+>', '', q['question']))[:30]}",
+                                  callback_data=f"ct_rm_{q['id']}")] for i, q in enumerate(qs, 1)]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="ct_menu")])
+    await cb.answer()
+    await edit(cb, "({14})<b>Какой вопрос удалить?</b>", InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@dp.callback_query(F.data.startswith("ct_rm_"))
+async def ct_remove(cb: CallbackQuery):
+    if cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    await pool().execute("DELETE FROM admin_test_q WHERE id=$1", int(cb.data.removeprefix("ct_rm_")))
+    await cb.answer("Удалено")
+    await edit(cb, await createsearch_menu_text(), createsearch_markup())
+
+
+@dp.callback_query(F.data == "ct_menu")
+async def ct_menu(cb: CallbackQuery):
+    if cb.from_user.id == CREATOR_ID:
+        await cb.answer()
+        await edit(cb, await createsearch_menu_text(), createsearch_markup())
+
+
+@dp.callback_query(F.data == "ct_view")
+async def ct_view(cb: CallbackQuery):
+    if cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    qs = await test_questions()
+    await cb.answer()
+    if not qs:
+        await say(cb, "({8})Вопросов пока нет.")
+        return
+    parts = []
+    for i, q in enumerate(qs, 1):
+        if q["kind"] == "poll":
+            opts = "\n".join(f"{'✅' if j == q['correct'] else '▫️'} {esc(o)}" for j, o in enumerate(q["options"]))
+            parts.append(f"<b>{i}. Опрос:</b> {esc(q['question'])}\n{opts}")
+        else:
+            parts.append(f"<b>{i}. Развёрнутый вопрос:</b>\n<blockquote expandable>{q['question']}</blockquote>")
+    text = "\n\n".join(parts)
+    for chunk in split_html(text, 3500):
+        await say(cb, chunk)
+
+
+# ---------- открыть / закрыть набор ----------
+async def current_search():
+    sid = await get_config("search_open")
+    return await pool().fetchrow("SELECT * FROM admin_search WHERE id=$1 AND closed_at IS NULL", int(sid)) if sid else None
+
+
+@dp.message(Command("opensearch", "opensearh"))
+async def opensearch_cmd(msg: Message):
+    if not private_creator(msg):
+        await reply(msg, "({15})Эта команда доступна только создателю и только в личке с ботом.")
+        return
+    if await current_search():
+        await say(msg, "({8})Набор уже открыт. Закрыть: /closesearch")
+        return
+    qs = await test_questions()
+    if not qs:
+        await say(msg, "({8})Сначала создайте тест: /createsearch")
+        return
+    sid = await pool().fetchval("INSERT INTO admin_search (opened_at, questions) VALUES ($1,$2) RETURNING id",
+                                now_ts(), json.dumps(qs, ensure_ascii=False))
+    await set_config("search_open", sid)
+    polls = sum(1 for q in qs if q["kind"] == "poll")
+    await say(msg, f"({{20}})<b>Набор открыт.</b>\nВопросов: {len(qs)} (опросов: {polls}, развёрнутых: {len(qs) - polls}), "
+                   f"на каждый {SEARCH_SECONDS} сек.\nУчастники начинают через кнопку «О наборах в админ». Закрыть досрочно: /closesearch")
+
+
+@dp.message(Command("closesearch", "closesearh"))
+async def closesearch_cmd(msg: Message):
+    if not private_creator(msg):
+        await reply(msg, "({15})Эта команда доступна только создателю и только в личке с ботом.")
+        return
+    s = await current_search()
+    if not s:
+        await say(msg, "({8})Набор сейчас не открыт.")
+        return
+    await pool().execute("UPDATE admin_search SET closed_at=$2 WHERE id=$1", s["id"], now_ts())
+    await set_config("search_open", "")
+    done = await pool().fetchval("SELECT COUNT(*) FROM admin_attempt WHERE search_id=$1 AND status='finished'", s["id"])
+    await say(msg, f"({{20}})<b>Набор закрыт.</b> Прошли тест: {done}. Кто уже начал — сможет закончить.")
+
+
+# ---------- прохождение теста ----------
+async def search_info(msg: Message) -> None:
+    s = await current_search()
+    if not s:
+        await say(msg, "({61})<b>О наборах в админ</b>\nСейчас набор закрыт. Когда он откроется — бот напишет об этом.")
+        return
+    qs = json.loads(s["questions"])
+    await say(msg, f"({{61}})<b>Набор в администрацию открыт</b>\n<blockquote>Вопросов: {len(qs)}. На каждый — "
+                   f"{SEARCH_SECONDS} сек, возвращаться назад нельзя.\nУсловие: ни одного активного варна.\n"
+                   "Опросы проверяются автоматически, развёрнутые ответы читает создатель.</blockquote>",
+              kb([sbtn("({20}) Пройти тест", "srch_start", "success")]))
+
+
+async def search_blockers(uid: int, s) -> str | None:
+    """Почему человеку нельзя проходить тест (None — можно)."""
+    if not s:
+        return "Набор сейчас закрыт."
+    if uid in _tests:
+        return "Вы уже проходите тест."
+    if uid == CREATOR_ID or await rank_of(uid) > 0:
+        return "Вы уже в администрации."
+    if await is_banned(uid):
+        return "Вы заблокированы и не можете участвовать в наборе."
+    if await pool().fetchval("SELECT COUNT(*) FROM warn_logs WHERE user_id=$1 AND is_active", uid):
+        return "У вас есть активный варн. Пройти тест можно только без варнов."
+    att = await pool().fetchrow("SELECT status FROM admin_attempt WHERE search_id=$1 AND user_id=$2", s["id"], uid)
+    if att and att["status"] != "in_progress":
+        return "Вы уже проходили тест в этом наборе."
+    return None
+
+
+@dp.callback_query(F.data == "srch_start")
+async def srch_start(cb: CallbackQuery):
+    s = await current_search()
+    why = await search_blockers(cb.from_user.id, s)
+    if why:
+        await cb.answer()
+        await say(cb, f"({{8}}){why}")
+        return
+    await cb.answer()
+    n = len(json.loads(s["questions"]))
+    await edit(cb, f"({{61}})<b>Готовы?</b>\n<blockquote>{n} вопросов, на каждый {SEARCH_SECONDS} сек. Паузы и возврата нет. "
+                   "Пока идёт тест, другие кнопки меню не работают.</blockquote>",
+               kb([sbtn("({20}) Начать", "srch_go", "success")], [BACK()]))
+
+
+@dp.callback_query(F.data == "srch_go")
+async def srch_go(cb: CallbackQuery):
+    uid = cb.from_user.id
+    s = await current_search()
+    why = await search_blockers(uid, s)
+    if why:
+        await cb.answer()
+        await say(cb, f"({{8}}){why}")
+        return
+    await cb.answer()
+    await _delete_quiet(cb.message)
+    row = await pool().fetchrow(
+        """INSERT INTO admin_attempt (search_id, user_id, started_at, status) VALUES ($1,$2,$3,'in_progress')
+           ON CONFLICT (search_id, user_id) DO UPDATE SET started_at=$3, status='in_progress', answers='[]'
+           RETURNING id""", s["id"], uid, now_ts())
+    _tests[uid] = {"attempt": row["id"], "mode": None, "event": asyncio.Event(), "poll_id": None, "got": None}
+    spawn(run_test(uid, cb.message.chat.id, row["id"], json.loads(s["questions"]), cb.from_user))
+
+
+async def run_test(uid: int, chat_id: int, attempt_id: int, qs: list, user) -> None:
+    ses = _tests[uid]
+    answers, sent_ids = [], []
+    try:
+        for i, q in enumerate(qs, 1):
+            ses.update(event=asyncio.Event(), poll_id=None, got=None, mode=q["kind"], order=None)
+            if q["kind"] == "poll":
+                order = list(range(len(q["options"])))
+                random.shuffle(order)  # разный порядок ответов
+                ses["order"] = order
+                poll = await B().send_poll(chat_id, question=f"{i}/{len(qs)}. {q['question']}"[:300],
+                                           options=[q["options"][j][:100] for j in order], is_anonymous=False,
+                                           allows_multiple_answers=False, type="regular", open_period=SEARCH_SECONDS)
+                ses["poll_id"] = poll.poll.id
+                sent_ids.append(poll.message_id)
+                limit = SEARCH_SECONDS
+            else:
+                sent = await B().send_message(chat_id, R(f"{e(61)}<b>Вопрос {i}/{len(qs)} — развёрнутый</b>\n"
+                                                         f"<i>Напишите ответ одним сообщением, у вас {SEARCH_OPEN_SECONDS} сек.</i>\n\n{q['question']}"))
+                sent_ids.append(sent.message_id)
+                limit = SEARCH_OPEN_SECONDS
+            try:
+                await asyncio.wait_for(ses["event"].wait(), timeout=limit + 4)
+            except asyncio.TimeoutError:
+                pass
+            if q["kind"] == "poll":
+                try:
+                    await B().stop_poll(chat_id, sent_ids[-1])
+                except Exception:
+                    pass
+                got = ses["got"]
+                shown_correct = ses["order"].index(q["correct"])
+                chosen = q["options"][ses["order"][got[0]]] if got else None
+                answers.append({"kind": "poll", "question": q["question"], "chosen": chosen,
+                                "correct": bool(got) and got[0] == shown_correct})
+            else:
+                answers.append({"kind": "open", "question": q["question"], "text": ses["got"]})
+            ses["mode"] = None
+        await pool().execute("UPDATE admin_attempt SET status='finished', finished_at=$2, answers=$3 WHERE id=$1",
+                             attempt_id, now_ts(), json.dumps(answers, ensure_ascii=False))
+        for mid in sent_ids:  # порядок в личке: вопросы теста убираем
+            try:
+                await B().delete_message(chat_id, mid)
+            except Exception:
+                pass
+        await B().send_message(chat_id, R(f"{e(20)}<b>Тест завершён.</b> Ответы отправлены администрации, результат придёт сюда."))
+        await send_search_result(attempt_id, user, answers)
+    except Exception:
+        LOG.exception("search test failed")
+        await pool().execute("UPDATE admin_attempt SET status='in_progress' WHERE id=$1", attempt_id)
+        try:
+            await B().send_message(chat_id, R("({8})Тест прервался из-за ошибки. Сообщите создателю."))
+        except Exception:
+            pass
+    finally:
+        _tests.pop(uid, None)
+
+
+async def send_search_result(attempt_id: int, user, answers: list) -> None:
+    """Всё одним сообщением в админ-чат + кнопки «Принять» / «Отказать»."""
+    polls = [a for a in answers if a["kind"] == "poll"]
+    right = sum(1 for a in polls if a["correct"])
+    wrong_nums = [str(i) for i, a in enumerate(answers, 1) if a["kind"] == "poll" and not a["correct"]]
+    opens = [(i, a) for i, a in enumerate(answers, 1) if a["kind"] == "open"]
+    head = (f"{e(61)}<b>Заявка в администрацию #{attempt_id}</b>\n{e(44)} {mention(user.id, user.username, user.full_name)}\n"
+            f"Опросы: <b>{right}/{len(polls)}</b>" + (f" (ошибки в №{', '.join(wrong_nums)})" if wrong_nums else "") + "\n")
+    budget = 3700 - len(head)
+    blocks = []
+    for i, a in opens:
+        situation = html.unescape(re.sub(r"<[^>]+>", "", a["question"]))
+        ans = html.unescape(re.sub(r"<[^>]+>", "", a["text"] or "")) if a["text"] else "— нет ответа —"
+        blocks.append((i, esc(situation[:200]), ans))
+    per = max(150, budget // max(1, len(blocks)) - 120)  # делим место между ответами
+    body = "".join(f"\n<b>Вопрос {i}:</b> <i>{sit}…</i>\n<blockquote expandable>{esc(ans[:per])}</blockquote>" for i, sit, ans in blocks)
+    markup = InlineKeyboardMarkup(inline_keyboard=[[sbtn("({20}) Принять", f"srch_ok_{attempt_id}", "success"),
+                                                    sbtn("({14}) Отказать", f"srch_no_{attempt_id}", "danger")]])
+    card = await to_admin_chat("search", head + body, markup)
+    if card:
+        await pool().execute("UPDATE admin_attempt SET correct=$2, total=$3, admin_chat=$4, admin_msg=$5 WHERE id=$1",
+                             attempt_id, right, len(polls), card.chat.id, card.message_id)
+
+
+@dp.callback_query(F.data.startswith("srch_ok_") | F.data.startswith("srch_no_"))
+async def srch_decide(cb: CallbackQuery):
+    if cb.from_user.id != CREATOR_ID:
+        await cb.answer("⛔ Решение принимает создатель.", show_alert=True)
+        return
+    accept = cb.data.startswith("srch_ok_")
+    att = await pool().fetchrow("SELECT * FROM admin_attempt WHERE id=$1", int(cb.data.rsplit("_", 1)[1]))
+    if not att or att["decision"]:
+        await cb.answer("Решение уже принято.", show_alert=True)
+        return
+    await pool().execute("UPDATE admin_attempt SET decision=$2, decided_by=$3, decided_at=$4 WHERE id=$1",
+                         att["id"], "accepted" if accept else "declined", cb.from_user.id, now_ts())
+    mark = "✅ <b>Принят(а)</b>" if accept else "❌ <b>Отказано</b>"
+    try:
+        await cb.message.edit_text(R(cb.message.html_text + f"\n\n{mark} — решил(а) {esc(cb.from_user.full_name)}"), reply_markup=None)
+    except Exception:
+        pass
+    await cb.answer("Готово")
+    await dm(att["user_id"], (f"{e(20)}<b>Поздравляем!</b> Вы прошли отбор в администрацию HuBBlox. Скоро с вами свяжутся."
+                              if accept else
+                              f"{e(14)}<b>К сожалению, отбор в администрацию вы не прошли.</b>\nМожно попробовать в следующем наборе."))
+
+
+@dp.poll_answer()
+async def search_poll_answer(pa: PollAnswer):
+    ses = _tests.get(pa.user.id)
+    if ses and ses.get("mode") == "poll" and ses.get("poll_id") == pa.poll_id and pa.option_ids:
+        ses["got"] = list(pa.option_ids)
+        ses["event"].set()
+
+
+async def open_answer_filter(msg: Message):
+    if msg.chat.type != "private" or not msg.text or msg.text.startswith("/") or not msg.from_user:
+        return False
+    ses = _tests.get(msg.from_user.id)
+    return bool(ses and ses.get("mode") == "open" and not ses["event"].is_set())
+
+
+@dp.message(open_answer_filter)
+async def search_open_answer(msg: Message):
+    ses = _tests[msg.from_user.id]
+    ses["got"] = msg.html_text.strip()[:3000]
+    ses["event"].set()
+
+
+# ============================ О БОТЕ ============================
+CHANGELOG = [
+    ("3.11", "Набор в администрацию: /createsearch, /opensearch, /closesearch, тест опросами и развёрнутыми ответами; правила в Rich-формате; «О боте»."),
+    ("3.10", "Меню под строкой ввода (2 страницы), «Мои нарушения» с датами, кнопка «Вики»."),
+    ("3.9", "Вики: фото, видео, скиллы (V1/V2), характеристики, русские названия, ссылки между статьями."),
+    ("3.8", "Вопрос-ответ: админ берёт вопрос, ответ оформляется цитатой; чистая личка."),
+    ("3.6", "Сток одним сообщением на период Normal (Mirage дописывается в него)."),
+    ("3.5", "Права админов в /adminpanel, защита апелляций, антиспам, КД на вопросы."),
+    ("3.2", "/off для заявок, автозавершение заявок через 24 часа, /adminpanel, антиспам."),
+    ("3.1", "Несколько аккаунтов Parse.bot с переключением, уведомления «сток истёк», Magnet."),
+]
+
+
+def about_text() -> str:
+    recent = "\n".join(f"<b>v{v}</b> — {esc(t)}" for v, t in CHANGELOG[:3])
+    older = "\n".join(f"<b>v{v}</b> — {esc(t)}" for v, t in CHANGELOG[3:])
+    return (f"({{61}})<b>DuoSup</b> • версия {BOT_VERSION}\n"
+            f"Владелец: @{CREATOR_USERNAME}\nРазработка: Claude (Anthropic) по заданию владельца\n"
+            "Технологии: Python, aiogram 3, PostgreSQL, Railway\n\n<b>Что нового</b>\n"
+            f"{recent}\n<blockquote expandable>{older}</blockquote>")
+
+
+@dp.message(Command("about"))
+async def about_cmd(msg: Message):
+    await say(msg, about_text())
 
 
 # Автоварн — самым последним: он реагирует на любые групповые сообщения со ссылками.
