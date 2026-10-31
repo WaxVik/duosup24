@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.11.0"
+BOT_VERSION = "3.12.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -92,6 +92,7 @@ TOPICS = {
     "reports": env_int("TOPIC_REPORTS", 258),          # только репорты участников
     "redact": env_int("TOPIC_REDACT", 8),              # Редакт (только создатель)
     "search": env_int("TOPIC_SEARCH", env_int("TOPIC_MOD_CHAT", 6)),  # заявки на вступление в администрацию
+    "events": env_int("TOPIC_EVENTS", 94648),          # Ивенты (Рип Индра, Король теста и т.д.)
 }
 
 LINKS = {
@@ -101,6 +102,7 @@ LINKS = {
     "contact": "https://t.me/duosup_bot",
     "chat": "https://t.me/hubblox",
     "stock": "https://t.me/hubblox/1233",
+    "events": "https://t.me/hubblox/94648",
 }
 
 MSK = timezone(timedelta(hours=3))
@@ -126,7 +128,7 @@ PREMIUM_EMOJI: dict[int, str] = {
     34: "5416117059207572332", 35: "5377641419320102438", 36: "5377738412566548230",
     37: "5420323339723881652", 38: "5406745015365943482", 39: "5188217332748527444",
     40: "5400250414929041085", 41: "5377304659524357459", 42: "5377653767351079538",
-    43: "5377754123556914479", 44: "5373012449597335010", 45: "5357080225463149588",
+    43: "5377754123556914479", 44: "5413843793147373433", 45: "5357080225463149588",
     46: "5436113877181941026", 47: "5271660086224270191", 48: "5271984412089690485",
     49: "5273980249032405225", 50: "5274178831140301085", 51: "5271495318393889259",
     52: "5272003571938794249", 53: "5274053607073819857", 54: "5274246975091417030",
@@ -140,6 +142,17 @@ PREMIUM_EMOJI: dict[int, str] = {
     74: "5278702045883292456",  # 🛍
     75: "5427168083074628963",  # 💎
     76: "5411225014148014586",  # 🔴 (для «Истёк»)
+    77: "5337080053119336309",  # 👍 заявки
+    78: "5334544901428229844",  # ℹ️
+    79: "5222444124698853913",  # 🔖
+    80: "5332637016825805678",  # 🐬 морские ивенты
+    81: "5316811711607484231",  # 🪛 Рип Индра
+    82: "5244664511666861478",  # 🪞 Король теста
+    83: "5415625577509989123",  # 🔥 Рипер
+    84: "5415878709997512354",  # ☁ Тиран небес
+    85: "5415997830915466992",  # ⚛️ Чёрная борода
+    86: "5415715290786869004",  # 🗡 Ло
+    87: "5220186290456120696",  # 🔲 профиль Roblox
 }
 
 # Обычный символ, который виден, если премиум-эмодзи не отображается (колонка «если скопировать»).
@@ -153,7 +166,8 @@ EMOJI_FALLBACK: dict[int, str] = {
     50: "⚓", 51: "🏝", 52: "🌊", 53: "👼", 54: "🦈", 55: "🙍‍♂️", 56: "🤖", 57: "👻",
     58: "🐇", 59: "⚔️", 60: "💬", 61: "🧭", 62: "🟢", 63: "🔙", 64: "🗓", 65: "🔥",
     66: "🌋", 67: "💙", 68: "🪙", 69: "💾", 70: "💾", 71: "⚙️", 72: "🏆", 73: "🖥",
-    74: "🛍", 75: "💎", 76: "🔴",
+    74: "🛍", 75: "💎", 76: "🔴", 77: "👍", 78: "ℹ️", 79: "🔖", 80: "🐬", 81: "🪛", 82: "🪞", 83: "🔥",
+    84: "☁", 85: "⚛️", 86: "🗡", 87: "🔲",
 }
 
 _PH = re.compile(r"\(\{([0-9._]+)\}\)")
@@ -263,8 +277,17 @@ SEA_EVENTS = {
     "ship": ("Рейд на корабль", 68),
     "other": ("Другое", 0),
 }
-KIND_EMOJI = {"raid": 69, "trade": 48, "trial": 71, "sea": 49}
-KIND_TITLE = {"raid": "Рейд", "trade": "Трейд", "trial": "Триал", "sea": "Морской ивент"}
+# Ивенты (отдельная тема): ключ -> (название, номер эмодзи)
+EVENTS = {
+    "rip": ("Рип Индра", 81),
+    "doughking": ("Король теста", 82),
+    "reaper": ("Рипер", 83),
+    "tyrant": ("Тиран небес", 84),
+    "blackbeard": ("Чёрная борода", 85),
+    "law": ("Ло", 86),
+}
+KIND_EMOJI = {"raid": 69, "trade": 48, "trial": 71, "sea": 49, "event": 72}
+KIND_TITLE = {"raid": "Рейд", "trade": "Трейд", "trial": "Триал", "sea": "Морской ивент", "event": "Ивент"}
 
 PERM_RIGHTS = [  # (ключ, название, номер эмодзи, поле Telegram)
     ("info", "Изменение профиля группы", 24, "can_change_info"),
@@ -2063,6 +2086,9 @@ RM_ICONS = {
     "faq": "5314504236132747481", "admin": "5224736245665511429", "find": "5188217332748527444",
     "games": "5361741454685256344", "back": "5875082500023258804", "refresh": "5375338737028841420",
     "history": "5413879192267805083", "roblox": "5220186290456120696",
+    "apps": "5337080053119336309", "about": "5334544901428229844", "mine": "5222444124698853913",
+    "help": "5443038326535759644", "edit": "5395444784611480792", "sea": "5332637016825805678",
+    "events": "5350488305362315240", "trade": "5271984412089690485", "trial": "5350725881478293775",
 }
 JOIN = "\u2060"  # невидимый символ: отличает «Дальше» на 2-й странице от «Дальше» на 1-й
 
@@ -2081,14 +2107,14 @@ def reply_menu(page: int = 1) -> ReplyKeyboardMarkup:
     if page == 2:
         rows = [
             [rb("Мои нарушения", "violations"), rb("Вопрос | Ответ", "faq")],
-            [rb("✍️ Правила"), rb("О наборах в админ", "admin")],
-            [rb("Язык / Language", "lang"), rb("О боте")],
-            [rb("Назад", "back", "danger"), rb(f"Дал{JOIN}ьше", "next", "success")],
+            [rb("Правила", "edit"), rb("О наборах в админ", "admin")],
+            [rb("Язык / Language", "lang"), rb("О боте", "about")],
+            [rb("Назад", "back", "danger")],
         ]
     else:
         rows = [
             [rb("Сток", "stock"), rb("Мини игры", "games")],
-            [rb("Создать заявку", "create"), rb("Найти заявку", "find")],
+            [rb("Заявки", "apps")],
             [rb("Профиль", "profile"), rb("Вики", "wiki")],
             [rb("Навигация", "nav"), rb("Дальше", "next", "success")],
         ]
@@ -2096,14 +2122,16 @@ def reply_menu(page: int = 1) -> ReplyKeyboardMarkup:
 
 
 RM_LABELS = {  # текст кнопки (без эмодзи) -> ключ
-    "Сток": "stock", "Мини игры": "games", "Создать заявку": "create", "Найти заявку": "find",
+    "Сток": "stock", "Мини игры": "games", "Заявки": "apps", "Создать заявку": "apps", "Найти заявку": "apps",
     "Профиль": "profile", "Вики": "wiki", "Навигация": "nav", "Дальше": "next1",
-    f"Дал{JOIN}ьше": "next2", "Мои нарушения": "violations", "Вопрос | Ответ": "faq", "Правила": "rules",
+    "Мои нарушения": "violations", "Вопрос | Ответ": "faq", "Правила": "rules",
     "О наборах в админ": "admin", "Язык / Language": "lang", "О боте": "about", "Назад": "back",
 }
 
 
-async def menu_button_filter(msg: Message):
+async def menu_button_filter(msg: Message, raw_state: str | None = None):
+    if raw_state and raw_state.startswith("AppSt:"):  # внутри раздела «Заявки» кнопки обрабатывает он сам
+        return False
     if msg.chat.type != "private" or not msg.text or msg.text.startswith("/"):
         return False
     key = RM_LABELS.get(re.sub(r"^[^\w]+", "", msg.text).strip())
@@ -2161,14 +2189,9 @@ async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
         await say(msg, STOCK_MENU_TEXT, await stock_menu_markup(uid))
     elif menu_key == "games":
         await say(msg, "({72})<b>Мини игры</b>\nСкоро: гача, ПВП и комбо-ПВП.")
-    elif menu_key == "create":
-        t, m = type_menu({"sea": "menu_sea", "trade": "trade_create", "raid": "menu_raid", "trial": "menu_trial"},
-                         "({61})<b>Создать заявку</b>\nВыберите тип заявки:")
-        await say(msg, t, m)
-    elif menu_key == "find":
-        t, m = type_menu({"sea": "sea_find", "trade": "trade_find", "raid": "raid_find", "trial": "trial_find"},
-                         "({39})<b>Найти заявку</b>\nВыберите тип заявки:")
-        await say(msg, t, m)
+    elif menu_key in ("apps", "create", "find"):
+        await state.set_state(AppSt.hub)
+        await say(msg, "({77})<b>Заявки</b>\nВыберите действие.", apps_hub_kb())
     elif menu_key == "profile":
         await say(msg, await profile_html(uid), kb([btn("Редактировать профиль ({24})", "profile_edit")], [BACK()]))
     elif menu_key == "wiki":
@@ -2279,16 +2302,31 @@ async def menu_events(cb: CallbackQuery):
 
 
 async def nav_text() -> str:
-    rules_row = await pool().fetchrow("SELECT rule_text, is_html FROM rules ORDER BY created_at DESC LIMIT 1")
-    text = (f"({{61}})<b>Навигация и правила</b>\n"
-            f"• {link('Рейды', LINKS['raids'])}\n• {link('Трейды', LINKS['trades'])}\n"
-            f"• {link('Морские ивенты', LINKS['sea'])}\n• {link('Триалы', LINKS['trials'])}\n")
-    if rules_row and visible_len(rules_row["rule_text"]) <= 2500:  # длинные правила не помещаются — они в теме «Правила»
-        text += (f"\n{rules_row['rule_text']}" if rules_row["is_html"]
-                 else f"\n<blockquote>{esc(rules_row['rule_text'])}</blockquote>")
-    else:
-        text += "\nПравила сообщества опубликованы в теме «Правила»."
-    return text
+    return (
+        f"({{61}})<b>Навигация</b>\n"
+        "<b>Главное меню</b>\n<blockquote>"
+        "<b>Сток</b> — актуальный сток Normal и Mirage, уведомления о нужных фруктах.\n"
+        "<b>Мини игры</b> — гача и ПВП (скоро).\n"
+        "<b>Заявки</b> — создать заявку (морские ивенты, ивенты, трейды, рейды, триалы), найти чужую, «Мои заявки», «Помощь».\n"
+        "<b>Профиль</b> — ник Roblox, комментарий, награды.\n"
+        "<b>Вики</b> — назовите предмет, аксессуар или тип, и бот расскажет о нём.\n"
+        "<b>Навигация</b> — этот раздел.\n<b>Дальше</b> — вторая страница меню.</blockquote>\n"
+        "<b>Вторая страница</b>\n<blockquote>"
+        "<b>Мои нарушения</b> — активные варны и баны с датой, переход к сообщению и апелляция.\n"
+        "<b>Вопрос | Ответ</b> — вопрос администрации (не чаще раза в 15 минут), ответ придёт сюда.\n"
+        "<b>Правила</b> — правила сообщества.\n"
+        "<b>О наборах в админ</b> — тест для вступления в администрацию, когда набор открыт.\n"
+        "<b>Язык / Language</b> — выбор языка (скоро).\n<b>О боте</b> — версия, что нового, на чём написан.\n"
+        "<b>Назад</b> — на первую страницу.</blockquote>\n"
+        "<b>Темы чата</b>\n"
+        f"• {link('Рейды', LINKS['raids'])}\n• {link('Трейды', LINKS['trades'])}\n• {link('Морские ивенты', LINKS['sea'])}\n"
+        f"• {link('Ивенты', LINKS['events'])}\n• {link('Триалы', LINKS['trials'])}\n• {link('Стоки 24/7', LINKS['stock'])}\n\n"
+        "<b>Как сделать…</b>\n<blockquote>"
+        "• Заявку на морской ивент: Заявки → Создать заявку → Морские ивенты → ивент → число игроков → комментарий.\n"
+        "• Откликнуться на заявку: нажмите «Помочь» под ней в теме чата и подтвердите.\n"
+        "• Указать ник Roblox: Профиль → Редактировать профиль.\n"
+        "• Узнать, как получить предмет: Вики.\n"
+        "• Подать апелляцию: вторая страница → Мои нарушения.</blockquote>")
 
 
 @dp.callback_query(F.data == "menu_nav")
@@ -2577,6 +2615,8 @@ def app_title(app, payload: dict) -> str:
         return f"Рейд — {name} ({', '.join(payload.get('skills', []))})"
     if kind == "sea":
         return f"Морской ивент — {payload.get('event_name', '')}"
+    if kind == "event":
+        return f"Ивент — {payload.get('event_name', '')}"
     if kind == "trial":
         return f"Триал — {payload.get('race_name', '')}"
     return "Трейд"
@@ -2622,6 +2662,9 @@ async def app_text(app, closed: bool = False) -> str:
         emoji_n = SEA_EVENTS.get(p.get("event"), ("", 0))[1] or 49
         header = f"{e(emoji_n)} <b>{esc(p.get('event_name'))}</b> • <b>{n}</b>"
         details = [f"{e(45)} <b>Участников:</b> {p.get('count')}"]
+    elif kind == "event":
+        header = f"{e(EVENTS.get(p.get('event'), ('', 72))[1])} <b>{esc(p.get('event_name'))}</b> • <b>{n}</b>"
+        details = []
     elif kind == "trial":
         icons = await race_icons()
         header = f"{e(71)} <b>Триал</b> • <b>{n}</b>"
@@ -2641,7 +2684,7 @@ async def app_text(app, closed: bool = False) -> str:
 def help_markup(app) -> InlineKeyboardMarkup | None:
     if app["kind"] == "trade" or app["status"] == "closed":
         return None
-    return kb([btn("({45}) Помочь", f"apph_{app['id']}")])
+    return InlineKeyboardMarkup(inline_keyboard=[[sbtn("({45}) Помочь", f"apph_{app['id']}", "success")]])
 
 
 async def refresh_application_post(app_id: int) -> None:
@@ -2650,6 +2693,14 @@ async def refresh_application_post(app_id: int) -> None:
     chat_id = await main_chat()
     if not app or not chat_id or not app["chat_message_id"]:
         return
+    if json_payload(app["payload"]).get("rich"):
+        try:
+            await edit_rich(chat_id, app["chat_message_id"], await app_rich_html(app), {}, help_markup(app))
+            return
+        except Exception as exc:
+            if "not modified" in str(exc).lower():
+                return
+            LOG.warning("refresh rich post failed: %s", exc)
     try:
         await B().edit_message_text(R(await app_text(app)), chat_id=chat_id, message_id=app["chat_message_id"],
                                     reply_markup=help_markup(app))
@@ -2658,11 +2709,11 @@ async def refresh_application_post(app_id: int) -> None:
             LOG.warning("refresh post failed: %s", exc)
 
 
-TOPIC_BY_KIND = {"raid": "raids", "sea": "sea_events", "trade": "trades", "trial": "trials"}
+TOPIC_BY_KIND = {"raid": "raids", "sea": "sea_events", "trade": "trades", "trial": "trials", "event": "events"}
 
 
 async def create_application(kind: str, user_id: int, payload: dict) -> int | None:
-    """Создаёт и публикует заявку. Возвращает id или None, если основной чат не привязан."""
+    """Создаёт и публикует заявку. Морские ивенты и ивенты — Rich-сообщением. Возвращает id или None, если чат не привязан."""
     chat_id = await main_chat()
     if not chat_id:
         return None
@@ -2670,8 +2721,17 @@ async def create_application(kind: str, user_id: int, payload: dict) -> int | No
         "INSERT INTO applications (user_id, kind, payload, created_at) VALUES ($1,$2,$3::jsonb,$4) RETURNING id",
         user_id, kind, json.dumps(payload), now_ts())
     app = await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id)
-    sent = await B().send_message(chat_id, R(await app_text(app)), reply_markup=help_markup(app),
-                                  message_thread_id=thread(TOPICS[TOPIC_BY_KIND[kind]]))
+    thread_id = thread(TOPICS[TOPIC_BY_KIND[kind]])
+    if kind in RICH_APP_KINDS:
+        try:
+            mid = await send_rich(chat_id, await app_rich_html(app), {}, thread_id, None, help_markup(app))
+            payload["rich"] = True
+            await pool().execute("UPDATE applications SET chat_message_id=$2, payload=$3::jsonb WHERE id=$1",
+                                 app_id, mid, json.dumps(payload))
+            return app_id
+        except Exception as exc:
+            LOG.warning("заявка: Rich не получился (%s), публикую обычным сообщением", exc)
+    sent = await B().send_message(chat_id, R(await app_text(app)), reply_markup=help_markup(app), message_thread_id=thread_id)
     await pool().execute("UPDATE applications SET chat_message_id=$2 WHERE id=$1", app_id, sent.message_id)
     return app_id
 
@@ -3105,9 +3165,11 @@ async def app_help(cb: CallbackQuery):
     if uid in json_payload(app["payload"]).get("helpers", []):
         await cb.answer("Вы уже откликнулись на эту заявку.", show_alert=True)
         return
-    await cb.message.reply(
-        R("Вы уверены, что хотите помочь с этой заявкой" + e(46)),
-        reply_markup=kb([btn("({20}) Подтвердить", f"apphc_{app_id}_{uid}"), btn("({14}) Отмена", f"apphx_{uid}")]))
+    sent = await cb.message.reply(
+        R("Вы уверены?"),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[sbtn("({20}) Да", f"apphc_{app_id}_{uid}", "success"),
+                                                            sbtn("({14}) Нет", f"apphx_{uid}", "danger")]]))
+    spawn(_cleanup_later(10, sent))  # не ответили — сообщение исчезает через 10 секунд
     await cb.answer()
 
 
@@ -3146,11 +3208,7 @@ async def app_help_confirm(cb: CallbackQuery):
             "UPDATE applications SET payload=$2::jsonb, status='taken', claimed_by=COALESCE(claimed_by,$3), "
             "claimed_at=COALESCE(claimed_at,$4) WHERE id=$1", app_id, json.dumps(payload), uid, now_ts())
     app = await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id)
-    try:
-        await cb.message.edit_text(R(f"{e(20)} {mention(uid, cb.from_user.username, cb.from_user.full_name)}, вы взяли заявку {num(app_id)}."), reply_markup=None)
-        asyncio.create_task(delete_later(cb.message))
-    except Exception:
-        pass
+    await _delete_quiet(cb.message)  # сообщение стирается, имя появляется в списке помощников
     await refresh_application_post(app_id)
     urow = await user_row(uid)
     helper = mention(uid, cb.from_user.username, cb.from_user.full_name)
@@ -6615,6 +6673,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.12", "Заявки: общий раздел «Заявки», морские ивенты и ивенты (Rich-публикация, «Помочь» с подтверждением), «Мои заявки», «Помощь»; новый эмодзи 👤."),
     ("3.11", "Набор в администрацию: /createsearch, /opensearch, /closesearch, тест опросами и развёрнутыми ответами; правила в Rich-формате; «О боте»."),
     ("3.10", "Меню под строкой ввода (2 страницы), «Мои нарушения» с датами, кнопка «Вики»."),
     ("3.9", "Вики: фото, видео, скиллы (V1/V2), характеристики, русские названия, ссылки между статьями."),
@@ -6638,6 +6697,297 @@ def about_text() -> str:
 @dp.message(Command("about"))
 async def about_cmd(msg: Message):
     await say(msg, about_text())
+
+
+# ================================ ЗАЯВКИ (меню под строкой ввода) ================================
+RICH_APP_KINDS = {"sea", "event"}
+
+
+class AppSt(StatesGroup):
+    hub = State()      # меню «Заявки»
+    types = State()    # выбор типа заявки
+    pick = State()     # выбор ивента при создании
+    find = State()     # выбор ивента при поиске
+    count = State()    # число игроков (морские ивенты)
+    comment = State()  # комментарий
+
+
+def rbi(label: str, icon_id: str | None = None, style: str | None = None) -> KeyboardButton:
+    kwargs: dict = {}
+    if icon_id:
+        kwargs["icon_custom_emoji_id"] = str(icon_id)
+    if style:
+        kwargs["style"] = style
+    return KeyboardButton(text=label, **kwargs)
+
+
+def rk(rows: list) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
+
+
+def btn_text(msg: Message) -> str:
+    return re.sub(r"^[^\w]+", "", msg.text or "").strip()
+
+
+def back_row() -> list:
+    return [rbi("Назад", RM_ICONS["back"], "danger")]
+
+
+def apps_hub_kb() -> ReplyKeyboardMarkup:
+    return rk([[rbi("Создать заявку", RM_ICONS["create"]), rbi("Найти заявку", RM_ICONS["find"])],
+               [rbi("Мои заявки", RM_ICONS["mine"])],
+               [rbi("Назад", RM_ICONS["back"], "danger"), rbi("Помощь", RM_ICONS["help"], "success")]])
+
+
+def app_types_kb() -> ReplyKeyboardMarkup:
+    return rk([[rbi("Морские ивенты", RM_ICONS["sea"])], [rbi("Ивенты", RM_ICONS["events"])],
+               [rbi("Трейды", RM_ICONS["trade"])], [rbi("Триалы", RM_ICONS["trial"])],
+               [rbi("💾 Рейды")], back_row()])  # id иконки 💾 уточнить: в присланном 18 цифр, у остальных 19
+
+
+def sea_events_kb() -> ReplyKeyboardMarkup:
+    rows = [[rbi(name, PREMIUM_EMOJI.get(n))] for key, (name, n) in SEA_EVENTS.items() if key != "other"]
+    return rk(rows + [back_row()])
+
+
+def events_kb() -> ReplyKeyboardMarkup:
+    return rk([[rbi(name, PREMIUM_EMOJI.get(n))] for key, (name, n) in EVENTS.items()] + [back_row()])
+
+
+def counts_kb() -> ReplyKeyboardMarkup:
+    return rk([[rbi("2"), rbi("3"), rbi("4"), rbi("5")], [rbi("6"), rbi("7"), rbi("8"), rbi("9")],
+               [rbi("10"), rbi("11"), rbi("12"), rbi("Назад", RM_ICONS["back"], "danger")]])
+
+
+def comment_kb() -> ReplyKeyboardMarkup:
+    return rk([back_row()])
+
+
+def event_table(kind: str) -> dict:
+    return SEA_EVENTS if kind == "sea" else EVENTS
+
+
+def find_event(kind: str, text: str):
+    for key, (name, _n) in event_table(kind).items():
+        if key != "other" and name.lower() == text.lower():
+            return key, name
+    return None, None
+
+
+APP_HELP_TEXT = (
+    "({77})<b>Как работают заявки</b>\n<blockquote>"
+    "• <b>Создать заявку</b> — выберите тип, ивент и (для морских ивентов) число игроков, потом напишите комментарий. "
+    "Заявка появится в нужной теме чата.\n"
+    "• <b>Заявка действует 24 часа</b> и потом завершается сама. Раньше завершить можно в «Мои заявки».\n"
+    "• Кто хочет помочь, нажимает «Помочь» под заявкой и подтверждает. Его имя появится в списке помощников, "
+    "а вам придёт сообщение сюда.\n"
+    "• <b>Найти заявку</b> — все активные заявки по выбранному ивенту, с переходом к ним.\n"
+    "• Ник Roblox укажите в профиле — под заявкой появится ссылка на ваш профиль.</blockquote>")
+
+
+async def to_hub(msg: Message, state: FSMContext, text: str = "({77})<b>Заявки</b>\nВыберите действие.") -> None:
+    await state.clear()
+    await state.set_state(AppSt.hub)
+    await say(msg, text, apps_hub_kb())
+
+
+async def my_apps_view(uid: int):
+    rows = await pool().fetch("SELECT * FROM applications WHERE user_id=$1 AND status<>'closed' ORDER BY id DESC LIMIT 15", uid)
+    if not rows:
+        return "({14})У вас нет активных заявок.", None
+    lines, buttons = [], []
+    chat_id = await main_chat()
+    for r in rows:
+        p = json_payload(r["payload"])
+        helpers = p.get("helpers", [])
+        if r["kind"] in ("sea", "event"):
+            table = event_table(r["kind"])
+            emoji_n = table.get(p.get("event"), ("", 49))[1] or 49
+            label = f"{p.get('event_name')} {num(r['id'])}"
+        else:
+            emoji_n = KIND_EMOJI[r["kind"]]
+            label = f"{KIND_TITLE[r['kind']]} {num(r['id'])}"
+        status = f"заявка взята ({len(helpers)})" if helpers else f"активна {e(62)}"
+        lines.append(f"{e(emoji_n)} {esc(label)} — {status}")
+        url = msg_url(chat_id, r["chat_message_id"]) if chat_id and r["chat_message_id"] else None
+        row = [InlineKeyboardButton(text=f"Завершить {num(r['id'])}", callback_data=f"appf_{r['id']}")]
+        if url:
+            row.insert(0, btn(f"({{26}}) {num(r['id'])}", url=url))
+        buttons.append(row)
+    return "({77})<b>Ваши активные заявки</b>\n<blockquote>" + "\n".join(lines) + "</blockquote>", InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@dp.message(AppSt.hub, F.text, ~F.text.startswith("/"))
+async def app_hub(msg: Message, state: FSMContext):
+    t = btn_text(msg)
+    if t in ("Создать заявку", "Найти заявку"):
+        await state.update_data(mode="create" if t == "Создать заявку" else "find")
+        await state.set_state(AppSt.types)
+        await say(msg, f"({{77}})<b>{t}</b>\nВыберите тип заявки:", app_types_kb())
+    elif t == "Мои заявки":
+        text, markup = await my_apps_view(msg.from_user.id)
+        await say(msg, text, markup)
+    elif t == "Помощь":
+        await say(msg, APP_HELP_TEXT)
+    elif t == "Назад":
+        await state.clear()
+        await say(msg, MAIN_TEXT, reply_menu(1))
+
+
+LEGACY_APP_TYPES = {"Трейды": ("trade", 48, "trade_create", "trade_find"), "Рейды": ("raid", 69, "menu_raid", "raid_find"),
+                    "Триалы": ("trial", 71, "menu_trial", "trial_find")}
+
+
+@dp.message(AppSt.types, F.text, ~F.text.startswith("/"))
+async def app_types(msg: Message, state: FSMContext):
+    t = btn_text(msg)
+    mode = (await state.get_data()).get("mode", "create")
+    if t == "Назад":
+        await to_hub(msg, state)
+    elif t in ("Морские ивенты", "Ивенты"):
+        kind = "sea" if t == "Морские ивенты" else "event"
+        await state.update_data(kind=kind)
+        await state.set_state(AppSt.pick if mode == "create" else AppSt.find)
+        await say(msg, f"({{{80 if kind == 'sea' else 72}}})<b>Выберите ивент</b>", sea_events_kb() if kind == "sea" else events_kb())
+    elif t in LEGACY_APP_TYPES:  # трейды, рейды и триалы пока работают по-старому (кнопкой под сообщением)
+        _k, n, cb_create, cb_find = LEGACY_APP_TYPES[t]
+        await say(msg, f"({{{n}}})<b>{t}</b>", kb([btn(f"({{{n}}}) Продолжить", cb_create if mode == "create" else cb_find)]))
+
+
+async def ask_comment(msg: Message, state: FSMContext) -> None:
+    await state.set_state(AppSt.comment)
+    urow = await user_row(msg.from_user.id)
+    text = "({24}) Напишите комментарий к заявке."
+    if not (urow and urow["roblox_username"]):
+        text += "\n<blockquote>У вас не указан ник в профиле, его можно указать по желанию.</blockquote>"
+    await say(msg, text, comment_kb())
+
+
+@dp.message(AppSt.pick, F.text, ~F.text.startswith("/"))
+async def app_pick(msg: Message, state: FSMContext):
+    t = btn_text(msg)
+    data = await state.get_data()
+    kind = data.get("kind", "sea")
+    if t == "Назад":
+        await state.set_state(AppSt.types)
+        await say(msg, "({77})<b>Создать заявку</b>\nВыберите тип заявки:", app_types_kb())
+        return
+    key, name = find_event(kind, t)
+    if not key:
+        return
+    await state.update_data(event=key, event_name=name)
+    if kind == "sea":
+        await state.set_state(AppSt.count)
+        await say(msg, "({80})<b>Выберите количество игроков</b>", counts_kb())
+    else:
+        await ask_comment(msg, state)
+
+
+@dp.message(AppSt.count, F.text, ~F.text.startswith("/"))
+async def app_count(msg: Message, state: FSMContext):
+    t = btn_text(msg)
+    if t == "Назад":
+        await state.set_state(AppSt.pick)
+        await say(msg, "({80})<b>Выберите ивент</b>", sea_events_kb())
+    elif t.isdigit() and 2 <= int(t) <= 12:
+        await state.update_data(count=int(t))
+        await ask_comment(msg, state)
+
+
+@dp.message(AppSt.comment, F.text, ~F.text.startswith("/"))
+async def app_comment(msg: Message, state: FSMContext):
+    t = btn_text(msg)
+    data = await state.get_data()
+    kind = data.get("kind", "sea")
+    if t == "Назад":
+        if kind == "sea":
+            await state.set_state(AppSt.count)
+            await say(msg, "({80})<b>Выберите количество игроков</b>", counts_kb())
+        else:
+            await state.set_state(AppSt.pick)
+            await say(msg, "({72})<b>Выберите ивент</b>", events_kb())
+        return
+    payload = {"event": data["event"], "event_name": data["event_name"], "comment": clean_comment(msg.text), "helpers": []}
+    if kind == "sea":
+        payload["count"] = data.get("count")
+    app_id = await create_application(kind, msg.from_user.id, payload)
+    if not app_id:
+        await to_hub(msg, state, NO_MAIN)
+        return
+    link, icon, title = (LINKS["sea"], 80, "Морские ивенты") if kind == "sea" else (LINKS["events"], 72, "Ивенты")
+    await to_hub(msg, state, f"{e(20)} Ваша заявка опубликована в теме <a href=\"{link}\">{e(icon)} {title}</a>\n"
+                             f"{e(19)} Заявка действует в течение 24 часов.")
+
+
+@dp.message(AppSt.find, F.text, ~F.text.startswith("/"))
+async def app_find(msg: Message, state: FSMContext):
+    t = btn_text(msg)
+    kind = (await state.get_data()).get("kind", "sea")
+    if t == "Назад":
+        await state.set_state(AppSt.types)
+        await say(msg, "({77})<b>Найти заявку</b>\nВыберите тип заявки:", app_types_kb())
+        return
+    key, name = find_event(kind, t)
+    if not key:
+        return
+    rows = await pool().fetch("SELECT * FROM applications WHERE kind=$1 AND status<>'closed' AND payload->>'event'=$2 "
+                              "ORDER BY id DESC LIMIT 15", kind, key)
+    if not rows:
+        await say(msg, f"({{14}})По ивенту «{esc(name)}» сейчас нет активных заявок.")
+        return
+    chat_id = await main_chat()
+    buttons = []
+    for r in rows:
+        p = json_payload(r["payload"])
+        k = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", r["user_id"])
+        who = f"@{k['username']}" if k and k["username"] else ((k and k["full_name"]) or str(r["user_id"]))
+        label = f"{num(r['id'])} • {who}" + (f" • {p['count']} игр." if p.get("count") else "")
+        url = msg_url(chat_id, r["chat_message_id"]) if chat_id and r["chat_message_id"] else None
+        if url:
+            buttons.append([btn(label, url=url)])
+    await say(msg, f"({{39}})<b>{esc(name)}</b>\nАктивных заявок: {len(rows)}",
+              InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None)
+
+
+def _user_link(uid: int, username: str | None, full_name: str | None) -> str:
+    if username:
+        return f'<a href="https://t.me/{esc(username)}">@{esc(username)}</a>'
+    return f'<a href="tg://user?id={uid}">{esc(full_name or str(uid))}</a>'
+
+
+async def app_rich_html(app) -> str:
+    """Заявка в Rich-формате: заголовок, номер, автор, профиль Roblox, участники, комментарий-цитата, помощники, статус."""
+    from urllib.parse import quote
+    p = json_payload(app["payload"])
+    uid = app["user_id"]
+    k = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", uid)
+    urow = await user_row(uid)
+    plain_author = f"@{k['username']}" if k and k["username"] else ((k and k["full_name"]) or str(uid))
+    icon_n = (SEA_EVENTS if app["kind"] == "sea" else EVENTS).get(p.get("event"), ("", 49))[1] or 49
+    status = {"active": f"{e(62)} <b>Заявка активна</b>", "taken": f"{e(62)} <b>Заявка активна</b>",
+              "closed": f"{e(20)} <b>Заявка завершена</b>"}[app["status"] if app["status"] in ("active", "taken", "closed") else "active"]
+    parts = [f"<h2>{e(icon_n)} {esc(p.get('event_name', ''))}</h2>", f"<p>Номер заявки: <b>{num(app['id'])}</b></p>",
+             f"<p>{SEP}</p>", f"<p>{e(44)} Заявка от {_user_link(uid, k and k['username'], k and k['full_name'])}</p>"]
+    nick = urow and urow["roblox_username"]
+    if nick:
+        parts.append(f'<p>{e(87)} <a href="https://www.roblox.com/user.aspx?username={quote(nick)}">Перейти в профиль Roblox</a></p>')
+    if app["kind"] == "sea" and p.get("count"):
+        parts.append(f"<p>Кол-во участников: <b>{p['count']}</b></p>")
+    if p.get("comment"):
+        lines = "".join(f"<p>{esc(ln)}</p>" for ln in str(p["comment"]).split("\n") if ln.strip())
+        parts.append(f"<p>🗣️ Комментарий:</p><blockquote>{lines}<cite>Автор: {esc(plain_author)}</cite></blockquote>")
+    parts += [f"<p>{SEP}</p>", "<p><b>Помощники:</b></p>"]
+    helpers = p.get("helpers", [])
+    if helpers:
+        items = []
+        for h in helpers:
+            kh = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", h)
+            items.append(f"<li>{_user_link(h, kh and kh['username'], kh and kh['full_name'])}</li>")
+        parts.append("<ul>" + "".join(items) + "</ul>")
+    else:
+        parts.append("<p><i>пока никого</i></p>")
+    parts += [f"<p>{SEP}</p>", f"<p>{status}</p>"]
+    return "".join(parts)
 
 
 # Автоварн — самым последним: он реагирует на любые групповые сообщения со ссылками.
