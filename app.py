@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.12.0"
+BOT_VERSION = "3.14.1"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -93,6 +93,8 @@ TOPICS = {
     "redact": env_int("TOPIC_REDACT", 8),              # Редакт (только создатель)
     "search": env_int("TOPIC_SEARCH", env_int("TOPIC_MOD_CHAT", 6)),  # заявки на вступление в администрацию
     "events": env_int("TOPIC_EVENTS", 94648),          # Ивенты (Рип Индра, Король теста и т.д.)
+    "warn_log": env_int("TOPIC_WARN_LOG", 1722),       # админ-чат: выдача варнов и банов
+    "unwarn_log": env_int("TOPIC_UNWARN_LOG", 1723),   # админ-чат: снятие варнов и банов (в т.ч. по таймеру)
 }
 
 LINKS = {
@@ -471,6 +473,11 @@ async def init_db() -> None:
         "ALTER TABLE questions ADD COLUMN IF NOT EXISTS dm_msg BIGINT",
         "ALTER TABLE questions ADD COLUMN IF NOT EXISTS card_chat BIGINT",
         "ALTER TABLE questions ADD COLUMN IF NOT EXISTS card_msg BIGINT",
+        "ALTER TABLE warn_logs ADD COLUMN IF NOT EXISTS expires_at BIGINT",
+        "ALTER TABLE warn_logs ADD COLUMN IF NOT EXISTS remaining BIGINT",
+        "ALTER TABLE warn_logs ADD COLUMN IF NOT EXISTS removed_at BIGINT",
+        "ALTER TABLE warn_logs ADD COLUMN IF NOT EXISTS removed_reason TEXT",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS blocks TEXT",
         """CREATE TABLE IF NOT EXISTS admin_test_q (
             id SERIAL PRIMARY KEY, pos INT NOT NULL DEFAULT 0, kind TEXT NOT NULL, question TEXT NOT NULL,
             options TEXT NOT NULL DEFAULT '[]', correct INT)""",
@@ -855,14 +862,14 @@ def topic_of(msg: Message) -> int | None:
     return msg.message_thread_id if getattr(msg, "is_topic_message", False) else None
 
 
-async def admin_log(text: str, markup=None) -> None:
-    """Лог модерации в админ-чат (тема «Состав админ»). Без запасного варианта в ЛС."""
+async def admin_log(text: str, markup=None, topic: str = "modlog") -> None:
+    """Лог модерации в админ-чат (по умолчанию — тема «Состав админ», для варнов/банов — свои темы). Без запасного варианта в ЛС."""
     chat_id = await admin_chat()
     if not chat_id:
         return
     try:
         await B().send_message(chat_id, R(text), reply_markup=markup,
-                               message_thread_id=thread(TOPICS["modlog"]))
+                               message_thread_id=thread(TOPICS[topic]))
     except Exception:
         LOG.exception("admin_log failed")
 
@@ -962,17 +969,20 @@ async def redact_zone(msg: Message) -> bool:
         return False
     if msg.chat.type == "private":
         return True
-    if msg.chat.id == await admin_chat() and topic_of(msg) == TOPICS["redact"]:
+    if msg.chat.id == await admin_chat():  # темы «Редакт» больше нет — работает в любой теме админ-чата и в личке
         return True
-    await reply(msg, "({15})Эта команда работает только в теме «Редакт» админ-чата или в личке с ботом.")
+    await reply(msg, "({15})Эта команда работает только в личке с ботом (и в админ-чате).")
     return False
 
 
+REMOVAL_TITLES = ("Снятие", "Разбан", "Варн истёк", "Апелляция")
+
+
 async def log_action(title: str, actor_id: int, uid: int, uname, fname, reason: str | None, ident: str,
-                     chat_id: int, msg_id: int | None, extra: str = "") -> None:
-    """Запись о наказании в админ-чат."""
+                     chat_id: int, msg_id: int | None, extra: str = "", bot_label: str = "DuoSup (автоварн)") -> None:
+    """Запись в админ-чат: выдача варнов/банов -> тема 1722, снятие -> тема 1723 (в «Составе админ» только список админов)."""
     if actor_id == B().id:
-        actor = "DuoSup (автоварн)"
+        actor = bot_label
     else:
         row = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", actor_id)
         actor = mention(actor_id, row and row["username"], row and row["full_name"])
@@ -980,8 +990,9 @@ async def log_action(title: str, actor_id: int, uid: int, uname, fname, reason: 
             f"Нарушитель: {mention(uid, uname, fname)}\n"
             + (f"Причина: {esc(reason)}\n" if reason else "") + extra +
             f"ID • <i>{esc(ident)}</i>\n{e(11)}{fmt_dt()}</blockquote>")
-    url = msg_url(chat_id, msg_id)
-    await admin_log(text, kb([btn("({26}) Перейти к сообщению", url=url)]) if url else None)
+    url = msg_url(chat_id, msg_id) if msg_id else None
+    await admin_log(text, kb([btn("({26}) Перейти к сообщению", url=url)]) if url else None,
+                    "unwarn_log" if title.startswith(REMOVAL_TITLES) else "warn_log")
 
 
 def appeal_markup(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
@@ -1042,7 +1053,7 @@ async def escalate(msg: Message, actor_id: int, target_id: int, action: str, rea
     if url:
         rows.append([btn("({34}) Перейти к сообщению", url=url)])
     rows.append([btn("Завершить дело ({20})", f"admdone_{row_id}")])
-    await to_admin_chat("modlog", text, InlineKeyboardMarkup(inline_keyboard=rows))
+    await to_admin_chat("warn_log", text, InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 @dp.callback_query(F.data.startswith("admdone_"))
@@ -1087,16 +1098,17 @@ async def give_warns(chat_id: int, user_id: int, n: int, reason: str, moderator_
                     number = num(await next_number(conn, "warn_counter"))
                     numbers.append(number)
                     await conn.execute(
-                        """INSERT INTO warn_logs (user_id, warn_number, reason, moderator_id, chat_id, message_id, created_at)
-                           VALUES ($1,$2,$3,$4,$5,$6,$7)""",
-                        user_id, number, reason, moderator_id, chat_id, source_id, now_ts())
+                        """INSERT INTO warn_logs (user_id, warn_number, reason, moderator_id, chat_id, message_id, created_at, remaining)
+                           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                        user_id, number, reason, moderator_id, chat_id, source_id, now_ts(), WARN_TTL)
+                await warn_reflow(conn, user_id, now_ts())  # новый варн: 7 суток, прежний замораживается
                 await conn.execute("UPDATE users SET warns=$2 WHERE user_id=$1", user_id, new)
                 if new >= MAX_WARNS:
                     ban_no = num(await next_number(conn, "ban_counter"))
                     await conn.execute(
                         """INSERT INTO ban_logs (user_id, ban_number, reason, moderator_id, chat_id, message_id, created_at)
                            VALUES ($1,$2,$3,$4,$5,$6,$7)""",
-                        user_id, ban_no, "Достигнут лимит варнов (4/4)", moderator_id, chat_id, source_id, now_ts())
+                        user_id, ban_no, "3.3 Достигнут лимит варнов (4/4)", moderator_id, chat_id, source_id, now_ts())
                     await conn.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", user_id)
         error = None
         if new >= 2:
@@ -1153,10 +1165,10 @@ async def warn_cmd(msg: Message):
     await log_action(f"Варн {new}/{MAX_WARNS}", actor, uid, uname, fname, reason, ", ".join(numbers),
                      msg.chat.id, msg.message_id)
     if ban_no:
-        await log_action("Бан (лимит варнов 4/4)", actor, uid, uname, fname, "Достигнут лимит варнов (4/4)",
+        await log_action("Бан (лимит варнов 4/4)", actor, uid, uname, fname, "3.3 Достигнут лимит варнов (4/4)",
                          ban_no, msg.chat.id, msg.message_id)
     if ban_no:
-        await say(msg, ban_text(mention(uid, uname, fname), "Достигнут лимит варнов (4/4)", ban_no, None),
+        await say(msg, ban_text(mention(uid, uname, fname), "3.3 Достигнут лимит варнов (4/4)", ban_no, None),
                   appeal_markup([("ban", ban_no)]))
     if error:
         await say(msg, f"{e(8)}Не удалось применить ограничение в Telegram: <i>{esc(error)}</i>\n"
@@ -1253,8 +1265,9 @@ async def unwarn_cmd(msg: Message):
         removed = len(rows)
         async with pool().acquire() as conn:
             async with conn.transaction():
-                await conn.execute("UPDATE warn_logs SET is_active=FALSE WHERE id = ANY($1::bigint[])",
-                                   [r["id"] for r in rows])
+                await conn.execute("UPDATE warn_logs SET is_active=FALSE, removed_at=$2, removed_reason='unwarn' "
+                                   "WHERE id = ANY($1::bigint[])", [r["id"] for r in rows], now_ts())
+                await warn_reflow(conn, uid, now_ts())  # предыдущий варн размораживается
                 left = await conn.fetchval(
                     "UPDATE users SET warns=GREATEST(warns-$2,0) WHERE user_id=$1 RETURNING warns", uid, removed)
                 number = num(await next_number(conn, "unwarn_counter"))
@@ -1293,7 +1306,8 @@ async def unban_cmd(msg: Message):
         async with pool().acquire() as conn:
             async with conn.transaction():
                 await conn.execute("UPDATE users SET banned=FALSE, ban_until=NULL, warns=0 WHERE user_id=$1", uid)
-                await conn.execute("UPDATE warn_logs SET is_active=FALSE WHERE user_id=$1 AND is_active", uid)
+                await conn.execute("UPDATE warn_logs SET is_active=FALSE, removed_at=$2, removed_reason='unban' "
+                                   "WHERE user_id=$1 AND is_active", uid, now_ts())
                 number = num(await next_number(conn, "unban_counter"))
                 await conn.execute(
                     """INSERT INTO unban_logs (user_id, unban_number, moderator_id, chat_id, message_id, created_at)
@@ -1380,7 +1394,7 @@ async def autowarn_handler(msg: Message) -> None:
         return
     if await is_banned(user.id):
         return
-    await auto_warn(msg, "1.15 Запрещенная ссылка")
+    await auto_warn(msg, "3.1 Запрещенные ссылки")
 
 
 # ----------------------- БЕЛЫЙ СПИСОК ССЫЛОК -----------------------
@@ -2089,6 +2103,7 @@ RM_ICONS = {
     "apps": "5337080053119336309", "about": "5334544901428229844", "mine": "5222444124698853913",
     "help": "5443038326535759644", "edit": "5395444784611480792", "sea": "5332637016825805678",
     "events": "5350488305362315240", "trade": "5271984412089690485", "trial": "5350725881478293775",
+    "raid": "5350770579202944020",
 }
 JOIN = "\u2060"  # невидимый символ: отличает «Дальше» на 2-й странице от «Дальше» на 1-й
 
@@ -2158,8 +2173,14 @@ async def violations_html(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
     lines, buttons = [], []
     bot_id = B().id
     for i, w in enumerate(warns, 1):
+        if w["expires_at"]:
+            timer = f"Снимется: {fmt_dt(w['expires_at'])} (через {fmt_left(w['expires_at'] - now_ts())})\n"
+        elif w["remaining"] is not None:
+            timer = f"Таймер заморожен, осталось {fmt_left(w['remaining'])} (пойдёт после снятия следующего варна)\n"
+        else:
+            timer = ""
         lines.append(f"<b>Варн {esc(w['warn_number'])} — {i}/{MAX_WARNS}</b>\n"
-                     f"Выдан: {fmt_dt(w['created_at'])}\n<blockquote>{esc(w['reason'])}</blockquote>")
+                     f"Выдан: {fmt_dt(w['created_at'])}\n{timer}<blockquote>{esc(w['reason'])}</blockquote>")
         url = msg_url(w["chat_id"], w["message_id"])
         if url and w["moderator_id"] != bot_id:
             buttons.append([btn(f"({{26}}) Перейти к сообщению {w['warn_number']}", url=url)])
@@ -2215,11 +2236,17 @@ async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
         sent = await say(msg, "({60})<b>Вопрос | ответ</b>\nНапишите ваш вопрос одним сообщением.", back_only())
         await state.update_data(prompt_id=sent.message_id)
     elif menu_key == "rules":
-        row = await pool().fetchrow("SELECT rule_text, is_html FROM rules ORDER BY created_at DESC LIMIT 1")
+        row = await pool().fetchrow("SELECT version, rule_text, is_html, blocks FROM rules ORDER BY created_at DESC LIMIT 1")
         if not row:
             await say(msg, "({8})Правила пока не опубликованы.")
             return
-        ver = await pool().fetchval("SELECT version FROM rules ORDER BY created_at DESC LIMIT 1")
+        if row["blocks"]:  # правила в Rich — показываем так же, как опубликованы
+            try:
+                await send_rich_blocks(msg.chat.id, rules_input_blocks(row["version"], json.loads(row["blocks"])))
+                return
+            except Exception as exc:
+                LOG.warning("rules in DM (blocks): %s", exc)
+        ver = row["version"]
         try:
             await send_rich(msg.chat.id, await rules_rich_html(str(ver), row["rule_text"], row["is_html"]), {})
         except Exception as exc:
@@ -2474,7 +2501,7 @@ async def setrules_cmd(msg: Message, state: FSMContext):
     if not await redact_zone(msg):
         return
     await state.set_state(RulesSt.text)
-    await reply(msg, "({24})Отправьте новый текст правил одним сообщением.\n<i>Отмена: /cancel</i>")
+    await reply(msg, "({24})Отправьте правила одним сообщением — обычным или <b>Rich</b>. Rich-сообщение бот скопирует как есть (Premium Emoji, цитаты, подчёркивание) и добавит версию заголовком после первого заголовка.\n<i>Отмена: /cancel</i>")
 
 
 @dp.message(RulesSt.text, F.text, ~F.text.startswith("/"))
@@ -2693,7 +2720,15 @@ async def refresh_application_post(app_id: int) -> None:
     chat_id = await main_chat()
     if not app or not chat_id or not app["chat_message_id"]:
         return
-    if json_payload(app["payload"]).get("rich"):
+    rich_mode = json_payload(app["payload"]).get("rich")
+    if rich_mode == "blocks":
+        try:
+            await edit_rich_blocks(chat_id, app["chat_message_id"], await app_blocks(app), help_markup(app))
+        except Exception as exc:
+            if "not modified" not in str(exc).lower():
+                LOG.warning("refresh blocks post failed: %s", exc)
+        return
+    if rich_mode:
         try:
             await edit_rich(chat_id, app["chat_message_id"], await app_rich_html(app), {}, help_markup(app))
             return
@@ -2723,6 +2758,14 @@ async def create_application(kind: str, user_id: int, payload: dict) -> int | No
     app = await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id)
     thread_id = thread(TOPICS[TOPIC_BY_KIND[kind]])
     if kind in RICH_APP_KINDS:
+        try:
+            mid = await send_rich_blocks(chat_id, await app_blocks(app), thread_id, None, help_markup(app))
+            payload["rich"] = "blocks"
+            await pool().execute("UPDATE applications SET chat_message_id=$2, payload=$3::jsonb WHERE id=$1",
+                                 app_id, mid, json.dumps(payload))
+            return app_id
+        except Exception as exc:
+            LOG.warning("заявка: блоки не получились (%s), пробую HTML", exc)
         try:
             mid = await send_rich(chat_id, await app_rich_html(app), {}, thread_id, None, help_markup(app))
             payload["rich"] = True
@@ -3413,14 +3456,20 @@ async def appeal_decide(cb: CallbackQuery):
     uid = ap["user_id"]
     if approved:
         if ap["violation_type"] == "warn":
-            res = await pool().execute("UPDATE warn_logs SET is_active=FALSE WHERE warn_number=$1 AND is_active", ap["violation_number"])
+            res = await pool().execute("UPDATE warn_logs SET is_active=FALSE, removed_at=$2, removed_reason='appeal' "
+                                       "WHERE warn_number=$1 AND is_active", ap["violation_number"], now_ts())
             if res.endswith("1"):
+                async with pool().acquire() as conn:
+                    await warn_reflow(conn, uid, now_ts())  # предыдущий варн размораживается
                 left = await pool().fetchval("UPDATE users SET warns=GREATEST(warns-1,0) WHERE user_id=$1 RETURNING warns", uid)
+                await log_action("Снятие варна (апелляция)", cb.from_user.id, uid, ap["username"], None, None,
+                                 ap["violation_number"], 0, None, extra=f"Апелляция: {ap['appeal_number']}\n")
                 if left is not None and left < 2 and not await is_banned(uid):
                     await unmute_everywhere(uid)
         else:
             await pool().execute("UPDATE users SET banned=FALSE, ban_until=NULL, warns=0 WHERE user_id=$1", uid)
-            await pool().execute("UPDATE warn_logs SET is_active=FALSE WHERE user_id=$1 AND is_active", uid)
+            await pool().execute("UPDATE warn_logs SET is_active=FALSE, removed_at=$2, removed_reason='unban' "
+                                 "WHERE user_id=$1 AND is_active", uid, now_ts())
             for chat_id in await target_chats():
                 try:
                     await B().unban_chat_member(chat_id, uid, only_if_banned=True)
@@ -4345,43 +4394,104 @@ async def _cleanup_legacy_stock_posts(chat_id: int) -> None:
             await set_config(f"stock_{kind}", json.dumps(st))
 
 
+def stock_period(kind: str, state: dict) -> int:
+    """Номер 4-часового окна Normal, в которое попадает начало этого стока (сток Mirage — то окно, в которое он начался)."""
+    start = state["epoch"] - STOCK_NEXT_HOURS[kind] * 3600 if state.get("epoch") else now_ts()
+    return int((start + 600) // (STOCK_NEXT_HOURS["normal"] * 3600))  # +10 минут: допуск на неточное время смены у источника
+
+
 async def board_update(chat_id: int, kind: str, state: dict) -> None:
-    """Новый Normal -> новое сообщение (прошлое закрывается). Новый Mirage -> дописывается в текущее сообщение."""
+    """Одно сообщение = одно 4-часовое окно Normal. Данные этого окна правят то же сообщение; данные нового окна
+    закрывают прошлое сообщение («Истёк») и открывают новое. Данные прошлых окон не публикуются."""
     async with lock_for("stock_board"):
         board = await load_board()
-        if kind == "normal":
-            if board.get("msg"):  # прошлое сообщение: всё в нём теперь «Истёк»
+        period = stock_period(kind, state)
+        current = board.get("period")
+        if current is None and board.get("msg"):  # сообщение старого формата
+            ref = board.get("normal") or ((board.get("mirages") or [None])[-1])
+            current = stock_period("normal" if board.get("normal") else "mirage", ref) if ref else None
+        if board.get("msg") and current is not None and period < current:
+            LOG.info("stock: %s из прошлого окна — не публикую", kind)
+            return
+        if board.get("msg") and current == period:  # то же окно: правим сообщение
+            board["period"] = period
+            if kind == "normal":
+                board["normal"] = state
+            else:
+                mirages = board.get("mirages") or []
+                if mirages and state.get("epoch") and mirages[-1].get("epoch") == state["epoch"]:
+                    mirages[-1] = state
+                else:
+                    mirages.append(state)
+                board["mirages"] = mirages[-3:]
+            text = await render_board(board)
+            if text:
+                if not await _edit_board_message(chat_id, board, text):
+                    await _send_board_message(chat_id, board, text)
+                else:
+                    await save_board(board)
+            return
+        if board.get("msg"):  # новое окно: прошлое сообщение — всё в нём «Истёк»
+            try:
+                old_text = await render_board(board, closed=True)
+                if old_text:
+                    await _edit_board_message(chat_id, board, old_text)
+            except Exception as exc:
+                LOG.warning("stock: не удалось закрыть прошлое сообщение: %s", exc)
+        new_board = {"msg": None, "period": period, "normal": None, "mirages": []}
+        normal = state if kind == "normal" else await stock_state("normal")
+        if normal.get("items") and stock_period("normal", normal) == period:
+            new_board["normal"] = normal
+        mir = state if kind == "mirage" else await stock_state("mirage")
+        if mir.get("items") and stock_period("mirage", mir) == period:
+            new_board["mirages"] = [mir]
+        text = await render_board(new_board)
+        if text:
+            await _cleanup_legacy_stock_posts(chat_id)
+            await _send_board_message(chat_id, new_board, text)
+
+
+async def rebuild_board(chat_id: int) -> int | None:
+    """Собирает сообщение стока заново из сохранённых данных: только то, что относится к текущему окну."""
+    normal, mir = await stock_state("normal"), await stock_state("mirage")
+    ref_kind, ref = ("normal", normal) if normal.get("items") else ("mirage", mir)
+    if not ref.get("items"):
+        return None
+    period = stock_period(ref_kind, ref)
+    board = {"msg": None, "period": period, "normal": None, "mirages": []}
+    if normal.get("items") and stock_period("normal", normal) == period:
+        board["normal"] = normal
+    if mir.get("items") and stock_period("mirage", mir) == period:
+        board["mirages"] = [mir]
+    text = await render_board(board)
+    if not text:
+        return None
+    await _send_board_message(chat_id, board, text)
+    return board["msg"]
+
+
+@dp.message(Command("stockclean", "stockfix"))
+async def stockclean_cmd(msg: Message):
+    """Удаляет сообщение стока и собирает чистое заново из сохранённых данных (без истёкших чужих блоков)."""
+    if not await redact_zone(msg):
+        return
+    chat_id = await main_chat()
+    if not chat_id:
+        await reply(msg, "({8})Основной чат ещё не привязан (/link_hublox).")
+        return
+    async with lock_for("stock_board"):
+        board = await load_board()
+        for mid in {board.get("msg"), int(await get_config("stock_msg") or 0) or None}:
+            if mid:
                 try:
-                    old_text = await render_board(board, closed=True)
-                    if old_text:
-                        await _edit_board_message(chat_id, board, old_text)
-                except Exception as exc:
-                    LOG.warning("stock: не удалось закрыть прошлое сообщение: %s", exc)
-            new_board = {"msg": None, "normal": state, "mirages": []}
-            mir = await stock_state("mirage")  # Mirage, который уже начался в этом периоде Normal
-            if mir.get("items") and mir.get("epoch") and state.get("epoch") \
-                    and mir["epoch"] - STOCK_NEXT_HOURS["mirage"] * 3600 >= state["epoch"] - STOCK_NEXT_HOURS["normal"] * 3600:
-                new_board["mirages"].append(mir)
-            await _cleanup_legacy_stock_posts(chat_id)
-            await _send_board_message(chat_id, new_board, await render_board(new_board))
-            return
-        if not board.get("msg"):  # сообщения ещё нет — начинаем с текущего Normal
-            normal = await stock_state("normal")
-            board = {"msg": None, "normal": normal if normal.get("items") else None, "mirages": [state]}
-            await _cleanup_legacy_stock_posts(chat_id)
-            await _send_board_message(chat_id, board, await render_board(board))
-            return
-        mirages = board.get("mirages") or []
-        if mirages and mirages[-1].get("epoch") == state.get("epoch") and state.get("epoch"):
-            mirages[-1] = state
-        else:
-            mirages.append(state)
-        board["mirages"] = mirages[-3:]
-        text = await render_board(board)
-        if not await _edit_board_message(chat_id, board, text):
-            await _send_board_message(chat_id, board, text)
-        else:
-            await save_board(board)
+                    await B().delete_message(chat_id, mid)
+                except Exception:
+                    pass
+        await set_config("stock_board", "")
+        await set_config("stock_msg", "")
+        mid = await rebuild_board(chat_id)
+    await reply(msg, "({20})Сообщение стока пересобрано заново." if mid else
+                     "({20})Старое сообщение удалено. Новое появится при следующей публикации (/stocknow).")
 
 
 async def refresh_stock_message(chat_id: int | None, resend: bool = False) -> int | None:
@@ -4588,6 +4698,25 @@ async def _notify_stock_error(text: str) -> None:
     await dm(CREATOR_ID, f"{e(8)} <b>Автосток: ошибка</b>\n<blockquote>{esc(text)[:600]}</blockquote>\n"
                          f"Повторных попыток не будет. Обновить сейчас: /stocknow (1 кредит). "
                          f"Если не обновите, бот сам проверит в {nxt} МСК.")
+
+
+STOCK_LOCK_KEY = 7340211  # общий замок автостока на весь Postgres
+
+
+async def stock_leader() -> None:
+    """Автосток работает только в одном экземпляре бота. Второй (например, во время деплоя) ждёт, пока замок освободится."""
+    while True:
+        try:
+            async with pool().acquire() as conn:
+                if await conn.fetchval("SELECT pg_try_advisory_lock($1)", STOCK_LOCK_KEY):
+                    LOG.info("stock: этот экземпляр ведёт автосток")
+                    await stock_loop()
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOG.exception("stock leader")
+        await asyncio.sleep(30)
 
 
 async def stock_loop() -> None:
@@ -4908,8 +5037,8 @@ async def auto_warn(msg: Message, reason: str) -> None:
                      reason, ", ".join(numbers), msg.chat.id, msg.message_id)
     if ban_no:
         await log_action("Бан (лимит варнов 4/4)", bot_id, user.id, user.username, user.full_name,
-                         "Достигнут лимит варнов (4/4)", ban_no, msg.chat.id, msg.message_id)
-        await say(msg, ban_text(m, "Достигнут лимит варнов (4/4)", ban_no, None), appeal_markup([("ban", ban_no)]))
+                         "3.3 Достигнут лимит варнов (4/4)", ban_no, msg.chat.id, msg.message_id)
+        await say(msg, ban_text(m, "3.3 Достигнут лимит варнов (4/4)", ban_no, None), appeal_markup([("ban", ban_no)]))
 
 
 SPAM_MSGS = 5        # больше 4 сообщений
@@ -4951,7 +5080,7 @@ async def spam_check(msg: Message) -> None:
             return
     if await is_banned(user.id):
         return
-    await auto_warn(msg, "1.16 Спам")
+    await auto_warn(msg, "3.2 Спам")
 
 
 class SpamMiddleware(BaseMiddleware):
@@ -6673,6 +6802,9 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.14.1", "Автоварны по пунктам: ссылки — 3.1, спам — 3.2, бан по лимиту варнов 4/4 — 3.3."),
+    ("3.14", "Варны: таймер 7 суток со стеком (последний варн идёт, прежние заморожены); логи выдачи и снятия — в отдельные темы; правила копируются Rich-сообщением как есть с версией после заголовка; кнопка Roblox внутри заявки."),
+    ("3.13", "Сток: сообщение привязано к 4-часовому окну Normal (без чужих и истёкших Mirage), автосток работает только в одном экземпляре бота, /stockclean."),
     ("3.12", "Заявки: общий раздел «Заявки», морские ивенты и ивенты (Rich-публикация, «Помочь» с подтверждением), «Мои заявки», «Помощь»; новый эмодзи 👤."),
     ("3.11", "Набор в администрацию: /createsearch, /opensearch, /closesearch, тест опросами и развёрнутыми ответами; правила в Rich-формате; «О боте»."),
     ("3.10", "Меню под строкой ввода (2 страницы), «Мои нарушения» с датами, кнопка «Вики»."),
@@ -6742,7 +6874,7 @@ def apps_hub_kb() -> ReplyKeyboardMarkup:
 def app_types_kb() -> ReplyKeyboardMarkup:
     return rk([[rbi("Морские ивенты", RM_ICONS["sea"])], [rbi("Ивенты", RM_ICONS["events"])],
                [rbi("Трейды", RM_ICONS["trade"])], [rbi("Триалы", RM_ICONS["trial"])],
-               [rbi("💾 Рейды")], back_row()])  # id иконки 💾 уточнить: в присланном 18 цифр, у остальных 19
+               [rbi("Рейды", RM_ICONS["raid"])], back_row()])
 
 
 def sea_events_kb() -> ReplyKeyboardMarkup:
@@ -6990,6 +7122,288 @@ async def app_rich_html(app) -> str:
     return "".join(parts)
 
 
+# ===================== ВАРНЫ: ТАЙМЕР 7 СУТОК СО СТЕКОМ =====================
+WARN_TTL = 7 * 24 * 3600  # варн снимается сам через 7 суток
+
+
+def plan_reflow(rows: list, now: int) -> list:
+    """Таймер идёт только у ПОСЛЕДНЕГО варна, остальные заморожены (остаток сохранён).
+    Новый варн замораживает прежний, а когда последний снят или истёк — размораживается предыдущий.
+    rows: активные варны пользователя по порядку выдачи. Возвращает [(id, expires_at, remaining)]."""
+    updates = []
+    if not rows:
+        return updates
+    for r in rows[:-1]:
+        if r["expires_at"] is not None:  # шёл таймер — замораживаем с остатком
+            updates.append((r["id"], None, max(0, r["expires_at"] - now)))
+        elif r["remaining"] is None:  # старый варн без таймера: не меньше суток
+            updates.append((r["id"], None, max(r["created_at"] + WARN_TTL - now, 86400)))
+    top = rows[-1]
+    if top["expires_at"] is None:  # последний варн — запускаем (или размораживаем) таймер
+        left = top["remaining"] if top["remaining"] is not None else max(top["created_at"] + WARN_TTL - now, 86400)
+        updates.append((top["id"], now + left, None))
+    return updates
+
+
+async def warn_reflow(conn, user_id: int, now: int) -> None:
+    rows = [dict(r) for r in await conn.fetch(
+        "SELECT id, created_at, expires_at, remaining FROM warn_logs WHERE user_id=$1 AND is_active ORDER BY id", user_id)]
+    for wid, expires_at, remaining in plan_reflow(rows, now):
+        await conn.execute("UPDATE warn_logs SET expires_at=$2, remaining=$3 WHERE id=$1", wid, expires_at, remaining)
+
+
+def fmt_left(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    parts = ([f"{days} д"] if days else []) + ([f"{hours} ч"] if hours else []) + ([f"{minutes} мин"] if minutes and not days else [])
+    return " ".join(parts) or "меньше минуты"
+
+
+async def warns_migrate() -> None:
+    """Старые варны (до таймера) получают таймер: у последнего запущен, у остальных заморожен."""
+    for r in await pool().fetch("SELECT DISTINCT user_id FROM warn_logs WHERE is_active AND expires_at IS NULL AND remaining IS NULL"):
+        async with pool().acquire() as conn:
+            async with conn.transaction():
+                await warn_reflow(conn, r["user_id"], now_ts())
+
+
+async def expire_warns_once() -> None:
+    now = now_ts()
+    rows = await pool().fetch(
+        """SELECT w.id, w.user_id, w.warn_number FROM warn_logs w JOIN users u ON u.user_id = w.user_id
+           WHERE w.is_active AND w.expires_at IS NOT NULL AND w.expires_at <= $1 AND NOT u.banned ORDER BY w.id""", now)
+    for r in rows:
+        uid = r["user_id"]
+        number = left = nxt = None
+        async with lock_for("warn", uid):
+            async with pool().acquire() as conn:
+                async with conn.transaction():
+                    res = await conn.execute(
+                        "UPDATE warn_logs SET is_active=FALSE, removed_at=$2, removed_reason='expired' "
+                        "WHERE id=$1 AND is_active AND expires_at IS NOT NULL AND expires_at <= $2", r["id"], now)
+                    if res.endswith(" 0"):
+                        continue
+                    left = await conn.fetchval("UPDATE users SET warns=GREATEST(warns-1,0) WHERE user_id=$1 RETURNING warns", uid)
+                    number = num(await next_number(conn, "unwarn_counter"))
+                    await conn.execute(
+                        """INSERT INTO unwarn_logs (user_id, unwarn_number, moderator_id, chat_id, message_id, created_at)
+                           VALUES ($1,$2,$3,$4,NULL,$5)""", uid, number, B().id, await main_chat() or 0, now)
+                    await warn_reflow(conn, uid, now)  # предыдущий варн размораживается
+                    nxt = await conn.fetchrow(
+                        "SELECT warn_number, expires_at FROM warn_logs WHERE user_id=$1 AND is_active AND expires_at IS NOT NULL", uid)
+        if left is not None and left < 2 and not await is_banned(uid):
+            await unmute_everywhere(uid)
+        k = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", uid)
+        extra = f"Снят варн {r['warn_number']} • Осталось: {left}/{MAX_WARNS}\n"
+        if nxt:
+            extra += f"Следующий таймер: {nxt['warn_number']} — до {fmt_dt(nxt['expires_at'])}\n"
+        await log_action("Варн истёк (7 суток)", B().id, uid, k and k["username"], k and k["full_name"], None, number, 0, None,
+                         extra=extra, bot_label="DuoSup (таймер 7 суток)")
+        text = f"{e(20)}Ваш варн <b>{r['warn_number']}</b> истёк и снят (прошло 7 суток). Осталось варнов: {left}/{MAX_WARNS}."
+        if nxt:
+            text += f"\nСледующий варн {nxt['warn_number']} снимется {fmt_dt(nxt['expires_at'])}."
+        await dm(uid, text)
+
+
+async def warns_expiry_loop() -> None:
+    await asyncio.sleep(25)
+    while True:
+        try:
+            await expire_warns_once()
+        except Exception:
+            LOG.exception("warns expiry failed")
+        await asyncio.sleep(300)
+
+
+# ===================== RICH-БЛОКИ: кнопка Roblox внутри текста =====================
+def rt_emoji(n: int, alt: str) -> dict:
+    return {"type": "custom_emoji", "custom_emoji_id": PREMIUM_EMOJI[n], "alternative_text": alt}
+
+
+def rt_user(uid: int, username: str | None, full_name: str | None) -> dict:
+    if username:
+        return {"type": "url", "text": f"@{username}", "url": f"https://t.me/{username}"}
+    return {"type": "url", "text": full_name or str(uid), "url": f"tg://user?id={uid}"}
+
+
+async def send_rich_blocks(chat_id: int, blocks: list, thread_id: int | None = None, reply_to: int | None = None,
+                           markup=None) -> int | None:
+    payload: dict = {"chat_id": chat_id, "rich_message": {"blocks": blocks, "skip_entity_detection": True}}
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+    if reply_to:
+        payload["reply_parameters"] = {"message_id": reply_to}
+    if markup is not None:
+        payload["reply_markup"] = markup.model_dump(exclude_none=True)
+    data = await _tg_call("sendRichMessage", payload)
+    result = data.get("result")
+    return result.get("message_id") if isinstance(result, dict) else None
+
+
+async def edit_rich_blocks(chat_id: int, message_id: int, blocks: list, markup=None) -> None:
+    payload: dict = {"chat_id": chat_id, "message_id": message_id,
+                     "rich_message": {"blocks": blocks, "skip_entity_detection": True}}
+    if markup is not None:
+        payload["reply_markup"] = markup.model_dump(exclude_none=True)
+    await _tg_call("editMessageText", payload)
+
+
+async def app_blocks(app) -> list:
+    """Заявка (морской ивент / ивент) блоками: кнопка «Перейти в профиль Roblox» — внутри текста, сразу под автором."""
+    from urllib.parse import quote
+    p = json_payload(app["payload"])
+    uid = app["user_id"]
+    k = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", uid)
+    urow = await user_row(uid)
+    username, full_name = (k and k["username"]), (k and k["full_name"])
+    plain_author = f"@{username}" if username else (full_name or str(uid))
+    icon_n = (SEA_EVENTS if app["kind"] == "sea" else EVENTS).get(p.get("event"), ("", 49))[1] or 49
+    sep = html.unescape(SEP)
+    blocks: list = [
+        {"type": "heading", "text": [rt_emoji(icon_n, "🔹"), " ", p.get("event_name", "")], "size": 2},
+        {"type": "paragraph", "text": ["Номер заявки: ", {"type": "bold", "text": num(app["id"])}]},
+        {"type": "paragraph", "text": sep},
+        {"type": "paragraph", "text": [rt_emoji(44, "👤"), " Заявка от ", rt_user(uid, username, full_name)]},
+    ]
+    nick = urow and urow["roblox_username"]
+    if nick:
+        blocks.append({"type": "buttons", "align": "left", "buttons": [
+            {"text": [rt_emoji(87, "🔲"), " Перейти в профиль Roblox"],
+             "url": f"https://www.roblox.com/user.aspx?username={quote(nick)}"}]})
+    if app["kind"] == "sea" and p.get("count"):
+        blocks.append({"type": "paragraph", "text": ["Кол-во участников: ", {"type": "bold", "text": str(p["count"])}]})
+    if p.get("comment"):
+        lines = [ln for ln in str(p["comment"]).split("\n") if ln.strip()]
+        blocks.append({"type": "paragraph", "text": "🗣️ Комментарий:"})
+        blocks.append({"type": "blockquote", "blocks": [{"type": "paragraph", "text": ln} for ln in lines],
+                       "credit": f"Автор: {plain_author}"})
+    blocks += [{"type": "paragraph", "text": sep},
+               {"type": "paragraph", "text": {"type": "bold", "text": "Помощники:"}}]
+    helpers = p.get("helpers", [])
+    if helpers:
+        items = []
+        for h in helpers:
+            kh = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", h)
+            items.append({"blocks": [{"type": "paragraph", "text": rt_user(h, kh and kh["username"], kh and kh["full_name"])}]})
+        blocks.append({"type": "list", "items": items})
+    else:
+        blocks.append({"type": "paragraph", "text": {"type": "italic", "text": "пока никого"}})
+    closed = app["status"] == "closed"
+    blocks += [{"type": "paragraph", "text": sep},
+               {"type": "paragraph", "text": [rt_emoji(20 if closed else 62, "✅" if closed else "🟢"), " ",
+                                              {"type": "bold", "text": "Заявка завершена" if closed else "Заявка активна"}]}]
+    return blocks
+
+
+# ===================== ПРАВИЛА: Rich-сообщение копируется как есть =====================
+def rich_blocks_of(msg: Message) -> list | None:
+    """Rich-сообщение от пользователя приходит не как text, а в поле rich_message (блоки)."""
+    raw = getattr(msg, "rich_message", None)
+    if raw is None:
+        raw = (getattr(msg, "model_extra", None) or {}).get("rich_message")
+    if raw is None:
+        return None
+    data = raw.model_dump(mode="json", exclude_none=True) if hasattr(raw, "model_dump") else raw
+    blocks = data.get("blocks") if isinstance(data, dict) else None
+    return blocks or None
+
+
+_MEDIA_BLOCKS = {"photo", "video", "animation", "audio", "voice_note"}
+
+
+def rich_to_input(block):
+    """Полученные блоки (RichBlock) -> блоки для отправки (InputRichBlock): медиа становится file_id, всё остальное как есть."""
+    if isinstance(block, list):
+        return [rich_to_input(b) for b in block]
+    if not isinstance(block, dict):
+        return block
+    kind = block.get("type")
+    out = {}
+    for key, value in block.items():
+        if kind in _MEDIA_BLOCKS and key == kind:
+            if isinstance(value, list) and value:
+                file_id = value[-1].get("file_id")  # у фото берём самый большой размер
+            else:
+                file_id = value.get("file_id") if isinstance(value, dict) else None
+            out[key] = {"type": kind, "media": file_id}
+        elif key == "blocks":
+            out[key] = rich_to_input(value)
+        elif key == "items" and kind == "list":
+            out[key] = [{kk: (rich_to_input(vv) if kk == "blocks" else vv) for kk, vv in item.items() if kk != "label"}
+                        for item in value]
+        else:
+            out[key] = value
+    return out
+
+
+def rules_input_blocks(version: str, blocks: list) -> list:
+    """Правила как прислал создатель + версия «V…» заголовком 4-го уровня сразу после первого заголовка."""
+    converted = rich_to_input(blocks)
+    version_block = {"type": "heading", "text": f"V{version}", "size": 4}
+    for i, b in enumerate(converted):
+        if isinstance(b, dict) and b.get("type") == "heading":
+            return converted[:i + 1] + [version_block] + converted[i + 1:]
+    return [version_block] + converted
+
+
+async def publish_rules_blocks(version: str, blocks: list, src: tuple | None) -> bool:
+    """Правила одним Rich-сообщением в тему «Правила»; прежнее сообщение убирается."""
+    chat_id = await main_chat()
+    if not chat_id:
+        return False
+    raw = await get_config("rules_msg_ids")
+    try:
+        old_ids = [int(x) for x in json.loads(raw)] if raw else []
+    except ValueError:
+        old_ids = []
+    legacy = await get_config("rules_msg_id")
+    if not old_ids and legacy:
+        old_ids = [int(legacy)]
+    mid = None
+    try:
+        mid = await send_rich_blocks(chat_id, rules_input_blocks(version, blocks), thread(TOPICS["rules"]))
+    except Exception as exc:
+        LOG.warning("rules: блоки не отправились (%s)", exc)
+        if src:  # запасной путь: копия сообщения создателя без версии
+            try:
+                copied = await B().copy_message(chat_id, src[0], src[1], message_thread_id=thread(TOPICS["rules"]))
+                mid = copied.message_id
+            except Exception:
+                LOG.exception("rules: copy_message тоже не удался")
+    if not mid:
+        return False
+    for old in old_ids:
+        try:
+            await B().delete_message(chat_id, old)
+        except Exception:
+            pass
+    await set_config("rules_msg_ids", json.dumps([mid]))
+    await set_config("rules_msg_id", mid)
+    url = msg_url(chat_id, mid)
+    try:
+        await B().send_message(chat_id, R(f"{e(26)} <b>Правила обновлены</b> (версия {esc(version)})\nОзнакомьтесь с изменениями."),
+                               message_thread_id=thread(TOPICS["announce"]),
+                               reply_markup=kb([btn("({26}) Открыть правила", url=url)]) if url else None)
+    except Exception:
+        LOG.exception("rules announce failed")
+    return True
+
+
+@dp.message(RulesSt.text, F.func(lambda m: rich_blocks_of(m) is not None))
+async def setrules_rich(msg: Message, state: FSMContext):
+    blocks = rich_blocks_of(msg)
+    await state.clear()
+    version = str(1 + int(await pool().fetchval("SELECT COUNT(*) FROM rules") or 0))
+    await pool().execute("INSERT INTO rules (version, rule_text, created_at, is_html, blocks) VALUES ($1,$2,$3,FALSE,$4)",
+                         version, "Правила опубликованы в теме «Правила» (Rich-сообщение).", now_ts(),
+                         json.dumps(blocks, ensure_ascii=False))
+    ok = await publish_rules_blocks(version, blocks, (msg.chat.id, msg.message_id))
+    await reply(msg, f"({{20}})Правила обновлены (версия {version}), опубликованы Rich-сообщением." if ok else
+                     "({8})Правила сохранены, но опубликовать в теме не удалось. Проверьте права бота в теме «Правила» и логи.")
+
+
 # Автоварн — самым последним: он реагирует на любые групповые сообщения со ссылками.
 dp.message.register(autowarn_handler, F.chat.type.in_({"group", "supergroup"}))
 
@@ -7022,10 +7436,15 @@ async def main() -> None:
             BotCommand(command="cancel", description="Отменить действие"),
         ])
         if STOCK_ACCOUNTS:
-            _stock_task = asyncio.create_task(stock_loop())
+            _stock_task = asyncio.create_task(stock_leader())
         else:
             LOG.info("STOCK_API_URL не задан — автосток выключен (работает ручная команда /stock)")
         spawn(applications_expiry_loop())
+        try:
+            await warns_migrate()
+        except Exception:
+            LOG.exception("warns migrate failed")
+        spawn(warns_expiry_loop())
         try:
             await wiki_seed_if_empty()
         except Exception:
