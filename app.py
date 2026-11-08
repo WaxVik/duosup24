@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.14.1"
+BOT_VERSION = "3.15.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -213,9 +213,22 @@ def clean_btn_text(text: str) -> str:
     return re.sub(r"\s+", " ", _PH.sub("", text)).strip()
 
 
-def btn(text: str, cb: str | None = None, url: str | None = None, icon_id: str | None = None) -> InlineKeyboardButton:
-    """Кнопка. ({N}) в тексте превращается в icon_custom_emoji_id (Telegram не принимает <tg-emoji> в кнопках)."""
-    kwargs: dict = {"text": clean_btn_text(text) or "•"}
+BACK_ICON = "5875082500023258804"    # ↩️
+CANCEL_ICON = "5778527486270770928"  # ✖️
+ROBLOX_ICON = "5884343982816759327"  # ↗️
+
+
+def btn(text: str, cb: str | None = None, url: str | None = None, icon_id: str | None = None,
+        style: str | None = None) -> InlineKeyboardButton:
+    """Кнопка. ({N}) в тексте превращается в icon_custom_emoji_id (Telegram не принимает <tg-emoji> в кнопках).
+    «Назад» и «Отмена» автоматически красные (style=danger) с иконками ↩️ и ✖️."""
+    label = clean_btn_text(text) or "•"
+    low = label.strip().lower()
+    if low.startswith("назад"):
+        icon_id, style = BACK_ICON, "danger"
+    elif low.startswith("отмен"):
+        icon_id, style = CANCEL_ICON, "danger"
+    kwargs: dict = {"text": label}
     if cb:
         kwargs["callback_data"] = cb
     if url:
@@ -227,6 +240,8 @@ def btn(text: str, cb: str | None = None, url: str | None = None, icon_id: str |
             icon_id = PREMIUM_EMOJI.get(int(first)) if first else None
     if icon_id:
         kwargs["icon_custom_emoji_id"] = icon_id
+    if style:
+        kwargs["style"] = style
     return InlineKeyboardButton(**kwargs)
 
 
@@ -1846,9 +1861,15 @@ async def premmod_done(cb: CallbackQuery, state: FSMContext):
 
 # =================== ВХОД В ЧАТЫ: ВЕРИФИКАЦИЯ И АДМИН-ЧАТ ===================
 WELCOME_RULES = (
-    f"<blockquote>{e(73)}Незнание правил не освобождает от наказания\n"
-    f"{e(61)}В ЛС DuoSup доступны:\n• рейды\n• морские ивенты\n\n• трейды\n• триалы\n• профиль\n"
-    "• заявки\n• апелляции\n• вопросы\n— Ознакомьтесь с правилами в теме «Правила».</blockquote>"
+    f"<blockquote>{e(73)}Незнание правил не освобождает от наказания. Правила — в теме «Правила».</blockquote>\n"
+    f"{e(61)}<b>Коротко, как всё устроено</b>\n"
+    "<blockquote>• <b>DuoSup</b> (кнопка ниже) — главное меню в личке: Сток, Заявки, Профиль, Вики, Навигация.\n"
+    "• <b>Заявки</b> на рейды, морские ивенты, ивенты, трейды и триалы создаются в боте и публикуются в своих темах чата.\n"
+    "• <b>Сток</b> фруктов — в теме «Стоки 24/7», уведомления о нужных фруктах — в боте.\n"
+    "• <b>Профиль</b> — /profile: ник Roblox, варны, награды. Укажите ник Roblox, он нужен для заявок.\n"
+    "• <b>Нарушения и апелляции</b> — в боте: «Мои нарушения».\n"
+    "• <b>Вопрос администрации</b> — в боте: «Вопрос | Ответ».\n"
+    "• <b>Вики</b> — /wiki название: фрукты, предметы, скиллы.</blockquote>"
 )
 
 
@@ -2214,7 +2235,7 @@ async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
         await state.set_state(AppSt.hub)
         await say(msg, "({77})<b>Заявки</b>\nВыберите действие.", apps_hub_kb())
     elif menu_key == "profile":
-        await say(msg, await profile_html(uid), kb([btn("Редактировать профиль ({24})", "profile_edit")], [BACK()]))
+        await show_profile(msg, uid, kb([btn("Редактировать профиль ({24})", "profile_edit")], [BACK()]))
     elif menu_key == "wiki":
         idx = await wiki_index()
         if not idx["on"] and uid != CREATOR_ID:
@@ -2236,6 +2257,12 @@ async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
         sent = await say(msg, "({60})<b>Вопрос | ответ</b>\nНапишите ваш вопрос одним сообщением.", back_only())
         await state.update_data(prompt_id=sent.message_id)
     elif menu_key == "rules":
+        if await get_config("rules_mode") == "copy" and await get_config("rules_msg_id") and await main_chat():
+            try:
+                await B().copy_message(msg.chat.id, await main_chat(), int(await get_config("rules_msg_id")))
+                return
+            except Exception as exc:
+                LOG.warning("rules in DM (copy): %s", exc)
         row = await pool().fetchrow("SELECT version, rule_text, is_html, blocks FROM rules ORDER BY created_at DESC LIMIT 1")
         if not row:
             await say(msg, "({8})Правила пока не опубликованы.")
@@ -2486,6 +2513,7 @@ async def publish_rules(version: str, text: str, is_html: bool = False) -> None:
                 pass
         await set_config("rules_msg_ids", json.dumps([mid] if mid else []))
         await set_config("rules_msg_id", mid or "")
+        await set_config("rules_mode", "html")
         url = msg_url(chat_id, mid) if mid else None
         await B().send_message(chat_id, R(f"{e(26)} <b>Правила обновлены</b> (версия {esc(version)})\nОзнакомьтесь с изменениями."),
                                message_thread_id=thread(TOPICS["announce"]),
@@ -2493,6 +2521,11 @@ async def publish_rules(version: str, text: str, is_html: bool = False) -> None:
         return
     except Exception as exc:
         LOG.warning("rules: Rich не получился (%s), публикую обычным сообщением", exc)
+    try:
+        await dm(CREATOR_ID, f"{e(8)}<b>Правила: Rich-сообщение не получилось</b>, опубликовал обычным (по частям).\nПричина — смотрите в логах Railway: строка «rules: Rich не получился».")
+    except Exception:
+        pass
+    await set_config("rules_mode", "html")
     await publish_rules_html(version, text, is_html)
 
 
@@ -2539,6 +2572,51 @@ async def profile_html(user_id: int) -> str:
     )
 
 
+async def profile_blocks(user_id: int) -> list:
+    """Профиль Rich-блоками: кнопка «↗️ Перейти в Roblox» стоит прямо в тексте, под ником."""
+    from urllib.parse import quote
+    row = await user_row(user_id)
+    known = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", user_id)
+    mod = await pool().fetchrow("SELECT role, level FROM moderators WHERE user_id=$1", user_id)
+    tag = (row and row["profile_tag"]) or (mod and mod["level"] > 0 and mod["role"]) or "—"
+    warns = int(row["warns"]) if row else 0
+    comment = (row and row["profile_comment"]) or "—"
+    achievements = [x.strip() for x in ((row and row["achievements"]) or "").split("\n") if x.strip()]
+    nick = row and row["roblox_username"]
+    bold = lambda t: {"type": "bold", "text": t}  # noqa: E731
+    blocks: list = [
+        {"type": "paragraph", "text": [rt_emoji(44, "👤"), " ", bold(rt_user(user_id, known and known["username"], known and known["full_name"]))]},
+        {"type": "paragraph", "text": html.unescape(SEP)},
+        {"type": "paragraph", "text": [rt_emoji(73, "🔹"), " ", bold("Ник:"), f" {nick or '—'}"]},
+    ]
+    if nick:
+        blocks.append({"type": "buttons", "align": "left", "buttons": [
+            {"text": [{"type": "custom_emoji", "custom_emoji_id": ROBLOX_ICON, "alternative_text": "↗️"}, " Перейти в Roblox"],
+             "url": f"https://www.roblox.com/user.aspx?username={quote(nick)}"}]})
+    blocks += [
+        {"type": "paragraph", "text": [rt_emoji(25, "🔖"), " ", bold("Тег:"), f" {tag}"]},
+        {"type": "paragraph", "text": [rt_emoji(8, "⚠️"), " ", bold("Варны:"), f" {warns}/{MAX_WARNS}"]},
+        {"type": "paragraph", "text": [rt_emoji(60, "💬"), " ", bold("Кол-во сообщений:"), f" {int(row['messages_count']) if row else 0}"]},
+        {"type": "blockquote", "blocks": [
+            {"type": "paragraph", "text": bold("Комментарий:")},
+            {"type": "paragraph", "text": {"type": "italic", "text": comment}},
+            {"type": "paragraph", "text": [bold("Награды"), " ", rt_emoji(72, "🏆")]},
+            *[{"type": "paragraph", "text": f"• {a}"} for a in (achievements or ["—"])]]},
+        {"type": "paragraph", "text": html.unescape(SEP)},
+        {"type": "paragraph", "text": [rt_emoji(64, "🗓"), " ", bold("В сообществе с:"), f" {fmt_date(row['joined_at'] if row else None)}"]},
+    ]
+    return blocks
+
+
+async def show_profile(msg: Message, user_id: int, markup=None) -> None:
+    try:
+        await send_rich_blocks(msg.chat.id, await profile_blocks(user_id), topic_of(msg),
+                               msg.message_id if msg.chat.type != "private" else None, markup)
+    except Exception as exc:
+        LOG.warning("profile: Rich-блоки не получились (%s), отправляю обычным", exc)
+        await reply(msg, await profile_html(user_id), markup)
+
+
 @dp.message(Command("profile"))
 async def profile_cmd(msg: Message):
     if not msg.from_user:
@@ -2555,13 +2633,17 @@ async def profile_cmd(msg: Message):
     markup = None
     if owner_dm:
         markup = kb([btn("Редактировать профиль ({24})", "profile_edit")], [btn("Навигация ({61})", "menu_nav")])
-    await reply(msg, await profile_html(target_id), markup)
+    await show_profile(msg, target_id, markup)
 
 
 @dp.callback_query(F.data == "menu_profile")
 async def menu_profile(cb: CallbackQuery):
     markup = kb([btn("Редактировать профиль ({24})", "profile_edit")], [btn("Навигация ({61})", "menu_nav")], [BACK()])
-    await edit(cb, await profile_html(cb.from_user.id), markup)
+    try:
+        await edit_rich_blocks(cb.message.chat.id, cb.message.message_id, await profile_blocks(cb.from_user.id), markup)
+        await cb.answer()
+    except Exception:
+        await edit(cb, await profile_html(cb.from_user.id), markup)
 
 
 @dp.callback_query(F.data == "profile_edit")
@@ -3578,15 +3660,17 @@ async def menu_question(cb: CallbackQuery, state: FSMContext):
 
 
 async def question_card_html(q, claimer: str | None = None, answer_html: str | None = None,
-                             answered_by: str | None = None) -> str:
+                             answered_by: str | None = None, rejected_by: str | None = None) -> str:
     k = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", q["user_id"])
     who = mention(q["user_id"], q["username"], k and k["full_name"])
-    title = "Новый вопрос" if not (claimer or answer_html) else "Вопрос"
+    title = "Новый вопрос" if not (claimer or answer_html or rejected_by) else "Вопрос"
     text = (f"{e(60)}<b>{title} {q['question_number']}</b>\n{e(44)} {who}\n"
             f"{e(46)} Вопрос:\n<blockquote>«{esc(q['question_text'])}»</blockquote>")
     if answer_html:
         wrapped = answer_html if "<blockquote" in answer_html else f"<blockquote>{answer_html}</blockquote>"
         text += f"\n\n{e(20)} <b>Ответ на вопрос:</b>\n{wrapped}\n<i>Взял и ответил:</i> {answered_by}"
+    elif rejected_by:
+        text += f"\n\n{e(14)} <b>Отказано:</b> {rejected_by}"
     elif claimer:
         text += f"\n\n🔒 <b>Взял:</b> {claimer}. Отвечает только он."
     return text
@@ -3595,9 +3679,10 @@ async def question_card_html(q, claimer: str | None = None, answer_html: str | N
 def question_markup(q):
     if q["status"] != "pending":
         return None
+    reject = btn("({14}) Отказать", f"qrej_{q['id']}", style="danger")
     if not q["claimed_by"]:
-        return kb([btn("({60}) Взять вопрос", f"qans_{q['id']}")])
-    return kb([btn("({24}) Написать ответ", f"qwrite_{q['id']}"), btn("({63}) Отпустить", f"qrel_{q['id']}")])
+        return kb([btn("({60}) Взять вопрос", f"qans_{q['id']}"), reject])
+    return kb([btn("({24}) Написать ответ", f"qwrite_{q['id']}"), btn("({63}) Отпустить", f"qrel_{q['id']}")], [reject])
 
 
 async def person_mention(uid: int) -> str:
@@ -3692,6 +3777,40 @@ async def question_write(cb: CallbackQuery, state: FSMContext):
     await start_answering(cb, state, q)
 
 
+@dp.callback_query(F.data.startswith("qrej_"))
+async def question_reject(cb: CallbackQuery, state: FSMContext):
+    if not await can_use(cb.from_user.id, "questions", 2):
+        await cb.answer("⛔ У вас нет права отвечать на вопросы.", show_alert=True)
+        return
+    q = await pool().fetchrow("SELECT * FROM questions WHERE id=$1", int(cb.data.split("_")[1]))
+    if not q or q["status"] != "pending":
+        await cb.answer("На этот вопрос уже ответили.", show_alert=True)
+        return
+    if q["claimed_by"] and cb.from_user.id not in (q["claimed_by"], CREATOR_ID):
+        await cb.answer("Вопрос взял другой админ — отказать может только он.", show_alert=True)
+        return
+    await pool().execute("UPDATE questions SET status='rejected', answered_by=$2 WHERE id=$1", q["id"], cb.from_user.id)
+    q = await pool().fetchrow("SELECT * FROM questions WHERE id=$1", q["id"])
+    mod = mention(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)
+    await question_refresh_card(q, rejected_by=mod)
+    data = await state.get_data()
+    if data.get("hint_id"):
+        try:
+            await B().delete_message(data["hint_chat"], data["hint_id"])
+        except Exception:
+            pass
+    if cb.from_user.id == q["claimed_by"]:
+        await state.clear()
+    if q["dm_msg"]:
+        try:
+            await B().delete_message(q["user_id"], q["dm_msg"])
+        except Exception:
+            pass
+    await dm(q["user_id"], f"{e(14)}<b>Вопрос {q['question_number']} отклонён.</b>\n"
+                           "Администрация не будет на него отвечать. Если нужно — сформулируйте иначе и задайте снова.", main_menu())
+    await cb.answer("Отказано")
+
+
 @dp.callback_query(F.data.startswith("qrel_"))
 async def question_release(cb: CallbackQuery, state: FSMContext):
     q = await pool().fetchrow("SELECT * FROM questions WHERE id=$1", int(cb.data.split("_")[1]))
@@ -3775,7 +3894,7 @@ def emoji_center_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🧬 Эмодзи рас триалов", callback_data="em_races")],
         [InlineKeyboardButton(text="📋 Установленные эмодзи", callback_data="em_list")],
         [InlineKeyboardButton(text="🗑 Сбросить эмодзи фруктов", callback_data="em_reset")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="em_close")],
+        [btn("Назад", "em_close")],
     )
 
 
@@ -3894,7 +4013,7 @@ async def em_list(cb: CallbackQuery):
     lines.append("\n<b>🧬 Расы:</b>")
     for k, n in RACES:
         lines.append(f"{custom_emoji_html(r_icons.get(k), '▫️')} {esc(n)}")
-    await cb.message.edit_text("\n".join(lines), reply_markup=kb([InlineKeyboardButton(text="⬅️ Назад", callback_data="em_back")]))
+    await cb.message.edit_text("\n".join(lines), reply_markup=kb([btn("Назад", "em_back")]))
     await cb.answer()
 
 
@@ -6523,7 +6642,7 @@ async def ct_delete_list(cb: CallbackQuery):
         return
     rows = [[InlineKeyboardButton(text=f"🗑 {i}. {html.unescape(re.sub(r'<[^>]+>', '', q['question']))[:30]}",
                                   callback_data=f"ct_rm_{q['id']}")] for i, q in enumerate(qs, 1)]
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="ct_menu")])
+    rows.append([btn("Назад", "ct_menu")])
     await cb.answer()
     await edit(cb, "({14})<b>Какой вопрос удалить?</b>", InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -6802,6 +6921,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.15", "Все «Назад» и «Отмена» — красные с новыми иконками; «Отказать» в вопросах; кнопка «Перейти в Roblox» внутри профиля и заявок; правила Rich копируются цельным сообщением; новое приветствие."),
     ("3.14.1", "Автоварны по пунктам: ссылки — 3.1, спам — 3.2, бан по лимиту варнов 4/4 — 3.3."),
     ("3.14", "Варны: таймер 7 суток со стеком (последний варн идёт, прежние заморожены); логи выдачи и снятия — в отдельные темы; правила копируются Rich-сообщением как есть с версией после заголовка; кнопка Roblox внутри заявки."),
     ("3.13", "Сток: сообщение привязано к 4-часовому окну Normal (без чужих и истёкших Mirage), автосток работает только в одном экземпляре бота, /stockclean."),
@@ -7270,7 +7390,7 @@ async def app_blocks(app) -> list:
     nick = urow and urow["roblox_username"]
     if nick:
         blocks.append({"type": "buttons", "align": "left", "buttons": [
-            {"text": [rt_emoji(87, "🔲"), " Перейти в профиль Roblox"],
+            {"text": [{"type": "custom_emoji", "custom_emoji_id": ROBLOX_ICON, "alternative_text": "↗️"}, " Перейти в Roblox"],
              "url": f"https://www.roblox.com/user.aspx?username={quote(nick)}"}]})
     if app["kind"] == "sea" and p.get("count"):
         blocks.append({"type": "paragraph", "text": ["Кол-во участников: ", {"type": "bold", "text": str(p["count"])}]})
@@ -7381,6 +7501,7 @@ async def publish_rules_blocks(version: str, blocks: list, src: tuple | None) ->
             pass
     await set_config("rules_msg_ids", json.dumps([mid]))
     await set_config("rules_msg_id", mid)
+    await set_config("rules_mode", "blocks")
     url = msg_url(chat_id, mid)
     try:
         await B().send_message(chat_id, R(f"{e(26)} <b>Правила обновлены</b> (версия {esc(version)})\nОзнакомьтесь с изменениями."),
@@ -7402,6 +7523,45 @@ async def setrules_rich(msg: Message, state: FSMContext):
     ok = await publish_rules_blocks(version, blocks, (msg.chat.id, msg.message_id))
     await reply(msg, f"({{20}})Правила обновлены (версия {version}), опубликованы Rich-сообщением." if ok else
                      "({8})Правила сохранены, но опубликовать в теме не удалось. Проверьте права бота в теме «Правила» и логи.")
+
+
+@dp.message(RulesSt.text, F.func(lambda m: not (m.text or "").startswith("/")))
+async def setrules_copy(msg: Message, state: FSMContext):
+    """Всё остальное (в т.ч. Rich-сообщение, которое библиотека не разобрала на блоки): копируется как есть, цельным сообщением."""
+    chat_id = await main_chat()
+    if not chat_id:
+        await reply(msg, "({8})Основной чат ещё не привязан (/link_hublox).")
+        return
+    try:
+        copied = await B().copy_message(chat_id, msg.chat.id, msg.message_id, message_thread_id=thread(TOPICS["rules"]))
+    except Exception as exc:
+        await reply(msg, f"({{14}})Не удалось скопировать сообщение в тему «Правила»: <code>{esc(exc)}</code>")
+        return
+    await state.clear()
+    version = str(1 + int(await pool().fetchval("SELECT COUNT(*) FROM rules") or 0))
+    await pool().execute("INSERT INTO rules (version, rule_text, created_at, is_html) VALUES ($1,$2,$3,FALSE)",
+                         version, "Правила опубликованы в теме «Правила» (копия вашего сообщения).", now_ts())
+    raw = await get_config("rules_msg_ids")
+    try:
+        old_ids = [int(x) for x in json.loads(raw)] if raw else []
+    except ValueError:
+        old_ids = []
+    for old in old_ids:
+        try:
+            await B().delete_message(chat_id, old)
+        except Exception:
+            pass
+    await set_config("rules_msg_ids", json.dumps([copied.message_id]))
+    await set_config("rules_msg_id", copied.message_id)
+    await set_config("rules_mode", "copy")
+    url = msg_url(chat_id, copied.message_id)
+    try:
+        await B().send_message(chat_id, R(f"{e(26)} <b>Правила обновлены</b> (версия {esc(version)})\nОзнакомьтесь с изменениями."),
+                               message_thread_id=thread(TOPICS["announce"]),
+                               reply_markup=kb([btn("({26}) Открыть правила", url=url)]) if url else None)
+    except Exception:
+        LOG.exception("rules announce failed")
+    await reply(msg, f"({{20}})Правила обновлены (версия {version}): опубликованы одним сообщением ровно как вы прислали.")
 
 
 # Автоварн — самым последним: он реагирует на любые групповые сообщения со ссылками.
