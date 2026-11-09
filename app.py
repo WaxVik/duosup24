@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.17.0"
+BOT_VERSION = "3.18.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -1631,8 +1631,7 @@ class PremMod(StatesGroup):
 def premmod_markup(rights: dict) -> InlineKeyboardMarkup:
     rows = []
     for key, title, emoji_n, _ in PERM_RIGHTS:
-        mark = "✅ " if rights.get(key) else ""
-        rows.append([btn(f"({{{emoji_n}}}) {mark}{title}", f"pm_t_{key}")])
+        rows.append([btn(f"({{{emoji_n}}}) {title}", f"pm_t_{key}", style="success" if rights.get(key) else None)])
     rows.append([btn("Готово ({20})", "pm_done")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2892,9 +2891,8 @@ async def menu_raid(cb: CallbackQuery, state: FSMContext):
 def skills_markup(fruit: str, selected: list[str]) -> InlineKeyboardMarkup:
     rows = []
     for skill, price in RAID_FRUITS[fruit][1].items():
-        mark = "✅ " if skill in selected else ""
         suffix = f" • {thousands(price)}" if price else ""
-        rows.append([InlineKeyboardButton(text=f"{mark}{skill}{suffix}", callback_data=f"raid_s_{skill}")])
+        rows.append([btn(f"{skill}{suffix}", f"raid_s_{skill}", style="success" if skill in selected else None)])
     rows.append([btn("({63}) Назад", "menu_raid"), btn("Далее ({34})", "raid_next")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -3259,8 +3257,8 @@ def trade_items_markup(cat: str, catalog: dict, icons: dict, sel: list[str]) -> 
     chosen = set(sel)
     buttons = []
     for item_id, name in trade_cat_list(catalog, cat):
-        mark = "✅ " if f"{cat}:{item_id}" in chosen else ""
-        buttons.append(btn(f"{mark}{name}", f"tri_{cat}_{item_id}", icon_id=trade_icon(icons, cat, item_id)))
+        buttons.append(btn(name, f"tri_{cat}_{item_id}", icon_id=trade_icon(icons, cat, item_id),
+                           style="success" if f"{cat}:{item_id}" in chosen else None))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([btn("Назад", "trc_fr" if cat in ("fn", "fp") else "trm")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -3391,23 +3389,19 @@ def trade_items_payload(refs: list[str], catalog: dict) -> list[dict]:
     return items
 
 
-async def send_trade_picture(app) -> None:
-    """Картинка трейда отдельным сообщением под карточкой. Сбой не мешает публикации."""
-    if not app or not app["chat_message_id"]:
-        return
-    p = json_payload(app["payload"])
-    if not p.get("give") or not p.get("want"):
-        return  # старые трейды без разделения на «отдаю» / «хочу»
+async def trade_photo_upload(give: list, want: list) -> tuple[str, int] | None:
+    """Собирает картинку и загружает в тему трейдов: возвращает (file_id, message_id) для Rich-блока."""
     try:
         from aiogram.types import BufferedInputFile
         from trade_image import compose_trade_image
-        data = await asyncio.to_thread(compose_trade_image, p["give"], p["want"])
+        data = await asyncio.to_thread(compose_trade_image, give, want)
         chat_id = await main_chat()
-        await B().send_photo(chat_id, BufferedInputFile(data, filename=f"trade_{app['id']}.png"),
-                             message_thread_id=thread(TOPICS[TOPIC_BY_KIND["trade"]]),
-                             reply_to_message_id=app["chat_message_id"])
+        msg = await B().send_photo(chat_id, BufferedInputFile(data, filename="trade.png"),
+                                   message_thread_id=thread(TOPICS[TOPIC_BY_KIND["trade"]]))
+        return msg.photo[-1].file_id, msg.message_id
     except Exception as exc:
-        LOG.warning("трейд %s: картинка не отправлена (%s)", app["id"], exc)
+        LOG.warning("трейд: картинка не собралась (%s)", exc)
+        return None
 
 
 @dp.callback_query(F.data == "trdone")
@@ -3432,12 +3426,19 @@ async def trade_publish(cb: CallbackQuery, state: FSMContext):
         w_text = ", ".join(trade_label(i["c"], i["n"]) for i in want)
         ru = " ".join(RAID_FRUITS[i["id"]][0] for i in give + want if i["c"] in ("fn", "fp") and i["id"] in RAID_FRUITS)
         payload = {"give": give, "want": want, "text": f"{g_text} → {w_text}", "search": f"{g_text} {w_text} {ru}"}
+        upload = await trade_photo_upload(give, want)
+        if upload:
+            payload["photo"] = upload[0]
         app_id = await create_application("trade", cb.from_user.id, payload)
+        if upload:
+            try:
+                await B().delete_message(await main_chat(), upload[1])
+            except Exception as exc:
+                LOG.warning("трейд: служебное фото не удалено (%s)", exc)
     await state.clear()
     if not app_id:
         await edit(cb, NO_MAIN, back_only())
         return
-    await send_trade_picture(await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id))
     await edit(cb, f"{e(20)}Трейд опубликован в теме «{link('Трейды', LINKS['trades'])}».\n"
                    f"Следующий можно создать через 5 минут.", back_only())
 
@@ -6003,8 +6004,8 @@ async def tg_rights_view(uid: int):
     rights = await get_rights(uid)
     rows = []
     for key, title, emoji_n, _ in PERM_RIGHTS:
-        mark = "✅ " if rights.get(key) else "❌ "
-        rows.append([btn(f"({{{emoji_n}}}) {mark}{title}", f"ap_tgt_{uid}_{key}")])
+        mark = "" if rights.get(key) else "❌ "
+        rows.append([btn(f"({{{emoji_n}}}) {mark}{title}", f"ap_tgt_{uid}_{key}", style="success" if rights.get(key) else None)])
     rows.append([btn("({63}) Назад", f"ap_u_{uid}")])
     text = (f"{e(21)} <b>Telegram разрешения</b>\n{await person_html(uid)}\n"
             "<blockquote>Нажмите на право, чтобы включить или выключить. "
@@ -7571,6 +7572,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.18.0", "Выбранные кнопки подсвечиваются зелёным вместо ✅ (трейды, рейды, права). Трейд: картинка сверху карточки (Rich), текст ниже."),
     ("3.17.0", "Трейд: картинка — фон сезона, 4 предмета «Отдаю» слева и 4 «Хочу взамен» справа, фото из папки trade_assets (см. README). Зависимость: pillow."),
     ("3.16.2", "Поиск трейда: то же меню, что и при создании, выбор одного предмета; ищет среди того, что отдают (не среди «хочу взамен»)."),
     ("3.16.1", "Трейды: два шага — «Отдаю» и «Хочу взамен» (до 4 предметов в каждом); свои Premium Emoji для Permanent-фруктов (/addemoji → Эмодзи Permanent фруктов)."),
@@ -8048,7 +8050,10 @@ async def app_blocks(app) -> list:
     else:
         icon_n, title = {"raid": (69, "Рейд"), "trial": (71, "Триал"), "trade": (48, "Трейд")}[kind]
     sep = html.unescape(SEP)
-    blocks: list = [
+    blocks: list = []
+    if kind == "trade" and p.get("photo"):  # картинка трейда сверху, текст ниже
+        blocks.append({"type": "photo", "photo": {"type": "photo", "media": p["photo"]}})
+    blocks += [
         {"type": "heading", "text": [rt_emoji(icon_n, "🔹"), " ", title], "size": 2},
         {"type": "paragraph", "text": ["Номер заявки: ", {"type": "bold", "text": num(app["id"])}]},
         {"type": "paragraph", "text": sep},
