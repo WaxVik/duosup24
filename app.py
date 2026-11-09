@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.16.2"
+BOT_VERSION = "3.17.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -3391,6 +3391,25 @@ def trade_items_payload(refs: list[str], catalog: dict) -> list[dict]:
     return items
 
 
+async def send_trade_picture(app) -> None:
+    """Картинка трейда отдельным сообщением под карточкой. Сбой не мешает публикации."""
+    if not app or not app["chat_message_id"]:
+        return
+    p = json_payload(app["payload"])
+    if not p.get("give") or not p.get("want"):
+        return  # старые трейды без разделения на «отдаю» / «хочу»
+    try:
+        from aiogram.types import BufferedInputFile
+        from trade_image import compose_trade_image
+        data = await asyncio.to_thread(compose_trade_image, p["give"], p["want"])
+        chat_id = await main_chat()
+        await B().send_photo(chat_id, BufferedInputFile(data, filename=f"trade_{app['id']}.png"),
+                             message_thread_id=thread(TOPICS[TOPIC_BY_KIND["trade"]]),
+                             reply_to_message_id=app["chat_message_id"])
+    except Exception as exc:
+        LOG.warning("трейд %s: картинка не отправлена (%s)", app["id"], exc)
+
+
 @dp.callback_query(F.data == "trdone")
 async def trade_publish(cb: CallbackQuery, state: FSMContext):
     data = await trade_ctx(cb, state)
@@ -3418,6 +3437,7 @@ async def trade_publish(cb: CallbackQuery, state: FSMContext):
     if not app_id:
         await edit(cb, NO_MAIN, back_only())
         return
+    await send_trade_picture(await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id))
     await edit(cb, f"{e(20)}Трейд опубликован в теме «{link('Трейды', LINKS['trades'])}».\n"
                    f"Следующий можно создать через 5 минут.", back_only())
 
@@ -7551,6 +7571,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.17.0", "Трейд: картинка — фон сезона, 4 предмета «Отдаю» слева и 4 «Хочу взамен» справа, фото из папки trade_assets (см. README). Зависимость: pillow."),
     ("3.16.2", "Поиск трейда: то же меню, что и при создании, выбор одного предмета; ищет среди того, что отдают (не среди «хочу взамен»)."),
     ("3.16.1", "Трейды: два шага — «Отдаю» и «Хочу взамен» (до 4 предметов в каждом); свои Premium Emoji для Permanent-фруктов (/addemoji → Эмодзи Permanent фруктов)."),
     ("3.16", "Трейды: заявка собирается кнопками (Gamepass / Fruit / Skins / Прочее, до 4 предметов), текстом писать нельзя, КД 5 минут; /redacttrade — каталог предметов; Premium Emoji предметов через /addemoji; кнопка Roblox теперь во всех заявках."),
