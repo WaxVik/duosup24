@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.16.0"
+BOT_VERSION = "3.16.1"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -2060,6 +2060,7 @@ class EmojiSt(StatesGroup):
     fruit = State()
     race = State()
     trade = State()
+    perm = State()
 
 
 class RulesSt(StatesGroup):
@@ -3154,9 +3155,18 @@ async def trade_catalog_save(cat: dict) -> None:
 async def trade_icons() -> dict[str, str]:
     """Иконки кнопок предметов: базовые фрукты (/addemoji → фрукты) + свои предметы (/addemoji → трейды)."""
     rows = await pool().fetch("SELECT key, value FROM config WHERE key LIKE 'custom_emoji_trade_%' AND value <> ''")
+    perm = await pool().fetch("SELECT key, value FROM config WHERE key LIKE 'custom_emoji_perm_%' AND value <> ''")
     out = await fruit_icons()
     out.update({r["key"].removeprefix("custom_emoji_trade_"): r["value"] for r in rows})
+    out.update({"perm_" + r["key"].removeprefix("custom_emoji_perm_"): r["value"] for r in perm})
     return out
+
+
+def trade_icon(icons: dict, cat: str, item_id: str) -> str | None:
+    """Permanent-фрукт: своё эмодзи, а если не задано — эмодзи обычного фрукта."""
+    if cat == "fp":
+        return icons.get("perm_" + item_id) or icons.get(item_id)
+    return icons.get(item_id)
 
 
 def trade_cat_list(catalog: dict, cat: str) -> list[tuple[str, str]]:
@@ -3211,24 +3221,37 @@ def trade_selected_html(sel: list[str], catalog: dict, icons: dict) -> str:
         cat, item_id = ref.split(":", 1)
         name = trade_item_name(catalog, cat, item_id)
         if name:
-            lines.append(f"{custom_emoji_html(icons.get(item_id), '▫️')} {esc(trade_label(cat, name))}")
+            lines.append(f"{custom_emoji_html(trade_icon(icons, cat, item_id), '▫️')} {esc(trade_label(cat, name))}")
     return "\n".join(lines)
 
 
-async def trade_main_text(sel: list[str]) -> str:
-    text = (f"({{48}})<b>Создание трейда</b>\nВыберите категорию. Можно выбрать до {TRADE_MAX_ITEMS} предметов "
-            f"(<b>{len(sel)}/{TRADE_MAX_ITEMS}</b>).")
-    if sel:
-        body = trade_selected_html(sel, await trade_catalog(), await trade_icons())
-        text += f"\n{SEP}\n<b>Выбрано:</b>\n{body}"
+STAGE_TITLE = {"give": "Что вы отдаёте", "want": "Что хотите взамен"}
+
+
+async def trade_main_text(data: dict) -> str:
+    stage = data.get("tr_stage", "give")
+    give, want = list(data.get("tr_give", [])), list(data.get("tr_want", []))
+    sel = give if stage == "give" else want
+    text = (f"({{48}})<b>Создание трейда • шаг {1 if stage == 'give' else 2}/2</b>\n<b>{STAGE_TITLE[stage]}</b>\n"
+            f"Выберите категорию. Можно до {TRADE_MAX_ITEMS} предметов (<b>{len(sel)}/{TRADE_MAX_ITEMS}</b>).")
+    if give or want:
+        catalog, icons = await trade_catalog(), await trade_icons()
+        if give:
+            text += f"\n{SEP}\n<b>Отдаю:</b>\n{trade_selected_html(give, catalog, icons)}"
+        if want:
+            text += f"\n{SEP}\n<b>Хочу взамен:</b>\n{trade_selected_html(want, catalog, icons)}"
     return text
 
 
-def trade_main_markup(sel: list[str]) -> InlineKeyboardMarkup:
+def trade_main_markup(data: dict) -> InlineKeyboardMarkup:
+    stage = data.get("tr_stage", "give")
+    sel = data.get("tr_give" if stage == "give" else "tr_want", [])
     extra = []
-    if sel:
-        extra.append([btn(f"({{20}}) Опубликовать ({len(sel)}/{TRADE_MAX_ITEMS})", "trdone", style="success")])
-    extra.append([btn("Назад", "menu_trade")])
+    if sel and stage == "give":
+        extra.append([btn("Далее ({34})", "trnext", style="success")])
+    if sel and stage == "want":
+        extra.append([btn("({20}) Опубликовать", "trdone", style="success")])
+    extra.append([btn("Назад", "menu_trade" if stage == "give" else "trprev")])
     return trade_main_kb("trc", extra)
 
 
@@ -3237,15 +3260,16 @@ def trade_items_markup(cat: str, catalog: dict, icons: dict, sel: list[str]) -> 
     buttons = []
     for item_id, name in trade_cat_list(catalog, cat):
         mark = "✅ " if f"{cat}:{item_id}" in chosen else ""
-        buttons.append(btn(f"{mark}{name}", f"tri_{cat}_{item_id}", icon_id=icons.get(item_id)))
+        buttons.append(btn(f"{mark}{name}", f"tri_{cat}_{item_id}", icon_id=trade_icon(icons, cat, item_id)))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([btn("Назад", "trc_fr" if cat in ("fn", "fp") else "trm")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def trade_items_text(cat: str, sel: list[str], empty: bool) -> str:
+def trade_items_text(cat: str, sel: list[str], empty: bool, stage: str = "give") -> str:
     title = {"gp": "Gamepass", "sk": "Skins", "ot": "Прочее", "fn": "Fruit • Обычные", "fp": "Fruit • Permanent"}[cat]
-    text = f"<b>{title}</b>\nВыбрано: <b>{len(sel)}/{TRADE_MAX_ITEMS}</b>. Нажмите на предмет, чтобы выбрать или убрать."
+    text = (f"<b>{title}</b> • {STAGE_TITLE[stage].lower()}\nВыбрано: <b>{len(sel)}/{TRADE_MAX_ITEMS}</b>. "
+            "Нажмите на предмет, чтобы выбрать или убрать.")
     if empty:
         text += "\n<blockquote>Здесь пока пусто. Администрация добавит предметы позже.</blockquote>"
     return text
@@ -3258,8 +3282,9 @@ async def trade_create(cb: CallbackQuery, state: FSMContext):
         await cb.answer(f"Следующий трейд можно создать через {fmt_cd(left)}.", show_alert=True)
         return
     await state.set_state(TradeSt.create)
-    await state.update_data(tr_sel=[])
-    await edit(cb, await trade_main_text([]), trade_main_markup([]))
+    data = {"tr_stage": "give", "tr_give": [], "tr_want": []}
+    await state.update_data(**data)
+    await edit(cb, await trade_main_text(data), trade_main_markup(data))
 
 
 @dp.message(TradeSt.create, F.text, ~F.text.startswith("/"))
@@ -3267,46 +3292,77 @@ async def trade_create_msg(msg: Message, state: FSMContext):
     await reply(msg, "({14})Писать трейд текстом нельзя. Выбирайте предметы кнопками под сообщением выше.")
 
 
-async def trade_state_sel(cb: CallbackQuery, state: FSMContext) -> list[str] | None:
+async def trade_ctx(cb: CallbackQuery, state: FSMContext) -> dict | None:
     if await state.get_state() != TradeSt.create.state:
         await cb.answer("Начните заново: Создать трейд.", show_alert=True)
         return None
-    return list((await state.get_data()).get("tr_sel", []))
+    data = await state.get_data()
+    return {"tr_stage": data.get("tr_stage", "give"), "tr_give": list(data.get("tr_give", [])),
+            "tr_want": list(data.get("tr_want", []))}
+
+
+def trade_sel_of(data: dict) -> list[str]:
+    return data["tr_give" if data["tr_stage"] == "give" else "tr_want"]
 
 
 @dp.callback_query(F.data == "trm")
 async def trade_back_main(cb: CallbackQuery, state: FSMContext):
-    sel = await trade_state_sel(cb, state)
-    if sel is None:
+    data = await trade_ctx(cb, state)
+    if data is None:
         return
-    await edit(cb, await trade_main_text(sel), trade_main_markup(sel))
+    await edit(cb, await trade_main_text(data), trade_main_markup(data))
+
+
+@dp.callback_query(F.data == "trnext")
+async def trade_next(cb: CallbackQuery, state: FSMContext):
+    data = await trade_ctx(cb, state)
+    if data is None:
+        return
+    if not data["tr_give"]:
+        await cb.answer("Выберите хотя бы один предмет, который отдаёте.", show_alert=True)
+        return
+    data["tr_stage"] = "want"
+    await state.update_data(tr_stage="want")
+    await edit(cb, await trade_main_text(data), trade_main_markup(data))
+
+
+@dp.callback_query(F.data == "trprev")
+async def trade_prev(cb: CallbackQuery, state: FSMContext):
+    data = await trade_ctx(cb, state)
+    if data is None:
+        return
+    data["tr_stage"] = "give"
+    await state.update_data(tr_stage="give")
+    await edit(cb, await trade_main_text(data), trade_main_markup(data))
 
 
 @dp.callback_query(F.data == "trc_fr")
 async def trade_fruit_menu(cb: CallbackQuery, state: FSMContext):
-    sel = await trade_state_sel(cb, state)
-    if sel is None:
+    data = await trade_ctx(cb, state)
+    if data is None:
         return
-    await edit(cb, f"({{48}})<b>Fruit</b>\nВыберите тип фрукта. Выбрано: <b>{len(sel)}/{TRADE_MAX_ITEMS}</b>.",
-               trade_fruit_kb("trc", "trm"))
+    await edit(cb, f"({{48}})<b>Fruit</b> • {STAGE_TITLE[data['tr_stage']].lower()}\nВыберите тип фрукта. "
+                   f"Выбрано: <b>{len(trade_sel_of(data))}/{TRADE_MAX_ITEMS}</b>.", trade_fruit_kb("trc", "trm"))
 
 
 @dp.callback_query(F.data.regexp(r"^trc_(gp|sk|ot|fn|fp)$"))
 async def trade_open_cat(cb: CallbackQuery, state: FSMContext):
-    sel = await trade_state_sel(cb, state)
-    if sel is None:
+    data = await trade_ctx(cb, state)
+    if data is None:
         return
     cat = cb.data.removeprefix("trc_")
+    sel = trade_sel_of(data)
     catalog = await trade_catalog()
-    await edit(cb, trade_items_text(cat, sel, not trade_cat_list(catalog, cat)),
+    await edit(cb, trade_items_text(cat, sel, not trade_cat_list(catalog, cat), data["tr_stage"]),
                trade_items_markup(cat, catalog, await trade_icons(), sel))
 
 
 @dp.callback_query(F.data.startswith("tri_"))
 async def trade_toggle(cb: CallbackQuery, state: FSMContext):
-    sel = await trade_state_sel(cb, state)
-    if sel is None:
+    data = await trade_ctx(cb, state)
+    if data is None:
         return
+    sel = trade_sel_of(data)
     _, cat, item_id = cb.data.split("_", 2)
     catalog = await trade_catalog()
     if cat not in ("gp", "sk", "ot", "fn", "fp") or trade_item_name(catalog, cat, item_id) is None:
@@ -3316,21 +3372,32 @@ async def trade_toggle(cb: CallbackQuery, state: FSMContext):
     if ref in sel:
         sel.remove(ref)
     elif len(sel) >= TRADE_MAX_ITEMS:
-        await cb.answer(f"Максимум {TRADE_MAX_ITEMS} предмета в одном трейде.", show_alert=True)
+        await cb.answer(f"Максимум {TRADE_MAX_ITEMS} предмета в этом списке.", show_alert=True)
         return
     else:
         sel.append(ref)
-    await state.update_data(tr_sel=sel)
-    await edit(cb, trade_items_text(cat, sel, False), trade_items_markup(cat, catalog, await trade_icons(), sel))
+    await state.update_data(**{"tr_give" if data["tr_stage"] == "give" else "tr_want": sel})
+    await edit(cb, trade_items_text(cat, sel, False, data["tr_stage"]),
+               trade_items_markup(cat, catalog, await trade_icons(), sel))
+
+
+def trade_items_payload(refs: list[str], catalog: dict) -> list[dict]:
+    items = []
+    for ref in refs:
+        cat, item_id = ref.split(":", 1)
+        name = trade_item_name(catalog, cat, item_id)
+        if name:
+            items.append({"c": cat, "id": item_id, "n": name})
+    return items
 
 
 @dp.callback_query(F.data == "trdone")
 async def trade_publish(cb: CallbackQuery, state: FSMContext):
-    sel = await trade_state_sel(cb, state)
-    if sel is None:
+    data = await trade_ctx(cb, state)
+    if data is None:
         return
-    if not sel:
-        await cb.answer("Выберите хотя бы один предмет.", show_alert=True)
+    if not data["tr_give"] or not data["tr_want"]:
+        await cb.answer("Выберите, что отдаёте и что хотите взамен.", show_alert=True)
         return
     async with lock_for("trade_create", cb.from_user.id):
         left = await trade_user_cooldown(cb.from_user.id)
@@ -3338,18 +3405,15 @@ async def trade_publish(cb: CallbackQuery, state: FSMContext):
             await cb.answer(f"Следующий трейд можно создать через {fmt_cd(left)}.", show_alert=True)
             return
         catalog = await trade_catalog()
-        items = []
-        for ref in sel:
-            cat, item_id = ref.split(":", 1)
-            name = trade_item_name(catalog, cat, item_id)
-            if name:
-                items.append({"c": cat, "id": item_id, "n": name})
-        if not items:
+        give, want = trade_items_payload(data["tr_give"], catalog), trade_items_payload(data["tr_want"], catalog)
+        if not give or not want:
             await cb.answer("Выбранные предметы больше недоступны.", show_alert=True)
             return
-        text = ", ".join(trade_label(i["c"], i["n"]) for i in items)
-        search = text + " " + " ".join(RAID_FRUITS[i["id"]][0] for i in items if i["c"] in ("fn", "fp") and i["id"] in RAID_FRUITS)
-        app_id = await create_application("trade", cb.from_user.id, {"items": items, "text": text, "search": search})
+        g_text = ", ".join(trade_label(i["c"], i["n"]) for i in give)
+        w_text = ", ".join(trade_label(i["c"], i["n"]) for i in want)
+        ru = " ".join(RAID_FRUITS[i["id"]][0] for i in give + want if i["c"] in ("fn", "fp") and i["id"] in RAID_FRUITS)
+        payload = {"give": give, "want": want, "text": f"{g_text} → {w_text}", "search": f"{g_text} {w_text} {ru}"}
+        app_id = await create_application("trade", cb.from_user.id, payload)
     await state.clear()
     if not app_id:
         await edit(cb, NO_MAIN, back_only())
@@ -4274,6 +4338,7 @@ def emoji_center_markup() -> InlineKeyboardMarkup:
     return kb(
         [InlineKeyboardButton(text="🍎 Эмодзи фруктов", callback_data="em_fruits")],
         [InlineKeyboardButton(text="🧲 Эмодзи Magnet (только он)", callback_data="em_magnet")],
+        [InlineKeyboardButton(text="🔲 Эмодзи Permanent фруктов", callback_data="em_perm")],
         [InlineKeyboardButton(text="🧬 Эмодзи рас триалов", callback_data="em_races")],
         [InlineKeyboardButton(text="🔁 Эмодзи трейдов (gamepass/skins/прочее)", callback_data="em_trade")],
         [InlineKeyboardButton(text="📋 Установленные эмодзи", callback_data="em_list")],
@@ -4394,6 +4459,57 @@ async def emoji_trade_items() -> list[tuple[str, str, str]]:
     return out
 
 
+async def emoji_perm_items() -> list[tuple[str, str]]:
+    """Все фрукты трейда (базовые + добавленные в /redacttrade) для эмодзи Permanent."""
+    return trade_cat_list(await trade_catalog(), "fp")
+
+
+def emoji_perm_prompt(items: list, idx: int) -> str:
+    _k, name = items[idx]
+    return (f"🔲 <b>Premium Emoji Permanent фруктов</b>\n{SEP}\nЭмодзи <b>{idx + 1}/{len(items)}</b>\n"
+            f"Фрукт: <b>{esc(name)}</b> (Permanent)\nОтправьте одним сообщением <b>Premium Emoji</b>.\n"
+            "Пропустить: отправьте <code>-</code> (останется эмодзи обычного фрукта)\nДля отмены: /cancel")
+
+
+@dp.callback_query(F.data == "em_perm")
+async def em_perm_start(cb: CallbackQuery, state: FSMContext):
+    if not creator_cb(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    items = await emoji_perm_items()
+    await state.set_state(EmojiSt.perm)
+    await state.update_data(idx=0)
+    await cb.message.edit_text(emoji_perm_prompt(items, 0))
+    await cb.answer()
+
+
+@dp.message(EmojiSt.perm, F.text)
+async def em_perm_msg(msg: Message, state: FSMContext):
+    if msg.from_user.id != CREATOR_ID:
+        return
+    if (msg.text or "").startswith("/") and msg.text.strip() != "-":
+        return
+    items = await emoji_perm_items()
+    idx = (await state.get_data()).get("idx", 0)
+    if idx >= len(items):
+        await state.clear()
+        return
+    key, _name = items[idx]
+    if (msg.text or "").strip() != "-":
+        emoji_id = custom_emoji_id_of(msg)
+        if not emoji_id:
+            await reply(msg, "({8})Это не Premium Emoji. Отправьте именно премиум-эмодзи или <code>-</code> чтобы пропустить.")
+            return
+        await set_config(f"custom_emoji_perm_{key}", emoji_id)
+    idx += 1
+    if idx >= len(items):
+        await state.clear()
+        await reply(msg, f"({{20}})Все {len(items)} Premium Emoji Permanent фруктов пройдены.", emoji_center_markup())
+        return
+    await state.update_data(idx=idx)
+    await msg.answer(emoji_perm_prompt(items, idx))
+
+
 @dp.callback_query(F.data == "em_trade")
 async def em_trade_start(cb: CallbackQuery, state: FSMContext):
     if not creator_cb(cb):
@@ -4456,6 +4572,8 @@ async def em_list(cb: CallbackQuery):
     for k, n in RACES:
         lines.append(f"{custom_emoji_html(r_icons.get(k), '▫️')} {esc(n)}")
     t_icons = await trade_icons()
+    perm_set = [n for k, n in await emoji_perm_items() if ("perm_" + k) in t_icons]
+    lines.append(f"\n<b>🔲 Permanent фруктов:</b> {len(perm_set)}/{len(await emoji_perm_items())}")
     t_items = await emoji_trade_items()
     if t_items:
         lines.append("\n<b>🔁 Трейды:</b>")
@@ -7368,6 +7486,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.16.1", "Трейды: два шага — «Отдаю» и «Хочу взамен» (до 4 предметов в каждом); свои Premium Emoji для Permanent-фруктов (/addemoji → Эмодзи Permanent фруктов)."),
     ("3.16", "Трейды: заявка собирается кнопками (Gamepass / Fruit / Skins / Прочее, до 4 предметов), текстом писать нельзя, КД 5 минут; /redacttrade — каталог предметов; Premium Emoji предметов через /addemoji; кнопка Roblox теперь во всех заявках."),
     ("3.15", "Все «Назад» и «Отмена» — красные с новыми иконками; «Отказать» в вопросах; кнопка «Перейти в Roblox» внутри профиля и заявок; правила Rich копируются цельным сообщением; новое приветствие."),
     ("3.14.1", "Автоварны по пунктам: ссылки — 3.1, спам — 3.2, бан по лимиту варнов 4/4 — 3.3."),
@@ -7871,13 +7990,21 @@ async def app_blocks(app) -> list:
         blocks.append({"type": "paragraph", "text": [rt_icon(icons.get(p.get("race")), "🧬"), " ", {"type": "bold", "text": "Раса:"}, f" {p.get('race_name', '')}"]})
     elif kind == "trade":
         icons = await trade_icons()
-        items = []
-        for it in p.get("items", []):
-            items.append({"blocks": [{"type": "paragraph", "text": [rt_icon(icons.get(it["id"]), "▫️"), " ", trade_label(it["c"], it["n"])]}]})
-        if not items and p.get("text"):
-            items.append({"blocks": [{"type": "paragraph", "text": p["text"]}]})
-        blocks.append({"type": "paragraph", "text": {"type": "bold", "text": "Предметы:"}})
-        blocks.append({"type": "list", "items": items})
+
+        def trade_list(items: list) -> dict:
+            return {"type": "list", "items": [{"blocks": [{"type": "paragraph", "text": [
+                rt_icon(trade_icon(icons, it["c"], it["id"]), "▫️"), " ", trade_label(it["c"], it["n"])]}]} for it in items]}
+
+        if "give" in p:
+            blocks.append({"type": "paragraph", "text": {"type": "bold", "text": "Отдаёт:"}})
+            blocks.append(trade_list(p.get("give", [])))
+            blocks.append({"type": "paragraph", "text": {"type": "bold", "text": "Хочет взамен:"}})
+            blocks.append(trade_list(p.get("want", [])))
+        elif p.get("items"):  # старые трейды (до 3.16.1): один список
+            blocks.append({"type": "paragraph", "text": {"type": "bold", "text": "Предметы:"}})
+            blocks.append(trade_list(p["items"]))
+        elif p.get("text"):
+            blocks.append({"type": "paragraph", "text": p["text"]})
     if p.get("comment"):
         lines = [ln for ln in str(p["comment"]).split("\n") if ln.strip()]
         blocks.append({"type": "paragraph", "text": "🗣️ Комментарий:"})
