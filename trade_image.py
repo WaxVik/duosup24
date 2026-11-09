@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import logging
 import os
 import re
 from pathlib import Path
@@ -28,6 +29,19 @@ SEASON_BY_MONTH = {12: "Зима", 1: "Зима", 2: "Зима", 3: "Весна"
 IMG_EXTS = (".webp", ".png", ".jpg", ".jpeg")
 FRUIT_SUFFIX = {"fn": "B", "fp": "A"}  # ...B = обычный, ...A = Permanent
 ITEM_FOLDER = {"sk": "skins", "ot": "other", "gp": "gamepass"}
+ALL_FOLDERS = ("skins", "other", "gamepass", "fruit")  # запасной поиск: если файл положили не в свою папку
+LOG = logging.getLogger("trade_image")
+
+# Название в боте -> другое имя файла (как лежит в архиве). Файлы не переименовываем.
+FILE_ALIASES = {
+    "Leopard": ["Tiger"],          # TigerA / TigerB
+    "Yeti": ["YetiFruit"],         # YetiFruitA / YetiFruitB
+    "Fruit Notifier": ["Fruit Notifer"],  # опечатка в файле Fruit-Notifer.png
+}
+
+
+def _names(name: str) -> list[str]:
+    return [name] + FILE_ALIASES.get(name, [])
 
 
 def _key(text: str) -> str:
@@ -53,10 +67,21 @@ def item_image_path(cat: str, name: str, variant: str | None = None) -> Path | N
     """Файл предмета. Фрукт: fruit/<Название><East|West><A|B>. Остальные: <папка>/<Название>."""
     if cat in FRUIT_SUFFIX:
         suf = FRUIT_SUFFIX[cat]
-        stems = ([f"{name}{variant}{suf}"] if variant else []) + [f"{name}{suf}"]
+        stems = []
+        for n in _names(name):
+            stems += ([f"{n}{variant}{suf}"] if variant else []) + [f"{n}{suf}"]
         return _find("fruit", stems)
     folder = ITEM_FOLDER.get(cat)
-    return _find(folder, [name]) if folder else None
+    if folder:
+        hit = _find(folder, _names(name))
+        if hit:
+            return hit
+    for other in ALL_FOLDERS:  # скин или предмет лежит в другой папке
+        hit = _find(other, _names(name))
+        if hit:
+            return hit
+    LOG.warning("трейд: нет картинки для «%s» (категория %s), ищу в %s", name, cat, ASSET_DIR)
+    return None
 
 
 def season_now(when: datetime.datetime | None = None) -> str:
@@ -103,10 +128,13 @@ def _paste(canvas: Image.Image, img: Image.Image, slot_xy: tuple[int, int]) -> N
     canvas.alpha_composite(img, dest=(x, y))
 
 
-def compose_trade_image(give: list[dict], want: list[dict], when: datetime.datetime | None = None) -> bytes:
+def compose_trade_image(give: list[dict], want: list[dict], when: datetime.datetime | None = None,
+                        season: str | None = None) -> bytes:
     """give / want: [{"c": "fn|fp|sk|ot|gp", "id": ..., "n": "Название", "v": "East|West" (необяз.)}, ...]."""
-    season = season_now(when)
+    season = season or season_now(when)  # season: ручной выбор через /seasont, иначе по месяцу
     bg_path = _find("backgrounds", [season])
+    if not bg_path:
+        LOG.warning("трейд: нет фона «%s» в %s", season, ASSET_DIR / "backgrounds")
     if bg_path:
         canvas = Image.open(bg_path).convert("RGBA")
         if canvas.size != CANVAS:

@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.18.0"
+BOT_VERSION = "3.18.1"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -3389,12 +3389,59 @@ def trade_items_payload(refs: list[str], catalog: dict) -> list[dict]:
     return items
 
 
+SEASON_CHOICES = ["Зима", "Весна", "Лето", "Осень"]
+
+
+async def seasont_text() -> str:
+    cur = await get_config("trade_season") or ""
+    shown = cur if cur in SEASON_CHOICES else "авто (по текущему месяцу)"
+    return (f"({{48}})<b>Сезонный фон трейдов</b>\nСейчас: <b>{shown}</b>\n"
+            "Выберите фон. «Авто» возвращает выбор по месяцу.")
+
+
+def seasont_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [btn(SEASON_CHOICES[0], "tsn_Зима"), btn(SEASON_CHOICES[1], "tsn_Весна")],
+        [btn(SEASON_CHOICES[2], "tsn_Лето"), btn(SEASON_CHOICES[3], "tsn_Осень")],
+        [btn("Авто", "tsn_auto")],
+        [btn("Закрыть", "tsn_close")],
+    ])
+
+
+@dp.message(Command("seasont"))
+async def seasont_cmd(msg: Message, state: FSMContext):
+    if not await redact_zone(msg):
+        return
+    await state.clear()
+    await say(msg, await seasont_text(), seasont_markup())
+
+
+@dp.callback_query(F.data.startswith("tsn_"))
+async def seasont_set(cb: CallbackQuery):
+    if not _creator_only(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    val = cb.data.removeprefix("tsn_")
+    if val == "close":
+        await cb.message.delete()
+        return
+    if val == "auto":
+        await set_config("trade_season", "")
+    elif val in SEASON_CHOICES:
+        await set_config("trade_season", val)
+    else:
+        await cb.answer()
+        return
+    await edit(cb, await seasont_text(), seasont_markup())
+
+
 async def trade_photo_upload(give: list, want: list) -> tuple[str, int] | None:
     """Собирает картинку и загружает в тему трейдов: возвращает (file_id, message_id) для Rich-блока."""
     try:
         from aiogram.types import BufferedInputFile
         from trade_image import compose_trade_image
-        data = await asyncio.to_thread(compose_trade_image, give, want)
+        season = await get_config("trade_season") or None
+        data = await asyncio.to_thread(compose_trade_image, give, want, None, season)
         chat_id = await main_chat()
         msg = await B().send_photo(chat_id, BufferedInputFile(data, filename="trade.png"),
                                    message_thread_id=thread(TOPICS[TOPIC_BY_KIND["trade"]]))
@@ -7572,6 +7619,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.18.1", "Команда /seasont — сезонный фон трейдов (вручную или «Авто»). Картинки предметов ищутся во всех папках trade_assets; в логе видно, какого файла нет."),
     ("3.18.0", "Выбранные кнопки подсвечиваются зелёным вместо ✅ (трейды, рейды, права). Трейд: картинка сверху карточки (Rich), текст ниже."),
     ("3.17.0", "Трейд: картинка — фон сезона, 4 предмета «Отдаю» слева и 4 «Хочу взамен» справа, фото из папки trade_assets (см. README). Зависимость: pillow."),
     ("3.16.2", "Поиск трейда: то же меню, что и при создании, выбор одного предмета; ищет среди того, что отдают (не среди «хочу взамен»)."),
