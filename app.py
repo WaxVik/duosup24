@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.16.1"
+BOT_VERSION = "3.16.2"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -3422,37 +3422,102 @@ async def trade_publish(cb: CallbackQuery, state: FSMContext):
                    f"Следующий можно создать через 5 минут.", back_only())
 
 
+FIND_TEXT = ("({39})<b>Поиск трейда</b>\nВыберите категорию и предмет, который ищете. "
+             "Бот покажет трейды, где этот предмет <b>отдают</b>.")
+
+
 @dp.callback_query(F.data == "trade_find")
 async def trade_find(cb: CallbackQuery, state: FSMContext):
     await state.set_state(TradeSt.find)
-    await edit(cb, "({39})<b>Поиск трейда</b>\n<blockquote>Назовите фрукт/геймпас/скин, который вы ищете.\n"
-                   "Например: тесто, алмаз, свет, дрожь.</blockquote>", kb([btn("({63}) Назад", "menu_trade")]))
+    await edit(cb, FIND_TEXT, trade_main_kb("trf", [[btn("Назад", "menu_trade")]]))
+
+
+@dp.message(TradeSt.find, F.text, ~F.text.startswith("/"))
+async def trade_find_msg(msg: Message, state: FSMContext):
+    await reply(msg, "({14})Искать текстом нельзя. Выберите предмет кнопками под сообщением выше.")
+
+
+async def trade_find_ok(cb: CallbackQuery, state: FSMContext) -> bool:
+    if await state.get_state() != TradeSt.find.state:
+        await cb.answer("Начните заново: Найти трейд.", show_alert=True)
+        return False
+    return True
+
+
+@dp.callback_query(F.data == "tfm")
+async def trade_find_main(cb: CallbackQuery, state: FSMContext):
+    if await trade_find_ok(cb, state):
+        await edit(cb, FIND_TEXT, trade_main_kb("trf", [[btn("Назад", "menu_trade")]]))
+
+
+@dp.callback_query(F.data == "trf_fr")
+async def trade_find_fruit(cb: CallbackQuery, state: FSMContext):
+    if await trade_find_ok(cb, state):
+        await edit(cb, "({39})<b>Поиск • Fruit</b>\nВыберите тип фрукта:", trade_fruit_kb("trf", "tfm"))
+
+
+def trade_find_markup(cat: str, catalog: dict, icons: dict) -> InlineKeyboardMarkup:
+    buttons = [btn(name, f"tfi_{cat}_{item_id}", icon_id=trade_icon(icons, cat, item_id))
+               for item_id, name in trade_cat_list(catalog, cat)]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([btn("Назад", "trf_fr" if cat in ("fn", "fp") else "tfm")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data.regexp(r"^trf_(gp|sk|ot|fn|fp)$"))
+async def trade_find_cat(cb: CallbackQuery, state: FSMContext):
+    if not await trade_find_ok(cb, state):
+        return
+    cat = cb.data.removeprefix("trf_")
+    catalog = await trade_catalog()
+    title = {"gp": "Gamepass", "sk": "Skins", "ot": "Прочее", "fn": "Fruit • Обычные", "fp": "Fruit • Permanent"}[cat]
+    text = f"({{39}})<b>Поиск • {title}</b>\nВыберите один предмет."
+    if not trade_cat_list(catalog, cat):
+        text += "\n<blockquote>Здесь пока пусто. Администрация добавит предметы позже.</blockquote>"
+    await edit(cb, text, trade_find_markup(cat, catalog, await trade_icons()))
 
 
 async def trade_card(row) -> tuple[str, InlineKeyboardMarkup | None]:
     p = json_payload(row["payload"])
     known = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", row["user_id"])
     text = (f"{e(48)} <b>Трейд {num(row['id'])}</b>\n{e(44)} Автор: "
-            f"{mention(row['user_id'], known and known['username'], known and known['full_name'])}\n{esc(p.get('text'))}")
+            f"{mention(row['user_id'], known and known['username'], known and known['full_name'])}")
+    if "give" in p:
+        catalog, icons = await trade_catalog(), await trade_icons()
+
+        def lines(items: list) -> str:
+            return "\n".join(f"{custom_emoji_html(trade_icon(icons, i['c'], i['id']), '▫️')} {esc(trade_label(i['c'], i['n']))}"
+                             for i in items)
+        text += f"\n<b>Отдаёт:</b>\n{lines(p['give'])}\n<b>Хочет взамен:</b>\n{lines(p.get('want', []))}"
+    else:
+        text += f"\n{esc(p.get('text'))}"
     url = msg_url(int(await get_config('hublox_id') or 0), row["chat_message_id"])
     return text, kb([btn("({26}) Перейти к сообщению", url=url)]) if url else None
 
 
-@dp.message(TradeSt.find, F.text, ~F.text.startswith("/"))
-async def trade_find_msg(msg: Message, state: FSMContext):
-    query = msg.text.strip()[:60]
-    rows = await pool().fetch(
-        "SELECT * FROM applications WHERE kind='trade' AND status<>'closed' AND COALESCE(payload->>'search', payload->>'text') ILIKE $1 "
-        "ORDER BY id DESC LIMIT 5", f"%{query}%")
-    await state.clear()
-    if not rows:
-        await reply(msg, "({39}) <b>Найдено трейдов:</b> 0", back_only())
+@dp.callback_query(F.data.startswith("tfi_"))
+async def trade_find_pick(cb: CallbackQuery, state: FSMContext):
+    if not await trade_find_ok(cb, state):
         return
-    await reply(msg, f"({{39}}) <b>Найдено трейдов:</b> {len(rows)}\n{SEP}")
+    _, cat, item_id = cb.data.split("_", 2)
+    catalog = await trade_catalog()
+    name = trade_item_name(catalog, cat, item_id) if cat in ("gp", "sk", "ot", "fn", "fp") else None
+    if name is None:
+        await cb.answer("Такого предмета больше нет.", show_alert=True)
+        return
+    needle = json.dumps([{"c": cat, "id": item_id}])
+    # ищем только среди того, что отдают («give»); старые трейды хранили один список «items»
+    rows = await pool().fetch(
+        "SELECT * FROM applications WHERE kind='trade' AND status<>'closed' "
+        "AND (payload->'give' @> $1::jsonb OR (NOT payload ? 'give' AND payload->'items' @> $1::jsonb)) "
+        "ORDER BY id DESC LIMIT 5", needle)
+    icons = await trade_icons()
+    label = f"{custom_emoji_html(trade_icon(icons, cat, item_id), '▫️')} {esc(trade_label(cat, name))}"
+    back = kb([btn("Назад", "trf_fr" if cat in ("fn", "fp") else "tfm")])
+    await edit(cb, f"({{39}}) <b>Найдено трейдов:</b> {len(rows)}\nОтдают: {label}", back)
     for row in rows:
         text, markup = await trade_card(row)
-        await reply(msg, text, markup)
-    await say(msg, "({48})Готово.", kb([BACK()]))
+        await say(cb, text, markup)
 
 
 @dp.callback_query(F.data == "trade_active")
@@ -7486,6 +7551,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.16.2", "Поиск трейда: то же меню, что и при создании, выбор одного предмета; ищет среди того, что отдают (не среди «хочу взамен»)."),
     ("3.16.1", "Трейды: два шага — «Отдаю» и «Хочу взамен» (до 4 предметов в каждом); свои Premium Emoji для Permanent-фруктов (/addemoji → Эмодзи Permanent фруктов)."),
     ("3.16", "Трейды: заявка собирается кнопками (Gamepass / Fruit / Skins / Прочее, до 4 предметов), текстом писать нельзя, КД 5 минут; /redacttrade — каталог предметов; Premium Emoji предметов через /addemoji; кнопка Roblox теперь во всех заявках."),
     ("3.15", "Все «Назад» и «Отмена» — красные с новыми иконками; «Отказать» в вопросах; кнопка «Перейти в Roblox» внутри профиля и заявок; правила Rich копируются цельным сообщением; новое приветствие."),
