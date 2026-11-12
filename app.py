@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.18.1"
+BOT_VERSION = "3.18.2"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -7178,8 +7178,8 @@ async def wikiexport_cmd(msg: Message):
 
 # ============================ НАБОР В АДМИНИСТРАЦИЮ ============================
 SEARCH_SECONDS = env_int("SEARCH_QUESTION_SECONDS", 60)       # на каждый опрос
-SEARCH_OPEN_SECONDS = env_int("SEARCH_OPEN_SECONDS", SEARCH_SECONDS)  # на развёрнутый вопрос
-SEARCH_MAX_QUESTIONS = 30
+SEARCH_OPEN_SECONDS = env_int("SEARCH_OPEN_SECONDS", 180)  # на развёрнутый вопрос: 3 минуты
+SEARCH_MAX_QUESTIONS = 50
 _tests: dict[int, dict] = {}  # user_id -> идущее прохождение теста (в памяти)
 
 
@@ -7619,6 +7619,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.18.2", "Набор в админ: до 50 вопросов; развёрнутый вопрос — 3 минуты, опрос — 1 минута."),
     ("3.18.1", "Команда /seasont — сезонный фон трейдов (вручную или «Авто»). Картинки предметов ищутся во всех папках trade_assets; в логе видно, какого файла нет."),
     ("3.18.0", "Выбранные кнопки подсвечиваются зелёным вместо ✅ (трейды, рейды, права). Трейд: картинка сверху карточки (Rich), текст ниже."),
     ("3.17.0", "Трейд: картинка — фон сезона, 4 предмета «Отдаю» слева и 4 «Хочу взамен» справа, фото из папки trade_assets (см. README). Зависимость: pillow."),
