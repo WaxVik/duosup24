@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.18.2"
+BOT_VERSION = "3.18.3"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -2223,6 +2223,9 @@ async def violations_html(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
 
 @dp.message(menu_button_filter)
 async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
+    if await open_answer_filter(msg):  # ответ на развёрнутый вопрос теста, даже если текст совпал с кнопкой
+        await search_open_answer(msg)
+        return
     if msg.from_user.id in _tests:
         await say(msg, "({8})Сейчас идёт тест набора — сначала завершите его.")
         return
@@ -4780,6 +4783,9 @@ async def award_cmd(msg: Message):
 # =================== ПРИВАТНЫЙ ТЕКСТ БЕЗ СОСТОЯНИЯ ===================
 @dp.message(StateFilter(None), F.chat.type == "private", F.text, ~F.text.startswith("/"))
 async def private_text(msg: Message):
+    if await open_answer_filter(msg):  # развёрнутый вопрос теста набора
+        await search_open_answer(msg)
+        return
     row = await user_row(msg.from_user.id)
     if row and row["roblox_prompt_pending"]:
         if await save_roblox(msg):
@@ -7493,6 +7499,7 @@ async def srch_go(cb: CallbackQuery):
 async def run_test(uid: int, chat_id: int, attempt_id: int, qs: list, user) -> None:
     ses = _tests[uid]
     answers, sent_ids = [], []
+    qs = random.sample(qs, len(qs))  # у каждого участника свой порядок вопросов
     try:
         for i, q in enumerate(qs, 1):
             ses.update(event=asyncio.Event(), poll_id=None, got=None, mode=q["kind"], order=None)
@@ -7619,6 +7626,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.18.3", "Тест набора: ответы на развёрнутые вопросы больше не уходят в приветствие; вопросы идут в случайном порядке у каждого."),
     ("3.18.2", "Набор в админ: до 50 вопросов; развёрнутый вопрос — 3 минуты, опрос — 1 минута."),
     ("3.18.1", "Команда /seasont — сезонный фон трейдов (вручную или «Авто»). Картинки предметов ищутся во всех папках trade_assets; в логе видно, какого файла нет."),
     ("3.18.0", "Выбранные кнопки подсвечиваются зелёным вместо ✅ (трейды, рейды, права). Трейд: картинка сверху карточки (Rich), текст ниже."),
