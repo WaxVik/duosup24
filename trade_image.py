@@ -19,7 +19,8 @@ TRADE_TZ = os.getenv("TRADE_TZ", "Europe/Moscow")
 
 CANVAS = (1672, 941)
 CENTER = (CANVAS[0] // 2, CANVAS[1] // 2)
-SLOT_SIZE = (260, 260)  # ВРЕМЕННО: размер ячейки уточнить
+ITEM_PX = round(1024 * 0.30)  # фото предметов 1024×1024, масштаб 30%
+SLOT_SIZE = (ITEM_PX, ITEM_PX)
 
 GIVE_SLOTS = [(-560, -155), (-240, -155), (-560, 160), (-240, 160)]
 WANT_SLOTS = [(240, -155), (560, -155), (240, 160), (560, 160)]
@@ -49,10 +50,25 @@ def _key(text: str) -> str:
     return re.sub(r"[^0-9a-zа-яё]", "", text.lower())
 
 
+# Папки на GitHub/Linux чувствительны к регистру и могут называться иначе: Backgrounds, skin, Other.
+FOLDER_ALIASES = {"backgrounds": ["background"], "skins": ["skin"], "other": ["others"]}
+
+
+def _folder_dir(folder: str) -> Path | None:
+    """Находит папку внутри trade_assets без учёта регистра и с запасными именами."""
+    if not ASSET_DIR.is_dir():
+        return None
+    wanted = {_key(folder)} | {_key(a) for a in FOLDER_ALIASES.get(folder, [])}
+    for child in ASSET_DIR.iterdir():
+        if child.is_dir() and _key(child.name) in wanted:
+            return child
+    return None
+
+
 def _find(folder: str, stems: list[str]) -> Path | None:
     """Ищет файл по имени (без расширения) в папке; stems — варианты по приоритету."""
-    d = ASSET_DIR / folder
-    if not d.is_dir():
+    d = _folder_dir(folder)
+    if d is None:
         return None
     files = [p for p in d.iterdir() if p.suffix.lower() in IMG_EXTS]
     for stem in stems:
@@ -70,7 +86,16 @@ def item_image_path(cat: str, name: str, variant: str | None = None) -> Path | N
         stems = []
         for n in _names(name):
             stems += ([f"{n}{variant}{suf}"] if variant else []) + [f"{n}{suf}"]
-        return _find("fruit", stems)
+        hit = _find("fruit", stems)
+        if hit:
+            return hit
+        # скин, добавленный в /redacttrade в раздел Fruit: файла «НазваниеB» нет, ищем по имени в skins/ и др.
+        for other in ALL_FOLDERS:
+            hit = _find(other, _names(name))
+            if hit:
+                return hit
+        LOG.warning("трейд: нет картинки для «%s» (категория %s), ищу в %s", name, cat, ASSET_DIR)
+        return None
     folder = ITEM_FOLDER.get(cat)
     if folder:
         hit = _find(folder, _names(name))
@@ -120,9 +145,14 @@ def _placeholder(name: str) -> Image.Image:
     return img
 
 
+def fit_box(img: Image.Image, box: tuple[int, int]) -> Image.Image:
+    """Масштабирует с сохранением пропорций так, чтобы поместиться в box (и увеличивает при необходимости)."""
+    scale = min(box[0] / img.width, box[1] / img.height)
+    return img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.LANCZOS)
+
+
 def _paste(canvas: Image.Image, img: Image.Image, slot_xy: tuple[int, int]) -> None:
-    img = img.convert("RGBA")
-    img.thumbnail(SLOT_SIZE, Image.LANCZOS)
+    img = fit_box(img.convert("RGBA"), SLOT_SIZE)
     x = CENTER[0] + slot_xy[0] - img.width // 2
     y = CENTER[1] + slot_xy[1] - img.height // 2
     canvas.alpha_composite(img, dest=(x, y))

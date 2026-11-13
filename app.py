@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.18.3"
+BOT_VERSION = "3.19.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -540,6 +540,7 @@ async def init_db() -> None:
         """CREATE TABLE IF NOT EXISTS unique_roles (
             user_id BIGINT PRIMARY KEY, username TEXT, role TEXT NOT NULL, created_at BIGINT NOT NULL)""",
         "CREATE TABLE IF NOT EXISTS stock_subs (user_id BIGINT NOT NULL, fruit TEXT NOT NULL, PRIMARY KEY (user_id, fruit))",
+        "CREATE TABLE IF NOT EXISTS stock_history (kind TEXT NOT NULL, fruit TEXT NOT NULL, seen_at BIGINT NOT NULL, PRIMARY KEY (kind, fruit, seen_at))",
         # новое: права, выданные через /premmod
         """CREATE TABLE IF NOT EXISTS admin_rights (
             user_id BIGINT PRIMARY KEY, role TEXT, rights JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -2236,7 +2237,7 @@ async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
     elif menu_key in ("back", "next2"):  # на 2-й странице «Дальше» пока замыкает круг (3-й страницы нет)
         await say(msg, "<blockquote>Страница 1</blockquote>", reply_menu(1))
     elif menu_key == "stock":
-        await say(msg, STOCK_MENU_TEXT, await stock_menu_markup(uid))
+        await stock_send(msg, "normal")
     elif menu_key == "games":
         await say(msg, "({72})<b>Мини игры</b>\nСкоро: гача, ПВП и комбо-ПВП.")
     elif menu_key in ("apps", "create", "find"):
@@ -5377,6 +5378,10 @@ async def publish_stock(kind: str, items: list, force: bool = False, epoch: int 
     except Exception:
         LOG.exception("stock dm expire failed")
     try:
+        await stock_history_record(kind, state)
+    except Exception:
+        LOG.exception("stock history failed")
+    try:
         await notify_stock_subscribers(kind, state)
     except Exception:
         LOG.exception("stock notify failed")
@@ -5801,20 +5806,136 @@ STOCK_MENU_TEXT = (f"{e(74)} <b>Сток</b>\n<blockquote>Отметьте фр�
                    "или Mirage стоке, бот пришлёт уведомление сюда, в личные сообщения.</blockquote>")
 
 
-async def stock_menu_markup(user_id: int) -> InlineKeyboardMarkup:
+def stock_is_active(state: dict) -> bool:
+    if not state.get("items"):
+        return False
+    ep = state.get("epoch")
+    return True if not ep else now_ts() < ep  # после времени окончания — «завершённый» фон
+
+
+def stock_kind_title(kind: str) -> str:
+    return "Mirage Stock" if kind == "mirage" else "Normal Stock"
+
+
+def _kind_of(value: str) -> str:
+    return "mirage" if value == "mirage" else "normal"
+
+
+async def stock_panel(kind: str) -> tuple[bytes | None, str]:
+    """Картинка и подпись для вида стока (Normal / Mirage)."""
+    from stock_image import compose_stock_image
+    state = await stock_state(kind)
+    if not state.get("items"):
+        return None, f"{e(74)} <b>{stock_kind_title(kind)}</b>\n<blockquote>Сток пока не опубликован.</blockquote>"
+    active = stock_is_active(state)
+    names = dict(FRUITS)
+    items = [(names.get(k, k), p) for k, p in state["items"]]
+    img = await asyncio.to_thread(compose_stock_image, kind, items, active)
+    return img, await stock_text(kind, state, active)
+
+
+def stock_view_markup(kind: str) -> InlineKeyboardMarkup:
+    if kind == "normal":
+        switch = btn("Mirage Stock", "sv_mirage", icon_id="5325547803936572038")
+    else:
+        switch = btn("Normal Stock", "sv_normal", icon_id="5278702045883292456", style="primary")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [switch],
+        [btn("Обновить", f"sv_refresh_{kind}", icon_id="5375338737028841420", style="success"),
+         btn("Уведомления", f"sv_notify_{kind}", icon_id="5458603043203327669", style="success")],
+        [btn("История стока", f"sv_hist_{kind}", icon_id="5231200819986047254")],
+        [BACK()],
+    ])
+
+
+async def stock_send(message: Message, kind: str) -> None:
+    from aiogram.types import BufferedInputFile
+    img, text = await stock_panel(kind)
+    markup = stock_view_markup(kind)
+    if img is None:
+        await message.answer(R(text), reply_markup=markup)
+        return
+    await message.answer_photo(BufferedInputFile(img, filename=f"stock_{kind}.png"), caption=R(text),
+                               parse_mode="HTML", reply_markup=markup)
+
+
+async def stock_show(cb: CallbackQuery, kind: str) -> None:
+    """Переключает Normal / Mirage в том же сообщении (меняется фото и подпись)."""
+    from aiogram.types import BufferedInputFile, InputMediaPhoto
+    msg = cb.message
+    img, text = await stock_panel(kind)
+    markup = stock_view_markup(kind)
+    if img is not None and msg.photo:
+        try:
+            await msg.edit_media(InputMediaPhoto(media=BufferedInputFile(img, filename=f"stock_{kind}.png"),
+                                                 caption=R(text), parse_mode="HTML"), reply_markup=markup)
+            await cb.answer()
+            return
+        except Exception as exc:
+            if "not modified" in str(exc).lower():
+                await cb.answer()
+                return
+            LOG.warning("stock view edit failed: %s", exc)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    await stock_send(msg, kind)
+    await cb.answer()
+
+
+async def stock_history_record(kind: str, state: dict) -> None:
+    started = int(state["epoch"] - STOCK_NEXT_HOURS[kind] * 3600) if state.get("epoch") else now_ts()
+    for key in state.get("keys", []):
+        await pool().execute("INSERT INTO stock_history (kind, fruit, seen_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+                             kind, key, started)
+
+
+async def stock_menu_markup(user_id: int, back: str = "sv_normal") -> InlineKeyboardMarkup:
     icons = await fruit_icons()
     chosen = {r["fruit"] for r in await pool().fetch("SELECT fruit FROM stock_subs WHERE user_id=$1", user_id)}
-    buttons = [btn(f"{name}✅" if key in chosen else name, f"ssub_{key}", icon_id=icons.get(key))
+    buttons = [btn(name, f"ssub_{key}", icon_id=icons.get(key), style="success" if key in chosen else None)
                for key, name in FRUITS]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([btn("({14}) Очистить выбор", "stock_clear")])
-    rows.append([BACK()])
+    rows.append([btn("Назад", back)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _back_from(cb: CallbackQuery) -> str:
+    """Куда ведёт «Назад» на экране уведомлений (запоминаем из кнопки, чтобы не сбросить при выборе фрукта)."""
+    markup = cb.message.reply_markup if cb.message else None
+    for row in (markup.inline_keyboard if markup else []):
+        for b in row:
+            if b.callback_data in ("sv_normal", "sv_mirage"):
+                return b.callback_data
+    return "sv_normal"
 
 
 @dp.callback_query(F.data == "menu_stock")
 async def menu_stock(cb: CallbackQuery):
-    await edit(cb, STOCK_MENU_TEXT, await stock_menu_markup(cb.from_user.id))
+    await stock_show(cb, "normal")
+
+
+@dp.callback_query(F.data.in_({"sv_normal", "sv_mirage"}))
+async def stock_switch(cb: CallbackQuery):
+    await stock_show(cb, _kind_of(cb.data.removeprefix("sv_")))
+
+
+@dp.callback_query(F.data.startswith("sv_refresh_"))
+async def stock_refresh(cb: CallbackQuery):
+    await stock_show(cb, _kind_of(cb.data.removeprefix("sv_refresh_")))
+
+
+@dp.callback_query(F.data.startswith("sv_notify_"))
+async def stock_notify_screen(cb: CallbackQuery):
+    kind = _kind_of(cb.data.removeprefix("sv_notify_"))
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+    await cb.message.answer(R(STOCK_MENU_TEXT), reply_markup=await stock_menu_markup(cb.from_user.id, back=f"sv_{kind}"))
+    await cb.answer()
 
 
 @dp.callback_query(F.data.startswith("ssub_"))
@@ -5832,7 +5953,7 @@ async def stock_toggle(cb: CallbackQuery):
     else:
         toast = f"{names[key]}: уведомления выключены"
     try:
-        await cb.message.edit_reply_markup(reply_markup=await stock_menu_markup(uid))
+        await cb.message.edit_reply_markup(reply_markup=await stock_menu_markup(uid, back=_back_from(cb)))
     except Exception:
         pass
     await cb.answer(toast)
@@ -5842,10 +5963,60 @@ async def stock_toggle(cb: CallbackQuery):
 async def stock_clear(cb: CallbackQuery):
     await pool().execute("DELETE FROM stock_subs WHERE user_id=$1", cb.from_user.id)
     try:
-        await cb.message.edit_reply_markup(reply_markup=await stock_menu_markup(cb.from_user.id))
+        await cb.message.edit_reply_markup(reply_markup=await stock_menu_markup(cb.from_user.id, back=_back_from(cb)))
     except Exception:
         pass
     await cb.answer("Выбор очищен")
+
+
+def stock_hist_grid(kind: str) -> InlineKeyboardMarkup:
+    """Список фруктов для истории: кнопка фрукта → когда появлялся в этом месяце."""
+    buttons = [btn(name, f"shk_{kind}_{key}") for key, name in FRUITS]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([btn("Назад", f"sv_{kind}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def stock_history_text(key: str) -> str:
+    name = dict(FRUITS).get(key, key)
+    now = datetime.now(MSK)
+    month_start = datetime(now.year, now.month, 1, tzinfo=MSK)
+    head = f"<b>{esc(name)}</b>, история за {now:%m.%Y}"
+    rows = await pool().fetch("SELECT kind, seen_at FROM stock_history WHERE fruit=$1 AND seen_at>=$2 "
+                              "ORDER BY seen_at DESC", key, int(month_start.timestamp()))
+    if rows:
+        lines = [f"{datetime.fromtimestamp(r['seen_at'], MSK):%d.%m %H:%M} • {stock_kind_title(r['kind'])}"
+                 for r in rows]
+        return f"{head}\n<blockquote>" + "\n".join(lines) + "</blockquote>"
+    last = await pool().fetchrow("SELECT kind, seen_at FROM stock_history WHERE fruit=$1 "
+                                 "ORDER BY seen_at DESC LIMIT 1", key)
+    if last:
+        when = datetime.fromtimestamp(last["seen_at"], MSK).strftime("%d.%m.%Y")
+        return (f"{head}\n<blockquote>В этом месяце не появлялся. Последний раз: <b>{when}</b> "
+                f"• {stock_kind_title(last['kind'])}</blockquote>")
+    return f"{head}\n<blockquote>Пока нет записей о появлении этого фрукта.</blockquote>"
+
+
+@dp.callback_query(F.data.startswith("sv_hist_"))
+async def stock_history_list(cb: CallbackQuery):
+    kind = _kind_of(cb.data.removeprefix("sv_hist_"))
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+    await cb.message.answer(R("({77})<b>История стока</b>\n<blockquote>Выберите фрукт: покажу, когда он появлялся "
+                              "в этом месяце (Normal или Mirage). Если в этом месяце не было, покажу дату последнего появления.</blockquote>"),
+                            reply_markup=stock_hist_grid(kind))
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("shk_"))
+async def stock_history_fruit(cb: CallbackQuery):
+    _, kind, key = cb.data.split("_", 2)
+    text = await stock_history_text(key)
+    await edit(cb, text, kb([btn("Назад", f"sv_hist_{_kind_of(kind)}")]))
+
+
 # ===================== АВТОВАРН (ссылки, спам) =====================
 async def auto_warn(msg: Message, reason: str) -> None:
     """Варн от имени бота. Кнопки апелляции у автоварна нет, главные админы его не снимают."""
@@ -7626,6 +7797,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.19.0", "Сток: картинка (фон Normal/Mirage, активный/завершённый, до 7 фруктов), кнопки Mirage/Normal, Обновить, Уведомления, История стока; подсветка выбранных фруктов зелёным вместо ✅. Трейд: масштаб предметов 30%."),
     ("3.18.3", "Тест набора: ответы на развёрнутые вопросы больше не уходят в приветствие; вопросы идут в случайном порядке у каждого."),
     ("3.18.2", "Набор в админ: до 50 вопросов; развёрнутый вопрос — 3 минуты, опрос — 1 минута."),
     ("3.18.1", "Команда /seasont — сезонный фон трейдов (вручную или «Авто»). Картинки предметов ищутся во всех папках trade_assets; в логе видно, какого файла нет."),
