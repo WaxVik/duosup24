@@ -11,7 +11,7 @@ from PIL import Image
 from trade_image import CANVAS, CENTER, _find, _placeholder, fit_box, item_image_path
 
 STOCK_SLOTS = [(-500, 240), (-300, 240), (-100, 240), (100, 240), (300, 240), (500, 240), (700, 240)]
-MIRAGE_SLOTS = [(x, -230) for x, _ in STOCK_SLOTS]  # Mirage: фрукты выше, Y −230
+MIRAGE_SLOTS = [(x, 230) for x, _ in STOCK_SLOTS]  # Mirage: фрукты выше, Y 230
 STOCK_ITEM_PX = round(1024 * 0.20)  # масштаб 20%
 STOCK_MAX = len(STOCK_SLOTS)
 STOCK_EXCLUDE = {"meme"}
