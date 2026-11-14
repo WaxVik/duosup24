@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.19.1"
+BOT_VERSION = "3.19.4"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -5165,21 +5165,66 @@ async def render_stock_message() -> str | None:
     return await render_kind("normal") or await render_kind("mirage")
 
 
-async def _set_kind_message(chat_id: int, board: dict, kind: str, text: str) -> None:
-    """Правит сообщение своего вида стока; если его нет (удалено) — отправляет новое."""
+async def stock_group_payload(kind: str) -> tuple[bytes | None, str | None]:
+    """Картинка и текст сообщения вида стока для группы HuBBlox (фото + описание, как раньше)."""
+    from stock_image import compose_stock_image
+    text = await render_kind(kind)
+    if not text:
+        return None, None
+    state = await stock_state(kind)
+    active = not (state.get("epoch") and state["epoch"] <= now_ts())
+    names = dict(FRUITS)
+    items = [(names.get(k, k), p) for k, p in state["items"]]
+    img = await asyncio.to_thread(compose_stock_image, kind, items, active)
+    return img, text
+
+
+def _fit_caption(text: str, limit: int = 1000) -> str:
+    """Подпись к фото в Telegram — не больше 1024 символов."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    return cut[:cut.rfind("\n")] if "\n" in cut else cut
+
+
+async def _set_kind_message(chat_id: int, board: dict, kind: str) -> None:
+    """Фото стока своего вида в группе. Если фото не получилось — текстовое сообщение (и запись в лог)."""
+    from aiogram.types import BufferedInputFile, InputMediaPhoto
     key = f"{kind}_msg"
+    try:
+        img, text = await stock_group_payload(kind)
+    except Exception:
+        LOG.exception("stock group %s: картинка не собралась, отправляю текст", kind)
+        img, text = None, await render_kind(kind)
+    if text is None:
+        return
+    caption = _fit_caption(text)
     mid = board.get(key)
-    if mid:
+    if img is not None and mid:
         try:
-            await B().edit_message_text(R(text), chat_id=chat_id, message_id=mid, reply_markup=None)
+            await B().edit_message_media(
+                InputMediaPhoto(media=BufferedInputFile(img, filename=f"stock_{kind}.png"),
+                                caption=R(caption), parse_mode="HTML"),
+                chat_id=chat_id, message_id=mid, reply_markup=None)
             return
         except Exception as exc:
-            low = str(exc).lower()
-            if "not modified" in low:
+            if "not modified" in str(exc).lower():
                 return
-            if not any(w in low for w in ("not found", "can't be edited", "message_id_invalid")):
-                raise  # временный сбой — новое сообщение не плодим
-    sent = await B().send_message(chat_id, R(text), message_thread_id=thread(TOPICS["stock"]))
+            LOG.warning("stock group %s: фото не заменилось (%s), отправляю заново", kind, exc)
+    if mid:
+        try:
+            await B().delete_message(chat_id, mid)
+        except Exception:
+            pass
+    try:
+        if img is None:
+            raise RuntimeError("нет картинки")
+        sent = await B().send_photo(chat_id, BufferedInputFile(img, filename=f"stock_{kind}.png"),
+                                    caption=R(caption), parse_mode="HTML",
+                                    message_thread_id=thread(TOPICS["stock"]))
+    except Exception:
+        LOG.exception("stock group %s: фото не отправилось, отправляю текст", kind)
+        sent = await B().send_message(chat_id, R(text), message_thread_id=thread(TOPICS["stock"]))
     board[key] = sent.message_id
     await save_board(board)
 
@@ -5230,7 +5275,10 @@ async def board_update(chat_id: int, kind: str, state: dict) -> None:
         text = await render_kind(kind)
         if text:
             await _cleanup_legacy_stock_posts(chat_id)
-            await _set_kind_message(chat_id, board, kind, text)
+            try:
+                await _set_kind_message(chat_id, board, kind)
+            except Exception:
+                LOG.exception("stock group %s: сообщение в группе не обновилось", kind)  # сток всё равно сохранён
 
 
 async def rebuild_board(chat_id: int) -> int | None:
@@ -5241,7 +5289,7 @@ async def rebuild_board(chat_id: int) -> int | None:
     for kind in ("normal", "mirage"):
         text = await render_kind(kind)
         if text:
-            await _set_kind_message(chat_id, board, kind, text)
+            await _set_kind_message(chat_id, board, kind)
             mid = mid or board.get(f"{kind}_msg")
     return mid
 
@@ -5286,7 +5334,7 @@ async def refresh_stock_message(chat_id: int | None, resend: bool = False) -> in
                 except Exception:
                     pass
                 board.pop(f"{kind}_msg", None)
-            await _set_kind_message(chat_id, board, kind, text)
+            await _set_kind_message(chat_id, board, kind)
         return board.get("normal_msg") or board.get("mirage_msg")
 
 
@@ -5794,13 +5842,12 @@ def stock_view_markup(kind: str) -> InlineKeyboardMarkup:
     if kind == "normal":
         switch = btn("Mirage Stock", "sv_mirage", icon_id="5325547803936572038")
     else:
-        switch = btn("Normal Stock", "sv_normal", icon_id="5278702045883292456", style="primary")
+        switch = btn("Normal Stock", "sv_normal", icon_id="5278702045883292456")  # без цвета: Telegram не даёт прозрачный
     return InlineKeyboardMarkup(inline_keyboard=[
-        [switch],
         [btn("Обновить", f"sv_refresh_{kind}", icon_id="5375338737028841420", style="success"),
          btn("Уведомления", f"sv_notify_{kind}", icon_id="5458603043203327669", style="success")],
-        [btn("История стока", f"sv_hist_{kind}", icon_id="5231200819986047254")],
-        [BACK()],
+        [switch],
+        [btn("История стока", f"sv_hist_{kind}", icon_id="5231200819986047254"), BACK()],
     ])
 
 
@@ -7758,6 +7805,9 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.19.4", "Кнопки стока: Обновить/Уведомления, Mirage ↔ Normal, История/Назад; Normal без цвета."),
+    ("3.19.3", "Группа HuBBlox: если фото не собралось или подпись слишком длинная — отправляется текст, ошибка пишется в лог; публикация стока больше не откатывается из-за картинки."),
+    ("3.19.2", "Группа HuBBlox: сток с картинкой (фото меняется на «Истёк»), Normal и Mirage отдельными сообщениями, без кнопок."),
     ("3.19.1", "Сток в теме HuBBlox: Normal и Mirage отдельными сообщениями. История стока — до 20 записей на фрукт (старые удаляются). Фото Mirage стока: фрукты на высоте Y −230."),
     ("3.19.0", "Сток: картинка (фон Normal/Mirage, активный/завершённый, до 7 фруктов), кнопки Mirage/Normal, Обновить, Уведомления, История стока; подсветка выбранных фруктов зелёным вместо ✅. Трейд: масштаб предметов 30%."),
     ("3.18.3", "Тест набора: ответы на развёрнутые вопросы больше не уходят в приветствие; вопросы идут в случайном порядке у каждого."),
