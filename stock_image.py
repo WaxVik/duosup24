@@ -8,10 +8,16 @@ from __future__ import annotations
 
 from PIL import Image
 
-from trade_image import CANVAS, CENTER, _find, _placeholder, fit_box, item_image_path
+from trade_image import CANVAS, CENTER, _find, _placeholder, item_image_path
+
+
+def fit_box(img: Image.Image, box: tuple[int, int]) -> Image.Image:
+    """Масштаб с сохранением пропорций в пределах box (локально, чтобы не зависеть от версии trade_image)."""
+    scale = min(box[0] / img.width, box[1] / img.height)
+    return img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.LANCZOS)
 
 STOCK_SLOTS = [(-500, 240), (-300, 240), (-100, 240), (100, 240), (300, 240), (500, 240), (700, 240)]
-MIRAGE_SLOTS = [(x, 230) for x, _ in STOCK_SLOTS]  # Mirage: фрукты выше, Y 230
+MIRAGE_SLOTS = [(x, -230) for x, _ in STOCK_SLOTS]  # Mirage: фрукты выше, Y −230
 STOCK_ITEM_PX = round(1024 * 0.20)  # масштаб 20%
 STOCK_MAX = len(STOCK_SLOTS)
 STOCK_EXCLUDE = {"meme"}
