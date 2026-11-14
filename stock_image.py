@@ -11,6 +11,7 @@ from PIL import Image
 from trade_image import CANVAS, CENTER, _find, _placeholder, fit_box, item_image_path
 
 STOCK_SLOTS = [(-500, 240), (-300, 240), (-100, 240), (100, 240), (300, 240), (500, 240), (700, 240)]
+MIRAGE_SLOTS = [(x, -230) for x, _ in STOCK_SLOTS]  # Mirage: фрукты выше, Y −230
 STOCK_ITEM_PX = round(1024 * 0.20)  # масштаб 20%
 STOCK_MAX = len(STOCK_SLOTS)
 STOCK_EXCLUDE = {"meme"}
@@ -31,7 +32,8 @@ def compose_stock_image(kind: str, items: list[tuple[str, int]], active: bool) -
     canvas = stock_background(kind, active) or Image.new("RGBA", CANVAS, (40, 40, 48, 255))
     visible = [(n, p or 0) for n, p in items if n.lower() not in STOCK_EXCLUDE]
     visible.sort(key=lambda x: x[1], reverse=True)  # дорогие слева
-    for (name, _price), (sx, sy) in zip(visible[:STOCK_MAX], STOCK_SLOTS):
+    slots = MIRAGE_SLOTS if kind == "mirage" else STOCK_SLOTS
+    for (name, _price), (sx, sy) in zip(visible[:STOCK_MAX], slots):
         path = item_image_path("fn", name)
         img = Image.open(path).convert("RGBA") if path else _placeholder(name)
         img = fit_box(img, (STOCK_ITEM_PX, STOCK_ITEM_PX))

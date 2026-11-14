@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.19.0"
+BOT_VERSION = "3.19.1"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -5147,55 +5147,53 @@ def _stock_block(kind: str, state: dict, active: bool, icons: dict, names: dict)
     return f"{head}\n{title}\n<blockquote>" + "\n".join(lines) + "</blockquote>"
 
 
-async def render_board(board: dict, closed: bool = False) -> str | None:
-    """Одно сообщение периода Normal: Normal + Mirage этого периода (прошлый Mirage — «Истёк», текущий — «Активен»)."""
-    icons = await fruit_icons()
-    names = dict(FRUITS)
-    now = now_ts()
-    parts, upcoming = [], []
-    normal = board.get("normal")
-    if normal and normal.get("items"):
-        alive = not closed and not (normal.get("epoch") and normal["epoch"] <= now)
-        parts.append(_stock_block("normal", normal, alive, icons, names))
-        if alive and normal.get("epoch"):
-            upcoming.append(f"Normal в {datetime.fromtimestamp(normal['epoch'], MSK).strftime('%H:%M')}")
-    mirages = board.get("mirages") or []
-    for i, m in enumerate(mirages):
-        last = i == len(mirages) - 1
-        alive = not closed and last and not (m.get("epoch") and m["epoch"] <= now)
-        parts.append(_stock_block("mirage", m, alive, icons, names))
-        if alive and m.get("epoch"):
-            upcoming.append(f"Mirage в {datetime.fromtimestamp(m['epoch'], MSK).strftime('%H:%M')}")
-    if not parts:
+async def render_kind(kind: str) -> str | None:
+    """Текст одного вида стока (Normal или Mirage): текущий сток, «Активен» или «Истёк»."""
+    state = await stock_state(kind)
+    if not state.get("items"):
         return None
-    text = "\n\n".join(parts) + f"\n\n{stock_footer()}"
-    if upcoming:
-        text += f"\n\n{e(11)} <i>Следующее обновление: {' • '.join(upcoming)} МСК</i>"
+    now = now_ts()
+    active = not (state.get("epoch") and state["epoch"] <= now)
+    icons = await fruit_icons()
+    text = _stock_block(kind, state, active, icons, dict(FRUITS)) + f"\n\n{stock_footer()}"
+    if active and state.get("epoch"):
+        text += f"\n\n{e(11)} <i>Следующее обновление: {datetime.fromtimestamp(state['epoch'], MSK).strftime('%H:%M')} МСК</i>"
     return text
 
 
 async def render_stock_message() -> str | None:
-    return await render_board(await load_board())
+    return await render_kind("normal") or await render_kind("mirage")
 
 
-async def _send_board_message(chat_id: int, board: dict, text: str) -> None:
+async def _set_kind_message(chat_id: int, board: dict, kind: str, text: str) -> None:
+    """Правит сообщение своего вида стока; если его нет (удалено) — отправляет новое."""
+    key = f"{kind}_msg"
+    mid = board.get(key)
+    if mid:
+        try:
+            await B().edit_message_text(R(text), chat_id=chat_id, message_id=mid, reply_markup=None)
+            return
+        except Exception as exc:
+            low = str(exc).lower()
+            if "not modified" in low:
+                return
+            if not any(w in low for w in ("not found", "can't be edited", "message_id_invalid")):
+                raise  # временный сбой — новое сообщение не плодим
     sent = await B().send_message(chat_id, R(text), message_thread_id=thread(TOPICS["stock"]))
-    board["msg"] = sent.message_id
+    board[key] = sent.message_id
     await save_board(board)
 
 
-async def _edit_board_message(chat_id: int, board: dict, text: str) -> bool:
-    """True — сообщение обновлено. False — его нет (удалено), нужно отправить заново."""
-    try:
-        await B().edit_message_text(R(text), chat_id=chat_id, message_id=board["msg"], reply_markup=None)
-        return True
-    except Exception as exc:
-        low = str(exc).lower()
-        if "not modified" in low:
-            return True
-        if any(w in low for w in ("not found", "can't be edited", "message_id_invalid")):
-            return False
-        raise  # временный сбой — новое сообщение не плодим
+async def _drop_legacy_board(chat_id: int, board: dict) -> None:
+    """Убирает общее сообщение прошлого формата (Normal + Mirage в одном)."""
+    if board.get("msg"):
+        try:
+            await B().delete_message(chat_id, board["msg"])
+        except Exception:
+            pass
+        for k in ("msg", "period", "normal", "mirages"):
+            board.pop(k, None)
+        await save_board(board)
 
 
 async def _cleanup_legacy_stock_posts(chat_id: int) -> None:
@@ -5225,73 +5223,27 @@ def stock_period(kind: str, state: dict) -> int:
 
 
 async def board_update(chat_id: int, kind: str, state: dict) -> None:
-    """Одно сообщение = одно 4-часовое окно Normal. Данные этого окна правят то же сообщение; данные нового окна
-    закрывают прошлое сообщение («Истёк») и открывают новое. Данные прошлых окон не публикуются."""
+    """Normal и Mirage — каждый в своём сообщении. Новый сток вида правит своё сообщение."""
     async with lock_for("stock_board"):
         board = await load_board()
-        period = stock_period(kind, state)
-        current = board.get("period")
-        if current is None and board.get("msg"):  # сообщение старого формата
-            ref = board.get("normal") or ((board.get("mirages") or [None])[-1])
-            current = stock_period("normal" if board.get("normal") else "mirage", ref) if ref else None
-        if board.get("msg") and current is not None and period < current:
-            LOG.info("stock: %s из прошлого окна — не публикую", kind)
-            return
-        if board.get("msg") and current == period:  # то же окно: правим сообщение
-            board["period"] = period
-            if kind == "normal":
-                board["normal"] = state
-            else:
-                mirages = board.get("mirages") or []
-                if mirages and state.get("epoch") and mirages[-1].get("epoch") == state["epoch"]:
-                    mirages[-1] = state
-                else:
-                    mirages.append(state)
-                board["mirages"] = mirages[-3:]
-            text = await render_board(board)
-            if text:
-                if not await _edit_board_message(chat_id, board, text):
-                    await _send_board_message(chat_id, board, text)
-                else:
-                    await save_board(board)
-            return
-        if board.get("msg"):  # новое окно: прошлое сообщение — всё в нём «Истёк»
-            try:
-                old_text = await render_board(board, closed=True)
-                if old_text:
-                    await _edit_board_message(chat_id, board, old_text)
-            except Exception as exc:
-                LOG.warning("stock: не удалось закрыть прошлое сообщение: %s", exc)
-        new_board = {"msg": None, "period": period, "normal": None, "mirages": []}
-        normal = state if kind == "normal" else await stock_state("normal")
-        if normal.get("items") and stock_period("normal", normal) == period:
-            new_board["normal"] = normal
-        mir = state if kind == "mirage" else await stock_state("mirage")
-        if mir.get("items") and stock_period("mirage", mir) == period:
-            new_board["mirages"] = [mir]
-        text = await render_board(new_board)
+        await _drop_legacy_board(chat_id, board)
+        text = await render_kind(kind)
         if text:
             await _cleanup_legacy_stock_posts(chat_id)
-            await _send_board_message(chat_id, new_board, text)
+            await _set_kind_message(chat_id, board, kind, text)
 
 
 async def rebuild_board(chat_id: int) -> int | None:
-    """Собирает сообщение стока заново из сохранённых данных: только то, что относится к текущему окну."""
-    normal, mir = await stock_state("normal"), await stock_state("mirage")
-    ref_kind, ref = ("normal", normal) if normal.get("items") else ("mirage", mir)
-    if not ref.get("items"):
-        return None
-    period = stock_period(ref_kind, ref)
-    board = {"msg": None, "period": period, "normal": None, "mirages": []}
-    if normal.get("items") and stock_period("normal", normal) == period:
-        board["normal"] = normal
-    if mir.get("items") and stock_period("mirage", mir) == period:
-        board["mirages"] = [mir]
-    text = await render_board(board)
-    if not text:
-        return None
-    await _send_board_message(chat_id, board, text)
-    return board["msg"]
+    """Собирает оба сообщения стока заново из сохранённых данных."""
+    board: dict = {}
+    await save_board(board)
+    mid = None
+    for kind in ("normal", "mirage"):
+        text = await render_kind(kind)
+        if text:
+            await _set_kind_message(chat_id, board, kind, text)
+            mid = mid or board.get(f"{kind}_msg")
+    return mid
 
 
 @dp.message(Command("stockclean", "stockfix"))
@@ -5305,7 +5257,7 @@ async def stockclean_cmd(msg: Message):
         return
     async with lock_for("stock_board"):
         board = await load_board()
-        for mid in {board.get("msg"), int(await get_config("stock_msg") or 0) or None}:
+        for mid in {board.get("msg"), board.get("normal_msg"), board.get("mirage_msg"), int(await get_config("stock_msg") or 0) or None}:
             if mid:
                 try:
                     await B().delete_message(chat_id, mid)
@@ -5319,24 +5271,23 @@ async def stockclean_cmd(msg: Message):
 
 
 async def refresh_stock_message(chat_id: int | None, resend: bool = False) -> int | None:
-    """Перерисовывает текущее сообщение стока (чтобы закончившийся сток стал «Истёк»); resend — отправить заново."""
+    """Перерисовывает оба сообщения стока (чтобы закончившийся сток стал «Истёк»); resend — отправить заново."""
     if not chat_id:
         return None
     async with lock_for("stock_board"):
         board = await load_board()
-        text = await render_board(board)
-        if not text:
-            return None
-        if board.get("msg") and not resend:
-            if await _edit_board_message(chat_id, board, text):
-                return board["msg"]
-        elif board.get("msg"):
-            try:
-                await B().delete_message(chat_id, board["msg"])
-            except Exception:
-                pass
-        await _send_board_message(chat_id, board, text)
-        return board["msg"]
+        for kind in ("normal", "mirage"):
+            text = await render_kind(kind)
+            if not text:
+                continue
+            if resend and board.get(f"{kind}_msg"):
+                try:
+                    await B().delete_message(chat_id, board[f"{kind}_msg"])
+                except Exception:
+                    pass
+                board.pop(f"{kind}_msg", None)
+            await _set_kind_message(chat_id, board, kind, text)
+        return board.get("normal_msg") or board.get("mirage_msg")
 
 
 async def publish_stock(kind: str, items: list, force: bool = False, epoch: int | None = None) -> bool:
@@ -5716,9 +5667,11 @@ async def stockstatus_cmd(msg: Message):
             lines.append(f"{kind}: сток {st['time']} МСК, след. смена {nxt}")
         else:
             lines.append(f"{kind}: ещё не публиковался")
-    stock_mid = (await load_board()).get("msg")
-    if stock_mid and chat_id and msg_url(chat_id, int(stock_mid)):
-        lines.append(f"Сообщение стока: {msg_url(chat_id, int(stock_mid))}")
+    board_now = await load_board()
+    for k, label in (("normal", "Normal"), ("mirage", "Mirage")):
+        mid = board_now.get(f"{k}_msg")
+        if mid and chat_id and msg_url(chat_id, int(mid)):
+            lines.append(f"Сообщение {label} стока: {msg_url(chat_id, int(mid))}")
     if not chat_id:
         lines.append("ВНИМАНИЕ: основной чат не привязан (/link_hublox)")
     await reply(msg, "({21})<b>Автосток</b>\n<blockquote>" + "\n".join(esc(x) for x in lines) + "</blockquote>")
@@ -5806,6 +5759,9 @@ STOCK_MENU_TEXT = (f"{e(74)} <b>Сток</b>\n<blockquote>Отметьте фр�
                    "или Mirage стоке, бот пришлёт уведомление сюда, в личные сообщения.</blockquote>")
 
 
+STOCK_HISTORY_MAX = 20
+
+
 def stock_is_active(state: dict) -> bool:
     if not state.get("items"):
         return False
@@ -5889,6 +5845,11 @@ async def stock_history_record(kind: str, state: dict) -> None:
     for key in state.get("keys", []):
         await pool().execute("INSERT INTO stock_history (kind, fruit, seen_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
                              kind, key, started)
+        # храним только 20 последних появлений фрукта, чтобы база не разрасталась
+        await pool().execute(
+            "DELETE FROM stock_history WHERE fruit=$1 AND (kind, seen_at) NOT IN "
+            "(SELECT kind, seen_at FROM stock_history WHERE fruit=$1 ORDER BY seen_at DESC LIMIT $2)",
+            key, STOCK_HISTORY_MAX)
 
 
 async def stock_menu_markup(user_id: int, back: str = "sv_normal") -> InlineKeyboardMarkup:
@@ -5983,7 +5944,7 @@ async def stock_history_text(key: str) -> str:
     month_start = datetime(now.year, now.month, 1, tzinfo=MSK)
     head = f"<b>{esc(name)}</b>, история за {now:%m.%Y}"
     rows = await pool().fetch("SELECT kind, seen_at FROM stock_history WHERE fruit=$1 AND seen_at>=$2 "
-                              "ORDER BY seen_at DESC", key, int(month_start.timestamp()))
+                              "ORDER BY seen_at DESC LIMIT $3", key, int(month_start.timestamp()), STOCK_HISTORY_MAX)
     if rows:
         lines = [f"{datetime.fromtimestamp(r['seen_at'], MSK):%d.%m %H:%M} • {stock_kind_title(r['kind'])}"
                  for r in rows]
@@ -7797,6 +7758,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.19.1", "Сток в теме HuBBlox: Normal и Mirage отдельными сообщениями. История стока — до 20 записей на фрукт (старые удаляются). Фото Mirage стока: фрукты на высоте Y −230."),
     ("3.19.0", "Сток: картинка (фон Normal/Mirage, активный/завершённый, до 7 фруктов), кнопки Mirage/Normal, Обновить, Уведомления, История стока; подсветка выбранных фруктов зелёным вместо ✅. Трейд: масштаб предметов 30%."),
     ("3.18.3", "Тест набора: ответы на развёрнутые вопросы больше не уходят в приветствие; вопросы идут в случайном порядке у каждого."),
     ("3.18.2", "Набор в админ: до 50 вопросов; развёрнутый вопрос — 3 минуты, опрос — 1 минута."),
