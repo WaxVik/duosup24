@@ -17,7 +17,7 @@ def fit_box(img: Image.Image, box: tuple[int, int]) -> Image.Image:
     return img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.LANCZOS)
 
 STOCK_SLOTS = [(-500, 240), (-300, 240), (-100, 240), (100, 240), (300, 240), (500, 240), (700, 240)]
-MIRAGE_SLOTS = [(x, -230) for x, _ in STOCK_SLOTS]  # Mirage: фрукты выше, Y −230
+MIRAGE_SLOTS = [(x, 230) for x, _ in STOCK_SLOTS]  # Mirage: фрукты выше, Y 230
 STOCK_ITEM_PX = round(1024 * 0.20)  # масштаб 20%
 STOCK_MAX = len(STOCK_SLOTS)
 STOCK_EXCLUDE = {"meme"}
