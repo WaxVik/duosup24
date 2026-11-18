@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.19.5"
+BOT_VERSION = "3.19.6"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -76,6 +76,7 @@ TOPICS = {
     # ---- основной чат HuBBlox ----
     "welcome": env_int("TOPIC_WELCOME", 1),            # Добро пожаловать (верификация)
     "chat": env_int("TOPIC_CHAT", 7),                  # Чат: здесь работают варны/баны/разбаны
+    "buysell": env_int("TOPIC_BUYSELL", 146395),        # Купля-продажа: те же функции, что и в «Чат»
     "rules": env_int("TOPIC_RULES", 6),                # Правила
     "announce": env_int("TOPIC_ANNOUNCE", 16),         # Оповещения (смена правил и т.п.)
     "modlist_main": env_int("TOPIC_MODLIST_MAIN", 27), # Администрация (состав)
@@ -970,11 +971,11 @@ async def mod_group(msg: Message) -> bool:
         await reply(msg, "({8})Команда работает только в группе.")
         return False
     topic = topic_of(msg)
-    if msg.chat.id == await main_chat() and topic == TOPICS["chat"]:
+    if msg.chat.id == await main_chat() and topic in (TOPICS["chat"], TOPICS["buysell"]):
         return True
     if msg.chat.id == await admin_chat() and topic == TOPICS["mod_chat"]:
         return True
-    await reply(msg, "({8})Эта команда работает только в теме «Чат».")
+    await reply(msg, "({8})Эта команда работает только в темах «Чат» и «Купля-продажа».")
     return False
 
 
@@ -7810,6 +7811,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.19.6", "Тема «Купля-продажа» получила те же базовые функции, что и «Чат» (команды варнов/банов и модерации)."),
     ("3.19.5", "Группа HuBBlox: каждый новый сток — новое сообщение; прошлый того же вида меняется на «Истёк» (фон и подпись). Трейды: ограничение соотношения цен и лимит в сутки."),
     ("3.19.4", "Кнопки стока: Обновить/Уведомления, Mirage ↔ Normal, История/Назад; Normal без цвета."),
     ("3.19.3", "Группа HuBBlox: если фото не собралось или подпись слишком длинная — отправляется текст, ошибка пишется в лог; публикация стока больше не откатывается из-за картинки."),
