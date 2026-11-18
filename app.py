@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.19.4"
+BOT_VERSION = "3.19.5"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -3125,6 +3125,8 @@ async def menu_trade(cb: CallbackQuery, state: FSMContext):
 # ---- каталог предметов трейда ----
 TRADE_MAX_ITEMS = 4
 TRADE_COOLDOWN = 5 * 60  # один трейд раз в 5 минут
+TRADE_DAILY_LIMIT = 5  # трейдов в сутки на одного участника
+TRADE_MAX_RATIO = 10  # «хочу взамен» не дороже «отдаю» в 10 раз (по ценам фруктов)
 TRADE_CAT_ICONS = {"gp": "5393605679615351026", "fr": "5393407496939409907",
                    "sk": "5275989434733470077", "ot": "5875271289605722323"}
 TRADE_FR_ICONS = {"fn": "5393407496939409907", "fp": "5391243821264707358"}
@@ -3383,6 +3385,22 @@ async def trade_toggle(cb: CallbackQuery, state: FSMContext):
                trade_items_markup(cat, catalog, await trade_icons(), sel))
 
 
+def trade_ratio_ok(give: list[dict], want: list[dict]) -> tuple[bool, str]:
+    """Защита от спама: за обычные фрукты «хочу взамен» не дороже «отдаю» в TRADE_MAX_RATIO раз.
+    Проверяем только если у всех предметов обеих сторон есть цена (фрукты); скины и геймпассы без цены пропускаем."""
+    def total(items: list[dict]) -> int | None:
+        vals = [PRICES.get(i["id"]) for i in items if i["c"] in ("fn", "fp")]
+        if len(vals) != len(items) or any(v is None for v in vals):
+            return None
+        return sum(vals)
+    g, w = total(give), total(want)
+    if g is None or w is None:
+        return True, ""
+    if w > g * TRADE_MAX_RATIO:
+        return False, "Слишком неравный обмен: «хочу взамен» дороже «отдаю» больше чем в 10 раз."
+    return True, ""
+
+
 def trade_items_payload(refs: list[str], catalog: dict) -> list[dict]:
     items = []
     for ref in refs:
@@ -3470,6 +3488,16 @@ async def trade_publish(cb: CallbackQuery, state: FSMContext):
             return
         catalog = await trade_catalog()
         give, want = trade_items_payload(data["tr_give"], catalog), trade_items_payload(data["tr_want"], catalog)
+        day_count = await pool().fetchval(
+            "SELECT COUNT(*) FROM applications WHERE user_id=$1 AND kind='trade' AND created_at>=$2",
+            cb.from_user.id, now_ts() - 24 * 3600)
+        if day_count >= TRADE_DAILY_LIMIT:
+            await cb.answer(f"За сутки можно создать не больше {TRADE_DAILY_LIMIT} трейдов.", show_alert=True)
+            return
+        ok, why = trade_ratio_ok(give, want)
+        if not ok:
+            await cb.answer(why, show_alert=True)
+            return
         if not give or not want:
             await cb.answer("Выбранные предметы больше недоступны.", show_alert=True)
             return
@@ -5165,20 +5193,6 @@ async def render_stock_message() -> str | None:
     return await render_kind("normal") or await render_kind("mirage")
 
 
-async def stock_group_payload(kind: str) -> tuple[bytes | None, str | None]:
-    """Картинка и текст сообщения вида стока для группы HuBBlox (фото + описание, как раньше)."""
-    from stock_image import compose_stock_image
-    text = await render_kind(kind)
-    if not text:
-        return None, None
-    state = await stock_state(kind)
-    active = not (state.get("epoch") and state["epoch"] <= now_ts())
-    names = dict(FRUITS)
-    items = [(names.get(k, k), p) for k, p in state["items"]]
-    img = await asyncio.to_thread(compose_stock_image, kind, items, active)
-    return img, text
-
-
 def _fit_caption(text: str, limit: int = 1000) -> str:
     """Подпись к фото в Telegram — не больше 1024 символов."""
     if len(text) <= limit:
@@ -5187,45 +5201,54 @@ def _fit_caption(text: str, limit: int = 1000) -> str:
     return cut[:cut.rfind("\n")] if "\n" in cut else cut
 
 
-async def _set_kind_message(chat_id: int, board: dict, kind: str) -> None:
-    """Фото стока своего вида в группе. Если фото не получилось — текстовое сообщение (и запись в лог)."""
-    from aiogram.types import BufferedInputFile, InputMediaPhoto
-    key = f"{kind}_msg"
+async def _group_render(kind: str, state: dict, active: bool) -> tuple[bytes | None, str]:
+    """Фото и текст сообщения группы для состояния стока (активный или «Истёк»)."""
+    from stock_image import compose_stock_image
+    icons = await fruit_icons()
+    names = dict(FRUITS)
+    text = _stock_block(kind, state, active, icons, names) + f"\n\n{stock_footer()}"
+    if active and state.get("epoch"):
+        text += f"\n\n{e(11)} <i>Следующее обновление: {datetime.fromtimestamp(state['epoch'], MSK).strftime('%H:%M')} МСК</i>"
+    items = [(names.get(k, k), p) for k, p in state["items"]]
+    img = await asyncio.to_thread(compose_stock_image, kind, items, active)
+    return img, _fit_caption(text)
+
+
+async def _group_send(chat_id: int, board: dict, kind: str, state: dict, active: bool) -> None:
+    """Новое сообщение стока в группе (фото + описание). Если фото не получилось — текст."""
+    from aiogram.types import BufferedInputFile
     try:
-        img, text = await stock_group_payload(kind)
+        img, text = await _group_render(kind, state, active)
     except Exception:
         LOG.exception("stock group %s: картинка не собралась, отправляю текст", kind)
-        img, text = None, await render_kind(kind)
-    if text is None:
-        return
-    caption = _fit_caption(text)
-    mid = board.get(key)
-    if img is not None and mid:
+        img, text = None, _fit_caption(_stock_block(kind, state, active, await fruit_icons(), dict(FRUITS)) + f"\n\n{stock_footer()}")
+    sent = None
+    if img is not None:
         try:
-            await B().edit_message_media(
-                InputMediaPhoto(media=BufferedInputFile(img, filename=f"stock_{kind}.png"),
-                                caption=R(caption), parse_mode="HTML"),
-                chat_id=chat_id, message_id=mid, reply_markup=None)
-            return
-        except Exception as exc:
-            if "not modified" in str(exc).lower():
-                return
-            LOG.warning("stock group %s: фото не заменилось (%s), отправляю заново", kind, exc)
-    if mid:
-        try:
-            await B().delete_message(chat_id, mid)
+            sent = await B().send_photo(chat_id, BufferedInputFile(img, filename=f"stock_{kind}.png"),
+                                        caption=R(text), parse_mode="HTML", message_thread_id=thread(TOPICS["stock"]))
         except Exception:
-            pass
-    try:
-        if img is None:
-            raise RuntimeError("нет картинки")
-        sent = await B().send_photo(chat_id, BufferedInputFile(img, filename=f"stock_{kind}.png"),
-                                    caption=R(caption), parse_mode="HTML",
-                                    message_thread_id=thread(TOPICS["stock"]))
-    except Exception:
-        LOG.exception("stock group %s: фото не отправилось, отправляю текст", kind)
+            LOG.exception("stock group %s: фото не отправилось, отправляю текст", kind)
+    if sent is None:
         sent = await B().send_message(chat_id, R(text), message_thread_id=thread(TOPICS["stock"]))
-    board[key] = sent.message_id
+    board[f"{kind}_msg"] = sent.message_id
+    await save_board(board)
+
+
+async def _group_expire(chat_id: int, board: dict, kind: str, state: dict) -> None:
+    """Сообщение прошлого стока этого вида меняется на «Истёк»: фон B и подпись."""
+    from aiogram.types import BufferedInputFile, InputMediaPhoto
+    mid = board.pop(f"{kind}_msg", None)
+    if not mid:
+        return
+    try:
+        img, text = await _group_render(kind, state, False)
+        await B().edit_message_media(
+            InputMediaPhoto(media=BufferedInputFile(img, filename=f"stock_{kind}.png"), caption=R(text), parse_mode="HTML"),
+            chat_id=chat_id, message_id=mid, reply_markup=None)
+    except Exception as exc:
+        if "not modified" not in str(exc).lower():
+            LOG.warning("stock group %s: не удалось пометить «Истёк» (%s)", kind, exc)
     await save_board(board)
 
 
@@ -5267,66 +5290,45 @@ def stock_period(kind: str, state: dict) -> int:
     return int((start + 600) // (STOCK_NEXT_HOURS["normal"] * 3600))  # +10 минут: допуск на неточное время смены у источника
 
 
-async def board_update(chat_id: int, kind: str, state: dict) -> None:
-    """Normal и Mirage — каждый в своём сообщении. Новый сток вида правит своё сообщение."""
+async def board_update(chat_id: int, kind: str, state: dict, old: dict | None = None) -> None:
+    """Каждый новый сток — новое сообщение. Прошлый сток этого вида меняется на «Истёк»."""
     async with lock_for("stock_board"):
         board = await load_board()
         await _drop_legacy_board(chat_id, board)
-        text = await render_kind(kind)
-        if text:
-            await _cleanup_legacy_stock_posts(chat_id)
+        if old and old.get("items"):
             try:
-                await _set_kind_message(chat_id, board, kind)
+                await _group_expire(chat_id, board, kind, old)
             except Exception:
-                LOG.exception("stock group %s: сообщение в группе не обновилось", kind)  # сток всё равно сохранён
+                LOG.exception("stock group %s: прошлый сток не помечен", kind)
+        await _cleanup_legacy_stock_posts(chat_id)
+        try:
+            await _group_send(chat_id, board, kind, state, stock_is_active(state))
+        except Exception:
+            LOG.exception("stock group %s: новое сообщение не отправлено", kind)  # сток сохранён
 
 
 async def rebuild_board(chat_id: int) -> int | None:
-    """Собирает оба сообщения стока заново из сохранённых данных."""
+    """Собирает сообщения стока заново из сохранённых данных (/stockclean)."""
     board: dict = {}
     await save_board(board)
     mid = None
     for kind in ("normal", "mirage"):
-        text = await render_kind(kind)
-        if text:
-            await _set_kind_message(chat_id, board, kind)
+        state = await stock_state(kind)
+        if state.get("items"):
+            await _group_send(chat_id, board, kind, state, stock_is_active(state))
             mid = mid or board.get(f"{kind}_msg")
     return mid
 
 
-@dp.message(Command("stockclean", "stockfix"))
-async def stockclean_cmd(msg: Message):
-    """Удаляет сообщение стока и собирает чистое заново из сохранённых данных (без истёкших чужих блоков)."""
-    if not await redact_zone(msg):
-        return
-    chat_id = await main_chat()
-    if not chat_id:
-        await reply(msg, "({8})Основной чат ещё не привязан (/link_hublox).")
-        return
-    async with lock_for("stock_board"):
-        board = await load_board()
-        for mid in {board.get("msg"), board.get("normal_msg"), board.get("mirage_msg"), int(await get_config("stock_msg") or 0) or None}:
-            if mid:
-                try:
-                    await B().delete_message(chat_id, mid)
-                except Exception:
-                    pass
-        await set_config("stock_board", "")
-        await set_config("stock_msg", "")
-        mid = await rebuild_board(chat_id)
-    await reply(msg, "({20})Сообщение стока пересобрано заново." if mid else
-                     "({20})Старое сообщение удалено. Новое появится при следующей публикации (/stocknow).")
-
-
 async def refresh_stock_message(chat_id: int | None, resend: bool = False) -> int | None:
-    """Перерисовывает оба сообщения стока (чтобы закончившийся сток стал «Истёк»); resend — отправить заново."""
+    """Помечает сток «Истёк», когда его время вышло (сообщение меняется один раз). resend — отправить заново."""
     if not chat_id:
         return None
     async with lock_for("stock_board"):
         board = await load_board()
         for kind in ("normal", "mirage"):
-            text = await render_kind(kind)
-            if not text:
+            state = await stock_state(kind)
+            if not state.get("items"):
                 continue
             if resend and board.get(f"{kind}_msg"):
                 try:
@@ -5334,7 +5336,10 @@ async def refresh_stock_message(chat_id: int | None, resend: bool = False) -> in
                 except Exception:
                     pass
                 board.pop(f"{kind}_msg", None)
-            await _set_kind_message(chat_id, board, kind)
+            if not stock_is_active(state) and board.get(f"{kind}_msg"):
+                await _group_expire(chat_id, board, kind, state)
+            elif stock_is_active(state) and not board.get(f"{kind}_msg"):
+                await _group_send(chat_id, board, kind, state, True)
         return board.get("normal_msg") or board.get("mirage_msg")
 
 
@@ -5367,7 +5372,7 @@ async def publish_stock(kind: str, items: list, force: bool = False, epoch: int 
         state = {"keys": keys, "items": resolved, "time": started, "epoch": epoch, "msg": None, "prev": prev}
         await set_config(f"stock_{kind}", json.dumps(state))
         try:
-            await board_update(chat_id, kind, state)
+            await board_update(chat_id, kind, state, old)
         except Exception:
             await set_config(f"stock_{kind}", json.dumps(old))  # откат — повторим при следующей проверке
             raise
@@ -7805,6 +7810,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.19.5", "Группа HuBBlox: каждый новый сток — новое сообщение; прошлый того же вида меняется на «Истёк» (фон и подпись). Трейды: ограничение соотношения цен и лимит в сутки."),
     ("3.19.4", "Кнопки стока: Обновить/Уведомления, Mirage ↔ Normal, История/Назад; Normal без цвета."),
     ("3.19.3", "Группа HuBBlox: если фото не собралось или подпись слишком длинная — отправляется текст, ошибка пишется в лог; публикация стока больше не откатывается из-за картинки."),
     ("3.19.2", "Группа HuBBlox: сток с картинкой (фото меняется на «Истёк»), Normal и Mirage отдельными сообщениями, без кнопок."),
