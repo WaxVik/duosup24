@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.19.7"
+BOT_VERSION = "3.19.8"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -484,11 +484,6 @@ async def init_db() -> None:
         "ALTER TABLE wiki_entries ADD COLUMN IF NOT EXISTS skills TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE wiki_entries ADD COLUMN IF NOT EXISTS stats TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE wiki_entries ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS claimed_by BIGINT",
-        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS claimed_at BIGINT",
-        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS dm_msg BIGINT",
-        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS card_chat BIGINT",
-        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS card_msg BIGINT",
         "ALTER TABLE warn_logs ADD COLUMN IF NOT EXISTS expires_at BIGINT",
         "ALTER TABLE warn_logs ADD COLUMN IF NOT EXISTS remaining BIGINT",
         "ALTER TABLE warn_logs ADD COLUMN IF NOT EXISTS removed_at BIGINT",
@@ -516,6 +511,11 @@ async def init_db() -> None:
             id BIGSERIAL PRIMARY KEY, question_number TEXT NOT NULL UNIQUE, user_id BIGINT NOT NULL,
             username TEXT, question_text TEXT NOT NULL, created_at BIGINT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending', answered_by BIGINT, answer_text TEXT)""",
+        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS claimed_by BIGINT",
+        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS claimed_at BIGINT",
+        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS dm_msg BIGINT",
+        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS card_chat BIGINT",
+        "ALTER TABLE questions ADD COLUMN IF NOT EXISTS card_msg BIGINT",
         """CREATE TABLE IF NOT EXISTS moderators (
             user_id BIGINT PRIMARY KEY, username TEXT,
             level INT NOT NULL DEFAULT 0 CHECK (level BETWEEN 0 AND 7), role TEXT,
@@ -7815,6 +7815,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.19.8", "Исправлен запуск на чистой базе: таблица questions создаётся до изменения её колонок."),
     ("3.19.7", "Результаты теста в администрацию («Принять» / «Отказать») приходят создателю в личку, а не в админ-чат."),
     ("3.19.6", "Тема «Купля-продажа» получила те же базовые функции, что и «Чат» (команды варнов/банов и модерации)."),
     ("3.19.5", "Группа HuBBlox: каждый новый сток — новое сообщение; прошлый того же вида меняется на «Истёк» (фон и подпись). Трейды: ограничение соотношения цен и лимит в сутки."),
