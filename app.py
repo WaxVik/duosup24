@@ -265,6 +265,136 @@ FRUITS = [
     ("dragon", "Dragon"), ("magnet", "Magnet"),
 ]
 
+
+# ====================== ЭМОДЗИ ПО УМОЛЧАНИЮ (вшиты в код) ======================
+# Скопированы из базы (Supabase, таблица config). Если эмодзи задано через /addemoji — оно главнее,
+# если не задано — берётся отсюда. Менять эмодзи без базы можно прямо в этих словарях.
+DEFAULT_FRUIT_EMOJI: dict[str, str] = {  # обычные (физические) фрукты, ключ = ключ из FRUITS
+    "blade": "5444997248234595360",
+    "blizzard": "5442722118158559913",
+    "bomb": "5445070486016928963",
+    "buddha": "5445214101133370396",
+    "control": "5442631322549922142",
+    "creation": "5445258957771813066",
+    "dark": "5445093807689345495",
+    "diamond": "5443064628915514448",
+    "dough": "5445041366138661382",
+    "dragon": "5445035537868040673",
+    "eagle": "5442808528605588802",
+    "flame": "5445193794527996791",
+    "gas": "5445356968925506275",
+    "ghost": "5443000930255549392",
+    "gravity": "5444925221633041746",
+    "ice": "5442792327988948982",
+    "kitsune": "5443005663309509834",
+    "light": "5442964667846670167",
+    "lightning": "5445236370538801705",
+    "love": "5444986403442176099",
+    "magma": "5445182399979759437",
+    "magnet": "5444995354154019085",
+    "mammoth": "5442765248220148169",
+    "pain": "5445165795636193836",
+    "phoenix": "5445384164658423671",
+    "portal": "5445287944506094457",
+    "quake": "5444884758746148420",
+    "rocket": "5442999714779803133",
+    "rubber": "5445228184331134450",
+    "sand": "5444988915998043374",
+    "shadow": "5444901290075269124",
+    "smoke": "5442679164190634959",
+    "sound": "5444901139751415111",
+    "spider": "5442695618210342840",
+    "spike": "5442777493171909040",
+    "spin": "5442966364358749217",
+    "spirit": "5444967088974245095",
+    "spring": "5442872399064248509",
+    "tiger": "5442824475819156486",
+    "trex": "5444915416222705970",
+    "venom": "5444974128425644016",
+    "yeti": "5442840453097498008",
+    # Dragon физический — два разных фрукта, у каждого своё эмодзи (настройка: /addemoji → Dragon West/East)
+    "dragon_west": "5445009123819170179",
+    "dragon_east": "5445035537868040673",  # TODO: замените на эмодзи Dragon East через /addemoji
+}
+DEFAULT_PERM_EMOJI: dict[str, str] = {  # Permanent-фрукты; Dragon тут один (включает West и East)
+    "blade": "5445067578324068975",
+    "blizzard": "5442843790287089984",
+    "bomb": "5443098039466112577",
+    "buddha": "5442773288398925379",
+    "control": "5445223305248285299",
+    "creation": "5445159812746751002",
+    "dark": "5442760008360044291",
+    "diamond": "5442928607301251972",
+    "dough": "5443074241052324400",
+    "dragon": "5442746333184178738",
+    "eagle": "5445061492355409139",
+    "flame": "5445414212249625817",
+    "gas": "5445355147859372411",
+    "ghost": "5442600278526308577",
+    "gravity": "5444983113497224026",
+    "ice": "5442962889730206590",
+    "kitsune": "5443052048956302934",
+    "light": "5445326324333849091",
+    "lightning": "5445116287548172424",
+    "love": "5445110721270555872",
+    "magma": "5442963151723216979",
+    "magnet": "5445247653417888217",
+    "mammoth": "5445331710222839958",
+    "pain": "5442846019375117494",
+    "phoenix": "5445097509951156447",
+    "portal": "5445294498626184191",
+    "quake": "5442873833583324495",
+    "rocket": "5445244157314506580",
+    "rubber": "5445167152845857389",
+    "sand": "5445406528553135247",
+    "shadow": "5445140236285814539",
+    "smoke": "5444896002970527328",
+    "sound": "5442981529888268897",
+    "spider": "5442954024917707886",
+    "spike": "5444880575447999328",
+    "spin": "5443031647861649336",
+    "spirit": "5444911383248415213",
+    "spring": "5445250526751010665",
+    "tiger": "5444910305211624733",
+    "trex": "5445232006852029998",
+    "venom": "5445057613999941281",
+    "yeti": "5442840453097498008",
+}
+DEFAULT_RACE_EMOJI: dict[str, str] = {
+    "angel": "5274053607073819857",
+    "cyborg": "5271808786581991719",
+    "ghoul": "5273844996217285360",
+    "human": "5273728031372914774",
+    "mink": "5274109639217163111",
+    "shark": "5274246975091417030",
+}
+DEFAULT_TRADE_EMOJI: dict[str, str] = {  # предметы каталога трейдов (gamepass / прочее) по id
+    "g1": "5393605679615351026",
+    "g2": "5393237265910636399",
+    "g3": "5391220679980919221",
+    "g4": "5393534743935491159",
+    "g5": "5393146904093694324",
+    "g6": "5393213184029002494",
+    "g102": "5393511048600921061",
+    "g103": "5393277535524003009",
+    "g104": "5391123119798787728",
+    "o105": "5444921631040384286",
+    "o106": "5442607893503328500",
+    "o107": "5445327960716390273",
+    "o108": "5445280952299334902",
+    "o109": "5775937998948404844",
+    "x110": "5445009123819170179",
+    "x111": "5443026193253185140",
+}
+
+# Физический Dragon — два фрукта. В стоке он по-прежнему один («dragon»), в Permanent — один («dragon»).
+DRAGON_PHYS = [("dragon_west", "Dragon West"), ("dragon_east", "Dragon East")]
+DRAGON_PHYS_IDS = {k for k, _ in DRAGON_PHYS}
+# Для настройки эмодзи: все фрукты стока + два физических Dragon в конце
+EMOJI_FRUITS = FRUITS + DRAGON_PHYS
+# Обычные (физические) фрукты в трейдах: вместо одного Dragon — West и East
+TRADE_PHYS_FRUITS = [x for k, n in FRUITS for x in (DRAGON_PHYS if k == "dragon" else [(k, n)])]
+
 # Фрукты для рейдов: ключ -> (название, {навык: цена}). Порядок навыков = порядок кнопок.
 RAID_FRUITS: dict[str, tuple[str, dict[str, int]]] = {
     "flame": ("Пламя", {"Z": 500, "X": 3000, "C": 4000, "V": 5000, "F": 2000}),
@@ -2715,12 +2845,16 @@ async def profile_comment_msg(msg: Message, state: FSMContext):
 # ============================== ЗАЯВКИ ==============================
 async def fruit_icons() -> dict[str, str]:
     rows = await pool().fetch("SELECT key, value FROM config WHERE key LIKE 'custom_emoji_fruit_%' AND value <> ''")
-    return {r["key"].removeprefix("custom_emoji_fruit_"): r["value"] for r in rows}
+    out = dict(DEFAULT_FRUIT_EMOJI)
+    out.update({r["key"].removeprefix("custom_emoji_fruit_"): r["value"] for r in rows})
+    return out
 
 
 async def race_icons() -> dict[str, str]:
     rows = await pool().fetch("SELECT key, value FROM config WHERE key LIKE 'custom_emoji_race_%' AND value <> ''")
-    return {r["key"].removeprefix("custom_emoji_race_"): r["value"] for r in rows}
+    out = dict(DEFAULT_RACE_EMOJI)
+    out.update({r["key"].removeprefix("custom_emoji_race_"): r["value"] for r in rows})
+    return out
 
 
 def fruit_html(icons: dict, key: str) -> str:
@@ -3136,8 +3270,13 @@ TRADE_SEED_GAMEPASSES = ["Dark Blade", "2x Mastery", "2x Money", "Fast Boats", "
 
 
 def trade_default_catalog() -> dict:
-    return {"seq": 100, "gp": [{"id": f"g{i}", "name": n} for i, n in enumerate(TRADE_SEED_GAMEPASSES, 1)],
-            "sk": [], "ot": [], "fr": []}
+    return {"seq": 111, "gp": [{"id": f"g{i}", "name": n} for i, n in enumerate(TRADE_SEED_GAMEPASSES, 1)]
+                      + [{"id": "g102", "name": "Mythical Scrolls"}, {"id": "g103", "name": "Legendary Scrolls"},
+                         {"id": "g104", "name": "+1 Fruit Storage"}],
+            "sk": [],
+            "ot": [{"id": "o105", "name": "Permanent Dragon Token"}, {"id": "o106", "name": "Dragon Token"},
+                   {"id": "o107", "name": "Rabid Dog Blade"}, {"id": "o108", "name": "Dog Blade"}],
+            "fr": []}
 
 
 async def trade_catalog() -> dict:
@@ -3162,6 +3301,8 @@ async def trade_icons() -> dict[str, str]:
     rows = await pool().fetch("SELECT key, value FROM config WHERE key LIKE 'custom_emoji_trade_%' AND value <> ''")
     perm = await pool().fetch("SELECT key, value FROM config WHERE key LIKE 'custom_emoji_perm_%' AND value <> ''")
     out = await fruit_icons()
+    out.update(DEFAULT_TRADE_EMOJI)
+    out.update({"perm_" + k: v for k, v in DEFAULT_PERM_EMOJI.items()})
     out.update({r["key"].removeprefix("custom_emoji_trade_"): r["value"] for r in rows})
     out.update({"perm_" + r["key"].removeprefix("custom_emoji_perm_"): r["value"] for r in perm})
     return out
@@ -3175,9 +3316,14 @@ def trade_icon(icons: dict, cat: str, item_id: str) -> str | None:
 
 
 def trade_cat_list(catalog: dict, cat: str) -> list[tuple[str, str]]:
-    """cat: gp / sk / ot / fn / fp (fn, fp — один и тот же список фруктов)."""
+    """cat: gp / sk / ot / fn / fp. fn и fp — общие фрукты, но у fn два Dragon (West/East), у fp один Dragon."""
     if cat in ("fn", "fp"):
-        return [(k, n) for k, n in FRUITS] + [(x["id"], x["name"]) for x in catalog["fr"]]
+        # обычные: Dragon West + Dragon East; Permanent: один Dragon (включает оба). Остальное общее.
+        base = TRADE_PHYS_FRUITS if cat == "fn" else FRUITS
+        # старые ручные «Dragon …» из каталога скрываем: теперь они вшиты в код
+        extra = [(x["id"], x["name"]) for x in catalog["fr"]
+                 if x["name"].strip().lower() not in ("dragon", "dragon west", "dragon east")]
+        return list(base) + extra
     return [(x["id"], x["name"]) for x in catalog[cat]]
 
 
@@ -3464,7 +3610,9 @@ async def trade_photo_upload(give: list, want: list) -> tuple[str, int] | None:
         from aiogram.types import BufferedInputFile
         from trade_image import compose_trade_image
         season = await get_config("trade_season") or None
-        data = await asyncio.to_thread(compose_trade_image, give, want, None, season)
+        def _img_items(items: list) -> list:  # генератор картинки знает только «dragon»
+            return [{**i, "id": "dragon"} if i.get("id") in DRAGON_PHYS_IDS else i for i in items]
+        data = await asyncio.to_thread(compose_trade_image, _img_items(give), _img_items(want), None, season)
         chat_id = await main_chat()
         msg = await B().send_photo(chat_id, BufferedInputFile(data, filename="trade.png"),
                                    message_thread_id=thread(TOPICS[TOPIC_BY_KIND["trade"]]))
@@ -3646,12 +3794,12 @@ async def trade_redact_list(cat: str):
     base = "fn" if cat in ("fn", "fp") else cat
     storage = "fr" if base == "fn" else base
     buttons = []
-    for item_id, name in trade_cat_list(catalog, base):
-        buttons.append(btn(name, f"tre_i_{storage}_{item_id}", icon_id=icons.get(item_id)))
+    for item_id, name in trade_cat_list(catalog, cat):
+        buttons.append(btn(name, f"tre_i_{storage}_{item_id}", icon_id=trade_icon(icons, cat, item_id)))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([btn("({20}) Добавить", f"tre_add_{storage}", style="success")])
     rows.append([btn("Назад", "tre_fr" if storage == "fr" else "tre_m")])
-    note = ("\nНовый фрукт появится и в «Обычных», и в «Permanent». Базовые фрукты удалить нельзя."
+    note = ("\nНовый фрукт появится и в «Обычных», и в «Permanent». Базовые фрукты (и Dragon West/East) удалить нельзя."
             if storage == "fr" else "")
     return (f"({{24}})<b>Редактор трейдов • {trade_redact_title(cat)}</b>\n"
             f"Нажмите на предмет, чтобы удалить его, или «Добавить».{note}"), InlineKeyboardMarkup(inline_keyboard=rows)
@@ -4504,7 +4652,9 @@ def emoji_center_markup() -> InlineKeyboardMarkup:
     return kb(
         [InlineKeyboardButton(text="🍎 Эмодзи фруктов", callback_data="em_fruits")],
         [InlineKeyboardButton(text="🧲 Эмодзи Magnet (только он)", callback_data="em_magnet")],
+        [InlineKeyboardButton(text="🐉 Эмодзи Dragon West / East (физические)", callback_data="em_dragon")],
         [InlineKeyboardButton(text="🔲 Эмодзи Permanent фруктов", callback_data="em_perm")],
+        [InlineKeyboardButton(text="🐲 Эмодзи Permanent Dragon (один)", callback_data="em_perm_dragon")],
         [InlineKeyboardButton(text="🧬 Эмодзи рас триалов", callback_data="em_races")],
         [InlineKeyboardButton(text="🔁 Эмодзи трейдов (gamepass/skins/прочее)", callback_data="em_trade")],
         [InlineKeyboardButton(text="📋 Установленные эмодзи", callback_data="em_list")],
@@ -4552,6 +4702,19 @@ async def em_start(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@dp.callback_query(F.data == "em_dragon")
+async def em_dragon(cb: CallbackQuery, state: FSMContext):
+    """Два физических Dragon (West, East) — идут в конце списка EMOJI_FRUITS."""
+    if not creator_cb(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    idx = next(i for i, (k, _) in enumerate(EMOJI_FRUITS) if k == "dragon_west")
+    await state.set_state(EmojiSt.fruit)
+    await state.update_data(idx=idx)
+    await cb.message.edit_text(emoji_prompt(True, idx))
+    await cb.answer()
+
+
 @dp.callback_query(F.data == "em_magnet")
 async def em_magnet(cb: CallbackQuery, state: FSMContext):
     if not creator_cb(cb):
@@ -4565,7 +4728,7 @@ async def em_magnet(cb: CallbackQuery, state: FSMContext):
 
 
 def emoji_prompt(fruits: bool, idx: int) -> str:
-    items = FRUITS if fruits else RACES
+    items = EMOJI_FRUITS if fruits else RACES
     key, name = items[idx]
     head = "🍎 <b>Настройка Premium Emoji фруктов</b>" if fruits else "🧬 <b>Настройка Premium Emoji рас</b>"
     src = "\nОтправьте одним сообщением <b>Premium Emoji</b> из набора BloxFruitEmodge." if fruits else \
@@ -4577,7 +4740,7 @@ def emoji_prompt(fruits: bool, idx: int) -> str:
 async def emoji_save(msg: Message, state: FSMContext, fruits: bool) -> None:
     if msg.from_user.id != CREATOR_ID:
         return
-    items = FRUITS if fruits else RACES
+    items = EMOJI_FRUITS if fruits else RACES
     data = await state.get_data()
     idx = data.get("idx", 0)
     only = bool(data.get("only"))
@@ -4649,6 +4812,19 @@ async def em_perm_start(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@dp.callback_query(F.data == "em_perm_dragon")
+async def em_perm_dragon(cb: CallbackQuery, state: FSMContext):
+    if not creator_cb(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    items = await emoji_perm_items()
+    idx = next(i for i, (k, _) in enumerate(items) if k == "dragon")
+    await state.set_state(EmojiSt.perm)
+    await state.update_data(idx=idx, only=True)
+    await cb.message.edit_text(emoji_perm_prompt(items, idx))
+    await cb.answer()
+
+
 @dp.message(EmojiSt.perm, F.text)
 async def em_perm_msg(msg: Message, state: FSMContext):
     if msg.from_user.id != CREATOR_ID:
@@ -4667,6 +4843,10 @@ async def em_perm_msg(msg: Message, state: FSMContext):
             await reply(msg, "({8})Это не Premium Emoji. Отправьте именно премиум-эмодзи или <code>-</code> чтобы пропустить.")
             return
         await set_config(f"custom_emoji_perm_{key}", emoji_id)
+    if (await state.get_data()).get("only"):  # режим «только Permanent Dragon»
+        await state.clear()
+        await reply(msg, "({20})Premium Emoji для <b>Dragon (Permanent)</b> сохранён.", emoji_center_markup())
+        return
     idx += 1
     if idx >= len(items):
         await state.clear()
@@ -4732,8 +4912,8 @@ async def em_list(cb: CallbackQuery):
         return
     f_icons, r_icons = await fruit_icons(), await race_icons()
     lines = ["📋 <b>Установленные Premium Emoji</b>", SEP, "<b>🍎 Фрукты:</b>"]
-    lines += [f"{custom_emoji_html(f_icons[k], '🍎')} {esc(n)}" for k, n in FRUITS if k in f_icons] or ["— пока нет"]
-    lines.append(f"Установлено: <b>{sum(1 for k, _ in FRUITS if k in f_icons)}/{len(FRUITS)}</b>")
+    lines += [f"{custom_emoji_html(f_icons[k], '🍎')} {esc(n)}" for k, n in EMOJI_FRUITS if k in f_icons] or ["— пока нет"]
+    lines.append(f"Установлено: <b>{sum(1 for k, _ in EMOJI_FRUITS if k in f_icons)}/{len(EMOJI_FRUITS)}</b>")
     lines.append("\n<b>🧬 Расы:</b>")
     for k, n in RACES:
         lines.append(f"{custom_emoji_html(r_icons.get(k), '▫️')} {esc(n)}")
@@ -4764,7 +4944,7 @@ async def em_reset(cb: CallbackQuery):
         return
     await pool().execute("DELETE FROM config WHERE key LIKE 'custom_emoji_fruit_%'")
     await refresh_icon_cache()
-    await cb.answer("Эмодзи фруктов сброшены", show_alert=True)
+    await cb.answer("Эмодзи фруктов сброшены до вшитых в код", show_alert=True)
 
 
 # ============================== НАГРАДЫ ==============================
@@ -4865,6 +5045,7 @@ PRICES = {
     "blizzard": 2400000, "gravity": 2500000, "mammoth": 2700000, "trex": 2700000, "dough": 2800000,
     "shadow": 2900000, "venom": 3000000, "control": 3200000, "gas": 3200000, "spirit": 3400000,
     "tiger": 5000000, "yeti": 5000000, "kitsune": 8000000, "dragon": 15000000,
+    "dragon_west": 15000000, "dragon_east": 15000000,
 }
 
 
@@ -5983,9 +6164,10 @@ async def stock_clear(cb: CallbackQuery):
     await cb.answer("Выбор очищен")
 
 
-def stock_hist_grid(kind: str) -> InlineKeyboardMarkup:
+def stock_hist_grid(kind: str, icons: dict | None = None) -> InlineKeyboardMarkup:
     """Список фруктов для истории: кнопка фрукта → когда появлялся в этом месяце."""
-    buttons = [btn(name, f"shk_{kind}_{key}") for key, name in FRUITS]
+    icons = icons or DEFAULT_FRUIT_EMOJI
+    buttons = [btn(name, f"shk_{kind}_{key}", icon_id=icons.get(key)) for key, name in FRUITS]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([btn("Назад", f"sv_{kind}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -6020,7 +6202,7 @@ async def stock_history_list(cb: CallbackQuery):
         pass
     await cb.message.answer(R("({77})<b>История стока</b>\n<blockquote>Выберите фрукт: покажу, когда он появлялся "
                               "в этом месяце (Normal или Mirage). Если в этом месяце не было, покажу дату последнего появления.</blockquote>"),
-                            reply_markup=stock_hist_grid(kind))
+                            reply_markup=stock_hist_grid(kind, await fruit_icons()))
     await cb.answer()
 
 
