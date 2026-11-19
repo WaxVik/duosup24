@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.21.0"
+BOT_VERSION = "3.21.1"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -8120,6 +8120,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.21.1", "Тест набора в администрацию: добавлены 35 вопросов (21 опрос и 14 развёрнутых). Красивое оформление постов в канале обновлений. Команда /resendupdates — выложить все обновления заново"),
     ("3.21.0", "Трейды: Dragon West и Dragon East — отдельные кнопки (в Permanent один Dragon), новый фрукт Meme-Meme (только обычные). Комментарий профиля до 400 символов с Premium Emoji. В уведомлениях о стоке у Dragon эмодзи Permanent Dragon. «О боте» показывает 10 последних обновлений, все обновления — в канале @UpdateDuoSup."),
     ("3.20.0", "Эмодзи фруктов/рас/трейдов вшиты в код; Dragon West и Dragon East отдельно (в Permanent — один Dragon); /stockacc — смена аккаунта Parse.bot; исправлена «О боте» (слишком длинное сообщение)."),
     ("3.19.8", "Исправлен запуск на чистой базе: таблица questions создаётся до изменения её колонок."),
@@ -8175,23 +8176,66 @@ def about_markup() -> InlineKeyboardMarkup:
     return kb([btn("Все обновления", url=UPDATES_URL)])
 
 
-async def publish_changelog() -> None:
-    """При запуске публикует в канале обновлений версии, которых там ещё нет (старые → новые)."""
-    raw = await get_config("changelog_posted")
+def update_post_html(version: str, text: str) -> str:
+    """Красивый пост для канала: заголовок, пункты списком в цитате, хэштеги. Эмодзи — через ({N})."""
+    parts = [p.strip().rstrip(".;").strip() for p in re.split(r"(?<=[.;])\s+", text) if p.strip()]
+    bullets = "\n".join(f"▫️ {esc(p)}" for p in parts) or esc(text)
+    tag = "v" + re.sub(r"\D", "_", version)
+    return (f"({{61}}) <b>DuoSup • версия {esc(version)}</b>\n"
+            f"<i>Обновление бота</i>\n"
+            f"{SEP}\n"
+            f"<blockquote>{bullets}</blockquote>\n"
+            f"{SEP}\n"
+            f"({{20}}) <b>@{esc(BOT_USERNAME)}</b>  •  #{tag} #обновление")
+
+
+async def send_update_post(version: str, text: str) -> None:
+    body = update_post_html(version, text)
+    try:
+        await B().send_message(UPDATES_CHANNEL, R(body))
+    except Exception as exc:
+        if "chat not found" in str(exc).lower() or "forbidden" in str(exc).lower():
+            raise
+        # Premium Emoji в канале не приняты — отправляем с обычными эмодзи
+        plain = body.replace("({61})", "🤖").replace("({20})", "✅")
+        await B().send_message(UPDATES_CHANNEL, plain)
+
+
+async def publish_changelog(force: bool = False) -> int:
+    """Публикует в канале версии, которых там ещё нет (старые → новые). force — выложить всё заново."""
+    raw = "" if force else await get_config("changelog_posted")
     try:
         posted = set(json.loads(raw)) if raw else set()
     except ValueError:
         posted = set()
-    pending = [(v, t) for v, t in reversed(CHANGELOG) if v not in posted]
-    for v, t in pending:
+    if force:
+        await set_config("changelog_posted", "")
+    sent = 0
+    for v, t in reversed(CHANGELOG):
+        if v in posted:
+            continue
         try:
-            await B().send_message(UPDATES_CHANNEL, f"<b>DuoSup v{esc(v)}</b>\n{esc(t)}")
+            await send_update_post(v, t)
         except Exception as exc:
             LOG.warning("канал обновлений: v%s не опубликована (%s) — проверьте права бота в канале", v, exc)
             break  # остальные попробуем при следующем запуске, чтобы порядок не нарушился
         posted.add(v)
+        sent += 1
         await set_config("changelog_posted", json.dumps(sorted(posted)))
         await asyncio.sleep(1.5)
+    return sent
+
+
+@dp.message(Command("resendupdates"))
+async def resendupdates_cmd(msg: Message):
+    """/resendupdates — заново опубликовать все обновления в канале в новом оформлении (создатель, личка)."""
+    if not private_creator(msg):
+        await reply(msg, "({15})Эта команда доступна только создателю и только в личке с ботом.")
+        return
+    await reply(msg, "({61})Публикую все обновления в канале заново. Старые сообщения в канале удалите вручную, "
+                     "чтобы не было дублей.")
+    sent = await publish_changelog(force=True)
+    await reply(msg, f"({{20}})Опубликовано обновлений: {sent} из {len(CHANGELOG)}.")
 
 
 @dp.message(Command("about"))
