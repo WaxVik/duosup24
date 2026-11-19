@@ -33,7 +33,7 @@ import asyncpg
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.19.8"
+BOT_VERSION = "3.21.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -313,8 +313,8 @@ DEFAULT_FRUIT_EMOJI: dict[str, str] = {  # обычные (физические)
     "venom": "5444974128425644016",
     "yeti": "5442840453097498008",
     # Dragon физический — два разных фрукта, у каждого своё эмодзи (настройка: /addemoji → Dragon West/East)
-    "dragon_west": "5445009123819170179",
-    "dragon_east": "5445035537868040673",  # TODO: замените на эмодзи Dragon East через /addemoji
+    "dragon_west": "5442695764239233459",
+    "dragon_east": "5445035537868040673",
 }
 DEFAULT_PERM_EMOJI: dict[str, str] = {  # Permanent-фрукты; Dragon тут один (включает West и East)
     "blade": "5445067578324068975",
@@ -326,7 +326,7 @@ DEFAULT_PERM_EMOJI: dict[str, str] = {  # Permanent-фрукты; Dragon тут 
     "dark": "5442760008360044291",
     "diamond": "5442928607301251972",
     "dough": "5443074241052324400",
-    "dragon": "5442746333184178738",
+    "dragon": "5393549467083382017",
     "eagle": "5445061492355409139",
     "flame": "5445414212249625817",
     "gas": "5445355147859372411",
@@ -393,7 +393,9 @@ DRAGON_PHYS_IDS = {k for k, _ in DRAGON_PHYS}
 # Для настройки эмодзи: все фрукты стока + два физических Dragon в конце
 EMOJI_FRUITS = FRUITS + DRAGON_PHYS
 # Обычные (физические) фрукты в трейдах: вместо одного Dragon — West и East
-TRADE_PHYS_FRUITS = [x for k, n in FRUITS for x in (DRAGON_PHYS if k == "dragon" else [(k, n)])]
+TRADE_PHYS_FRUITS = ([x for k, n in FRUITS for x in (DRAGON_PHYS if k == "dragon" else [(k, n)])]
+                     + [("x111", "Meme-Meme")])  # Meme-Meme — только физический, в Permanent его нет
+TRADE_HIDDEN_CATALOG = {"dragon", "dragon west", "dragon east", "meme-meme"}  # вшиты в код, из каталога скрываем
 
 # Фрукты для рейдов: ключ -> (название, {навык: цена}). Порядок навыков = порядок кнопок.
 RAID_FRUITS: dict[str, tuple[str, dict[str, int]]] = {
@@ -2424,7 +2426,7 @@ async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
     elif menu_key == "admin":
         await search_info(msg)
     elif menu_key == "about":
-        await say(msg, about_text())
+        await say(msg, about_text(), about_markup())
     elif menu_key == "lang":
         await say(msg, "({8})Выбор языка появится в одном из ближайших обновлений.")
 
@@ -2706,7 +2708,7 @@ async def profile_html(user_id: int) -> str:
         f"{e(25)} <b>Тег:</b> {esc(tag)}\n"
         f"{e(8)} <b>Варны:</b> {warns}/{MAX_WARNS}\n"
         f"{e(60)} <b>Кол-во сообщений:</b> {int(row['messages_count']) if row else 0}\n"
-        f"<blockquote><b>Комментарий:</b>\n<i>{esc(comment)}</i>\n"
+        f"<blockquote><b>Комментарий:</b>\n<i>{comment_html(comment)}</i>\n"
         f"<b>Награды</b> {e(72)}\n{ach}</blockquote>\n"
         f"{SEP}\n{e(64)} <b>В сообществе с:</b> {fmt_date(row['joined_at'] if row else None)}"
     )
@@ -2739,7 +2741,7 @@ async def profile_blocks(user_id: int) -> list:
         {"type": "paragraph", "text": [rt_emoji(60, "💬"), " ", bold("Кол-во сообщений:"), f" {int(row['messages_count']) if row else 0}"]},
         {"type": "blockquote", "blocks": [
             {"type": "paragraph", "text": bold("Комментарий:")},
-            {"type": "paragraph", "text": {"type": "italic", "text": comment}},
+            {"type": "paragraph", "text": {"type": "italic", "text": comment_rich(comment)}},
             {"type": "paragraph", "text": [bold("Награды"), " ", rt_emoji(72, "🏆")]},
             *[{"type": "paragraph", "text": f"• {a}"} for a in (achievements or ["—"])]]},
         {"type": "paragraph", "text": html.unescape(SEP)},
@@ -2832,12 +2834,50 @@ async def profile_tag_msg(msg: Message, state: FSMContext):
     await reply(msg, "({20})Тег профиля обновлён.", main_menu())
 
 
+PROFILE_COMMENT_MAX = 400
+_COMMENT_EMOJI = re.compile("\u27e6(\\d+)\\|([^\u27e7]*)\u27e7")
+
+
+def comment_html(comment: str) -> str:
+    """Комментарий профиля в HTML: маркеры ⟦id|эмодзи⟧ -> <tg-emoji>, остальное экранируется."""
+    out, pos = [], 0
+    for m in _COMMENT_EMOJI.finditer(comment):
+        out.append(esc(comment[pos:m.start()]))
+        out.append(custom_emoji_html(m.group(1), esc(m.group(2)) or "▫️"))
+        pos = m.end()
+    out.append(esc(comment[pos:]))
+    return "".join(out)
+
+
+def comment_rich(comment: str) -> list:
+    """Комментарий профиля для Rich-текста: Premium Emoji остаются премиумом."""
+    parts, pos = [], 0
+    for m in _COMMENT_EMOJI.finditer(comment):
+        if m.start() > pos:
+            parts.append(comment[pos:m.start()])
+        parts.append({"type": "custom_emoji", "custom_emoji_id": m.group(1), "alternative_text": m.group(2) or "▫️"})
+        pos = m.end()
+    if pos < len(comment):
+        parts.append(comment[pos:])
+    return parts or [comment]
+
+
 @dp.message(ProfileSt.comment, F.text, ~F.text.startswith("/"))
 async def profile_comment_msg(msg: Message, state: FSMContext):
-    if len(msg.text) > 200:
-        await reply(msg, "({8})Слишком длинно: максимум 200 символов.")
+    if len(msg.text) > PROFILE_COMMENT_MAX:
+        await reply(msg, f"({{8}})Слишком длинно: максимум {PROFILE_COMMENT_MAX} символов.")
         return
-    await pool().execute("UPDATE users SET profile_comment=$2 WHERE user_id=$1", msg.from_user.id, msg.text.strip())
+    # Premium Emoji сохраняем как маркеры «⟦id|эмодзи⟧» (обычный текст остаётся как есть)
+    raw = msg.text.encode("utf-16-le")
+    out, pos = [], 0
+    for ent in sorted((x for x in (msg.entities or []) if x.type == "custom_emoji" and x.custom_emoji_id),
+                      key=lambda x: x.offset):
+        a, b = ent.offset * 2, (ent.offset + ent.length) * 2
+        out.append(raw[pos:a].decode("utf-16-le"))
+        out.append(f"\u27e6{ent.custom_emoji_id}|{raw[a:b].decode('utf-16-le')}\u27e7")
+        pos = b
+    out.append(raw[pos:].decode("utf-16-le"))
+    await pool().execute("UPDATE users SET profile_comment=$2 WHERE user_id=$1", msg.from_user.id, "".join(out).strip())
     await state.clear()
     await reply(msg, "({20})Комментарий профиля обновлён.", main_menu())
 
@@ -2854,6 +2894,14 @@ async def race_icons() -> dict[str, str]:
     rows = await pool().fetch("SELECT key, value FROM config WHERE key LIKE 'custom_emoji_race_%' AND value <> ''")
     out = dict(DEFAULT_RACE_EMOJI)
     out.update({r["key"].removeprefix("custom_emoji_race_"): r["value"] for r in rows})
+    return out
+
+
+async def stock_icons() -> dict[str, str]:
+    """Иконки для уведомлений о стоке: у Dragon — эмодзи Permanent Dragon."""
+    out = await fruit_icons()
+    row = await pool().fetchval("SELECT value FROM config WHERE key='custom_emoji_perm_dragon' AND value <> ''")
+    out["dragon"] = row or DEFAULT_PERM_EMOJI["dragon"]
     return out
 
 
@@ -3322,7 +3370,7 @@ def trade_cat_list(catalog: dict, cat: str) -> list[tuple[str, str]]:
         base = TRADE_PHYS_FRUITS if cat == "fn" else FRUITS
         # старые ручные «Dragon …» из каталога скрываем: теперь они вшиты в код
         extra = [(x["id"], x["name"]) for x in catalog["fr"]
-                 if x["name"].strip().lower() not in ("dragon", "dragon west", "dragon east")]
+                 if x["name"].strip().lower() not in TRADE_HIDDEN_CATALOG]
         return list(base) + extra
     return [(x["id"], x["name"]) for x in catalog[cat]]
 
@@ -5317,7 +5365,7 @@ def stock_footer() -> str:
 
 
 async def stock_text(kind: str, state: dict, active: bool) -> str:
-    icons = await fruit_icons()
+    icons = await stock_icons()
     names = dict(FRUITS)
     lines = []
     for key, price in sorted(state["items"], key=lambda x: x[1]):
@@ -5912,6 +5960,81 @@ async def stockstatus_cmd(msg: Message):
     await reply(msg, "({21})<b>Автосток</b>\n<blockquote>" + "\n".join(esc(x) for x in lines) + "</blockquote>")
 
 
+async def stockacc_view() -> tuple[str, InlineKeyboardMarkup]:
+    """Экран выбора аккаунта Parse.bot: текущий, расход запросов, кнопки переключения."""
+    cur = await stock_current_acc()
+    lines, buttons = [], []
+    for acc in sorted(STOCK_ACCOUNTS, key=lambda a: a["n"]):
+        dead = bool(await get_config(_month_key(f"stock_dead_a{acc['n']}")))
+        used = await stock_calls_used(acc["n"])
+        mark = "✅ " if acc["n"] == cur else ""
+        state = " — кредиты кончились" if dead else (" — лимит" if used >= STOCK_MONTHLY_LIMIT else "")
+        lines.append(f"{mark}Аккаунт {acc['n']}: запросов {used}/{STOCK_MONTHLY_LIMIT}{state}")
+        buttons.append(btn(f"{'● ' if acc['n'] == cur else ''}Аккаунт {acc['n']}", f"sacc_{acc['n']}",
+                           style="success" if acc["n"] == cur else None))
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([btn("Закрыть", "sacc_close")])
+    text = ("({21})<b>Аккаунты Parse.bot</b>\n<blockquote>" + "\n".join(esc(x) for x in lines) + "</blockquote>\n"
+            "Нажмите на аккаунт, чтобы переключиться, или <code>/stockacc 2</code>.\n"
+            "<i>Если у выбранного аккаунта кончатся кредиты, бот сам перейдёт на следующий.</i>")
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def stockacc_switch(n: int) -> str | None:
+    """Переключает аккаунт. Возвращает текст ошибки или None."""
+    if not any(a["n"] == n for a in STOCK_ACCOUNTS):
+        have = ", ".join(str(a["n"]) for a in sorted(STOCK_ACCOUNTS, key=lambda a: a["n"]))
+        return f"Аккаунта {n} нет. Подключены: {have}."
+    async with lock_for("stock_acc"):
+        await set_config("stock_acc", n)
+    return None
+
+
+@dp.message(Command("stockacc"))
+async def stockacc_cmd(msg: Message, command: CommandObject):
+    """/stockacc — список аккаунтов Parse.bot; /stockacc N — переключиться на аккаунт N."""
+    if not await redact_zone(msg):
+        return
+    if not STOCK_ACCOUNTS:
+        await reply(msg, "({8})Источник не настроен: добавьте STOCK_API_URL и STOCK_API_KEY в Railway Variables.")
+        return
+    arg = (command.args or "").strip()
+    if arg:
+        if not arg.isdigit():
+            await reply(msg, "({8})Номер аккаунта — число, например <code>/stockacc 2</code>.")
+            return
+        err = await stockacc_switch(int(arg))
+        if err:
+            await reply(msg, f"({{8}}){esc(err)}")
+            return
+    text, markup = await stockacc_view()
+    await say(msg, (f"({{20}})Переключено на аккаунт {int(arg)}.\n" if arg else "") + text, markup)
+
+
+@dp.callback_query(F.data.startswith("sacc_"))
+async def stockacc_cb(cb: CallbackQuery):
+    if not _creator_only(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    val = cb.data.removeprefix("sacc_")
+    if val == "close":
+        await cb.message.delete()
+        return
+    if not val.isdigit():
+        await cb.answer()
+        return
+    err = await stockacc_switch(int(val))
+    if err:
+        await cb.answer(err, show_alert=True)
+        return
+    text, markup = await stockacc_view()
+    try:
+        await edit(cb, text, markup)
+    except Exception:
+        pass
+    await cb.answer(f"Аккаунт {val} включён")
+
+
 @dp.message(Command("stockcheck"))
 async def stockcheck_cmd(msg: Message):
     """Проверка источника: что вернул и как бот это разобрал."""
@@ -6087,7 +6210,7 @@ async def stock_history_record(kind: str, state: dict) -> None:
 
 
 async def stock_menu_markup(user_id: int, back: str = "sv_normal") -> InlineKeyboardMarkup:
-    icons = await fruit_icons()
+    icons = await stock_icons()
     chosen = {r["fruit"] for r in await pool().fetch("SELECT fruit FROM stock_subs WHERE user_id=$1", user_id)}
     buttons = [btn(name, f"ssub_{key}", icon_id=icons.get(key), style="success" if key in chosen else None)
                for key, name in FRUITS]
@@ -6202,7 +6325,7 @@ async def stock_history_list(cb: CallbackQuery):
         pass
     await cb.message.answer(R("({77})<b>История стока</b>\n<blockquote>Выберите фрукт: покажу, когда он появлялся "
                               "в этом месяце (Normal или Mirage). Если в этом месяце не было, покажу дату последнего появления.</blockquote>"),
-                            reply_markup=stock_hist_grid(kind, await fruit_icons()))
+                            reply_markup=stock_hist_grid(kind, await stock_icons()))
     await cb.answer()
 
 
@@ -7997,6 +8120,8 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.21.0", "Трейды: Dragon West и Dragon East — отдельные кнопки (в Permanent один Dragon), новый фрукт Meme-Meme (только обычные). Комментарий профиля до 400 символов с Premium Emoji. В уведомлениях о стоке у Dragon эмодзи Permanent Dragon. «О боте» показывает 10 последних обновлений, все обновления — в канале @UpdateDuoSup."),
+    ("3.20.0", "Эмодзи фруктов/рас/трейдов вшиты в код; Dragon West и Dragon East отдельно (в Permanent — один Dragon); /stockacc — смена аккаунта Parse.bot; исправлена «О боте» (слишком длинное сообщение)."),
     ("3.19.8", "Исправлен запуск на чистой базе: таблица questions создаётся до изменения её колонок."),
     ("3.19.7", "Результаты теста в администрацию («Принять» / «Отказать») приходят создателю в личку, а не в админ-чат."),
     ("3.19.6", "Тема «Купля-продажа» получила те же базовые функции, что и «Чат» (команды варнов/банов и модерации)."),
@@ -8030,18 +8155,48 @@ CHANGELOG = [
 ]
 
 
+UPDATES_CHANNEL = "@UpdateDuoSup"
+UPDATES_URL = "https://t.me/UpdateDuoSup"
+ABOUT_RECENT = 10  # сколько последних обновлений показываем в «О боте» (все — в канале)
+
+
 def about_text() -> str:
-    recent = "\n".join(f"<b>v{v}</b> — {esc(t)}" for v, t in CHANGELOG[:3])
-    older = "\n".join(f"<b>v{v}</b> — {esc(t)}" for v, t in CHANGELOG[3:])
-    return (f"({{61}})<b>DuoSup</b> • версия {BOT_VERSION}\n"
+    """«О боте»: 10 последних обновлений в цитате. Полный список бот публикует в канале UpdateDuoSup."""
+    head = (f"({{61}})<b>DuoSup</b> • версия {BOT_VERSION}\n"
             f"Владелец: @{CREATOR_USERNAME}\nРазработка: Claude (Anthropic) по заданию владельца\n"
-            "Технологии: Python, aiogram 3, PostgreSQL, Railway\n\n<b>Что нового</b>\n"
-            f"{recent}\n<blockquote expandable>{older}</blockquote>")
+            "Технологии: Python, aiogram 3, PostgreSQL, Railway\n\n"
+            f"<b>Последние обновления</b>\n")
+    items = "\n".join(f"<b>v{v}</b> — {esc(t)}" for v, t in CHANGELOG[:ABOUT_RECENT])
+    text = f"{head}<blockquote expandable>{items}</blockquote>\nВсе обновления: {UPDATES_URL}"
+    return text[:4000] if len(re.sub(r"<[^>]+>", "", text)) > 4000 else text
+
+
+def about_markup() -> InlineKeyboardMarkup:
+    return kb([btn("Все обновления", url=UPDATES_URL)])
+
+
+async def publish_changelog() -> None:
+    """При запуске публикует в канале обновлений версии, которых там ещё нет (старые → новые)."""
+    raw = await get_config("changelog_posted")
+    try:
+        posted = set(json.loads(raw)) if raw else set()
+    except ValueError:
+        posted = set()
+    pending = [(v, t) for v, t in reversed(CHANGELOG) if v not in posted]
+    for v, t in pending:
+        try:
+            await B().send_message(UPDATES_CHANNEL, f"<b>DuoSup v{esc(v)}</b>\n{esc(t)}")
+        except Exception as exc:
+            LOG.warning("канал обновлений: v%s не опубликована (%s) — проверьте права бота в канале", v, exc)
+            break  # остальные попробуем при следующем запуске, чтобы порядок не нарушился
+        posted.add(v)
+        await set_config("changelog_posted", json.dumps(sorted(posted)))
+        await asyncio.sleep(1.5)
 
 
 @dp.message(Command("about"))
 async def about_cmd(msg: Message):
-    await say(msg, about_text())
+    await say(msg, about_text(), about_markup())
 
 
 # ================================ ЗАЯВКИ (меню под строкой ввода) ================================
@@ -8741,6 +8896,7 @@ async def main() -> None:
         else:
             LOG.info("STOCK_API_URL не задан — автосток выключен (работает ручная команда /stock)")
         spawn(applications_expiry_loop())
+        spawn(publish_changelog())
         try:
             await warns_migrate()
         except Exception:
