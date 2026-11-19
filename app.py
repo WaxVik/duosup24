@@ -51,7 +51,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.19.6"
+BOT_VERSION = "3.19.7"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -7758,7 +7758,11 @@ async def send_search_result(attempt_id: int, user, answers: list) -> None:
     body = "".join(f"\n<b>Вопрос {i}:</b> <i>{sit}…</i>\n<blockquote expandable>{esc(ans[:per])}</blockquote>" for i, sit, ans in blocks)
     markup = InlineKeyboardMarkup(inline_keyboard=[[sbtn("({20}) Принять", f"srch_ok_{attempt_id}", "success"),
                                                     sbtn("({14}) Отказать", f"srch_no_{attempt_id}", "danger")]])
-    card = await to_admin_chat("search", head + body, markup)
+    try:  # результаты — только создателю в личку
+        card = await B().send_message(CREATOR_ID, R(head + body), reply_markup=markup)
+    except Exception:
+        LOG.exception("test result: не отправлено создателю в личку")
+        card = None
     if card:
         await pool().execute("UPDATE admin_attempt SET correct=$2, total=$3, admin_chat=$4, admin_msg=$5 WHERE id=$1",
                              attempt_id, right, len(polls), card.chat.id, card.message_id)
@@ -7811,6 +7815,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.19.7", "Результаты теста в администрацию («Принять» / «Отказать») приходят создателю в личку, а не в админ-чат."),
     ("3.19.6", "Тема «Купля-продажа» получила те же базовые функции, что и «Чат» (команды варнов/банов и модерации)."),
     ("3.19.5", "Группа HuBBlox: каждый новый сток — новое сообщение; прошлый того же вида меняется на «Истёк» (фон и подпись). Трейды: ограничение соотношения цен и лимит в сутки."),
     ("3.19.4", "Кнопки стока: Обновить/Уведомления, Mirage ↔ Normal, История/Назад; Normal без цвета."),
