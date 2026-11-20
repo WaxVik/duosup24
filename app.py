@@ -52,7 +52,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.21.2"
+BOT_VERSION = "3.21.3"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -820,15 +820,22 @@ async def get_warns(user_id: int) -> int:
     return int(await pool().fetchval("SELECT warns FROM users WHERE user_id=$1", user_id) or 0)
 
 
+_SERVICE_FIELDS = ("forum_topic_created", "forum_topic_edited", "forum_topic_closed", "forum_topic_reopened",
+                   "general_forum_topic_hidden", "general_forum_topic_unhidden", "new_chat_members",
+                   "left_chat_member", "pinned_message", "new_chat_title")
+
+
 def real_reply(msg: Message):
-    """Сообщение, на которое ответили. В группах с темами у КАЖДОГО сообщения reply_to_message — это
-    стартовое сообщение темы (его создатель), его за ответ не считаем — иначе /profile показывал чужой профиль."""
+    """Сообщение, на которое ОСОЗНАННО ответили. В группах с темами у каждого сообщения reply_to_message —
+    это стартовое (служебное) сообщение темы, его автор — создатель темы. Его за ответ не считаем,
+    иначе /profile у участников показывал профиль создателя темы."""
     r = msg.reply_to_message
     if r is None:
         return None
-    if getattr(r, "forum_topic_created", None) is not None:
+    if any(getattr(r, f, None) for f in _SERVICE_FIELDS):
         return None
-    if getattr(msg, "is_topic_message", False) and msg.message_thread_id and r.message_id == msg.message_thread_id:
+    thread = getattr(msg, "message_thread_id", None)
+    if thread and r.message_id == thread:
         return None
     return r
 
@@ -2778,8 +2785,12 @@ async def profile_cmd(msg: Message):
     if not msg.from_user:
         return
     target_id = msg.from_user.id
-    if real_reply(msg) and real_reply(msg).from_user:
-        u = real_reply(msg).from_user
+    rr = real_reply(msg)
+    LOG.info("/profile: от=%s reply=%s (учтён=%s) тема=%s", msg.from_user.id,
+             getattr(getattr(msg.reply_to_message, "from_user", None), "id", None), bool(rr),
+             getattr(msg, "message_thread_id", None))
+    if rr and rr.from_user:
+        u = rr.from_user
         if u.is_bot:
             await reply(msg, "🤖 У ботов нет профиля участника.")
             return
@@ -8134,6 +8145,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.21.3", "/profile: надёжнее определяется, на кого ответили (служебное сообщение темы больше не считается ответом)"),
     ("3.21.2", "Исправлено: /profile без ответа теперь показывает профиль того, кто написал команду (в чатах с темами подставлялся чужой). Канал обновлений: бот публикует все версии подряд и не останавливается на ошибке"),
     ("3.21.1", "Тест набора в администрацию: добавлены 35 вопросов (21 опрос и 14 развёрнутых). Красивое оформление постов в канале обновлений. Команда /resendupdates — выложить все обновления заново"),
     ("3.21.0", "Трейды: Dragon West и Dragon East — отдельные кнопки (в Permanent один Dragon), новый фрукт Meme-Meme (только обычные). Комментарий профиля до 400 символов с Premium Emoji. В уведомлениях о стоке у Dragon эмодзи Permanent Dragon. «О боте» показывает 10 последних обновлений, все обновления — в канале @UpdateDuoSup."),
