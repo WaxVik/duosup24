@@ -33,6 +33,7 @@ import asyncpg
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -51,7 +52,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.21.1"
+BOT_VERSION = "3.21.2"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -819,9 +820,22 @@ async def get_warns(user_id: int) -> int:
     return int(await pool().fetchval("SELECT warns FROM users WHERE user_id=$1", user_id) or 0)
 
 
+def real_reply(msg: Message):
+    """Сообщение, на которое ответили. В группах с темами у КАЖДОГО сообщения reply_to_message — это
+    стартовое сообщение темы (его создатель), его за ответ не считаем — иначе /profile показывал чужой профиль."""
+    r = msg.reply_to_message
+    if r is None:
+        return None
+    if getattr(r, "forum_topic_created", None) is not None:
+        return None
+    if getattr(msg, "is_topic_message", False) and msg.message_thread_id and r.message_id == msg.message_thread_id:
+        return None
+    return r
+
+
 async def resolve_target(msg: Message, token: str | None):
     """Возвращает (id, username, full_name) или None. Приоритет: ответ на сообщение, затем @username."""
-    reply = msg.reply_to_message
+    reply = real_reply(msg)
     if reply and reply.from_user:
         u = reply.from_user
         if u.is_bot:
@@ -1085,7 +1099,7 @@ def parse_punish(msg: Message, with_count: bool):
     if with_count and tokens and tokens[0].isdigit():
         count = int(tokens.pop(0))
     token = None
-    if not msg.reply_to_message and tokens and tokens[0].startswith("@"):
+    if not real_reply(msg) and tokens and tokens[0].startswith("@"):
         token = tokens.pop(0)
     return count, token, " ".join(tokens).strip()
 
@@ -1897,7 +1911,7 @@ async def uniqrole_cmd(msg: Message):
         return
     import json
     tokens = command_args(msg)
-    token = tokens.pop(0) if (not msg.reply_to_message and tokens and tokens[0].startswith("@")) else None
+    token = tokens.pop(0) if (not real_reply(msg) and tokens and tokens[0].startswith("@")) else None
     role = " ".join(tokens).strip()
     target = await resolve_target(msg, token)
     if target is None or target == "bot" or not role:
@@ -2129,11 +2143,11 @@ async def del_cmd(msg: Message):
         return
     if not await mod_group(msg):
         return
-    if not msg.reply_to_message:
+    if not real_reply(msg):
         await reply(msg, "({8})Ответьте на сообщение, которое нужно удалить.")
         return
     try:
-        await msg.reply_to_message.delete()
+        await real_reply(msg).delete()
         await msg.delete()
     except Exception as exc:
         await reply(msg, f"({{14}})Не удалось удалить: {esc(exc)}")
@@ -2764,8 +2778,8 @@ async def profile_cmd(msg: Message):
     if not msg.from_user:
         return
     target_id = msg.from_user.id
-    if msg.reply_to_message and msg.reply_to_message.from_user:
-        u = msg.reply_to_message.from_user
+    if real_reply(msg) and real_reply(msg).from_user:
+        u = real_reply(msg).from_user
         if u.is_bot:
             await reply(msg, "🤖 У ботов нет профиля участника.")
             return
@@ -2799,7 +2813,7 @@ async def profile_edit(cb: CallbackQuery):
 async def profile_set(cb: CallbackQuery, state: FSMContext):
     field = cb.data.removeprefix("pset_")
     prompts = {"roblox": "Укажите ваш ник в Roblox.", "tag": "Напишите новый тег (до 32 символов).",
-               "comment": "Напишите комментарий для профиля (до 200 символов)."}
+               "comment": "Напишите комментарий для профиля (до 400 символов, Premium Emoji сохраняются)."}
     await state.set_state(getattr(ProfileSt, field))
     await edit(cb, f"({{24}}){prompts[field]}\n<i>Отмена: /cancel</i>")
 
@@ -4384,7 +4398,7 @@ async def report_cmd(msg: Message):
     if not msg.from_user or msg.chat.type not in ("group", "supergroup"):
         await reply(msg, "({8})Команда работает только в группе.")
         return
-    target = msg.reply_to_message
+    target = real_reply(msg)
     if not target or not target.from_user:
         await reply(msg, "({8})Команда /report работает только ответом на сообщение нарушителя.")
         return
@@ -5007,7 +5021,7 @@ async def award_cmd(msg: Message):
     if not await mod_group(msg):
         return
     award = re.sub(r"(?i)^\s*наградить\s*", "", msg.text or "").strip()
-    target_msg = msg.reply_to_message
+    target_msg = real_reply(msg)
     if not target_msg or not target_msg.from_user or not award:
         await reply(msg, "({8})<b>Ошибка выдачи награды</b>\n<blockquote>Ответьте на сообщение участника и напишите:\n"
                          "<i>Наградить &lt;название награды&gt;</i></blockquote>")
@@ -8120,6 +8134,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.21.2", "Исправлено: /profile без ответа теперь показывает профиль того, кто написал команду (в чатах с темами подставлялся чужой). Канал обновлений: бот публикует все версии подряд и не останавливается на ошибке"),
     ("3.21.1", "Тест набора в администрацию: добавлены 35 вопросов (21 опрос и 14 развёрнутых). Красивое оформление постов в канале обновлений. Команда /resendupdates — выложить все обновления заново"),
     ("3.21.0", "Трейды: Dragon West и Dragon East — отдельные кнопки (в Permanent один Dragon), новый фрукт Meme-Meme (только обычные). Комментарий профиля до 400 символов с Premium Emoji. В уведомлениях о стоке у Dragon эмодзи Permanent Dragon. «О боте» показывает 10 последних обновлений, все обновления — в канале @UpdateDuoSup."),
     ("3.20.0", "Эмодзи фруктов/рас/трейдов вшиты в код; Dragon West и Dragon East отдельно (в Permanent — один Dragon); /stockacc — смена аккаунта Parse.bot; исправлена «О боте» (слишком длинное сообщение)."),
@@ -8190,19 +8205,33 @@ def update_post_html(version: str, text: str) -> str:
 
 
 async def send_update_post(version: str, text: str) -> None:
+    """Отправка поста: с Premium Emoji; если Telegram не принял — с обычными эмодзи; при флуд-лимите ждём."""
     body = update_post_html(version, text)
-    try:
-        await B().send_message(UPDATES_CHANNEL, R(body))
-    except Exception as exc:
-        if "chat not found" in str(exc).lower() or "forbidden" in str(exc).lower():
-            raise
-        # Premium Emoji в канале не приняты — отправляем с обычными эмодзи
-        plain = body.replace("({61})", "🤖").replace("({20})", "✅")
-        await B().send_message(UPDATES_CHANNEL, plain)
+    plain = body.replace("({61})", "🤖").replace("({20})", "✅")
+    last: Exception | None = None
+    for attempt in range(4):
+        for variant in (R(body), plain):
+            try:
+                await B().send_message(UPDATES_CHANNEL, variant, disable_web_page_preview=True)
+                return
+            except TelegramRetryAfter as exc:
+                await asyncio.sleep(exc.retry_after + 1)
+                last = exc
+                break  # повторим тот же вариант на следующем круге
+            except TelegramForbiddenError:
+                raise
+            except TelegramBadRequest as exc:
+                if "chat not found" in str(exc).lower():
+                    raise
+                last = exc  # пробуем следующий вариант (без Premium Emoji)
+        else:
+            break
+    if last:
+        raise last
 
 
 async def publish_changelog(force: bool = False) -> int:
-    """Публикует в канале версии, которых там ещё нет (старые → новые). force — выложить всё заново."""
+    """Публикует в канале ВСЕ версии, которых там ещё нет (старые → новые). Одна ошибка не останавливает остальные."""
     raw = "" if force else await get_config("changelog_posted")
     try:
         posted = set(json.loads(raw)) if raw else set()
@@ -8210,19 +8239,29 @@ async def publish_changelog(force: bool = False) -> int:
         posted = set()
     if force:
         await set_config("changelog_posted", "")
-    sent = 0
+    sent, failed = 0, []
     for v, t in reversed(CHANGELOG):
         if v in posted:
             continue
         try:
             await send_update_post(v, t)
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            if "chat not found" in str(exc).lower() or isinstance(exc, TelegramForbiddenError):
+                LOG.warning("канал обновлений недоступен (%s) — проверьте, что бот админ канала с правом писать", exc)
+                break
+            LOG.warning("канал обновлений: v%s не опубликована (%s)", v, exc)
+            failed.append(v)
+            continue
         except Exception as exc:
-            LOG.warning("канал обновлений: v%s не опубликована (%s) — проверьте права бота в канале", v, exc)
-            break  # остальные попробуем при следующем запуске, чтобы порядок не нарушился
+            LOG.warning("канал обновлений: v%s не опубликована (%s)", v, exc)
+            failed.append(v)
+            continue
         posted.add(v)
         sent += 1
         await set_config("changelog_posted", json.dumps(sorted(posted)))
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(3)  # не упираться в лимит Telegram на частоту сообщений в канале
+    if failed:
+        LOG.warning("канал обновлений: не опубликованы %s — повтор при следующем запуске", ", ".join(failed))
     return sent
 
 
