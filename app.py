@@ -26,7 +26,7 @@ import re
 import secrets
 import string
 import time as _time
-from collections import deque
+from collections import deque, Counter
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -52,7 +52,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.21.3"
+BOT_VERSION = "3.22.1"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -393,12 +393,44 @@ DRAGON_PHYS = [("dragon_west", "Dragon West"), ("dragon_east", "Dragon East")]
 DRAGON_PHYS_IDS = {k for k, _ in DRAGON_PHYS}
 # Для настройки эмодзи: все фрукты стока + два физических Dragon в конце
 EMOJI_FRUITS = FRUITS + DRAGON_PHYS
-# Эти эмодзи вшиты в код (DEFAULT_FRUIT_EMOJI / DEFAULT_PERM_EMOJI / DEFAULT_RACE_EMOJI) и в /addemoji не настраиваются
-EMOJI_BUILTIN_FRUITS = {"magnet", "dragon", "dragon_west", "dragon_east"}
-EMOJI_SETUP_FRUITS = [(k, n) for k, n in EMOJI_FRUITS if k not in EMOJI_BUILTIN_FRUITS]
 # Обычные (физические) фрукты в трейдах: вместо одного Dragon — West и East
 TRADE_PHYS_FRUITS = ([x for k, n in FRUITS for x in (DRAGON_PHYS if k == "dragon" else [(k, n)])]
                      + [("x111", "Meme-Meme")])  # Meme-Meme — только физический, в Permanent его нет
+TRADE_SKINS = [  # (id = имя файла картинки на GitHub без .png, название)
+    ("ArcsteelMagnet", "Arcsteel Magnet"),
+    ("AzuraBomb", "Azura Bomb"),
+    ("CelebrationBomb", "Celebration Bomb"),
+    ("DiamondEmerald", "Diamond Emerald"),
+    ("DiamondRoseQuartz", "Diamond Rose Quartz"),
+    ("DiamondRuby", "Diamond Ruby"),
+    ("DiamondTopaz", "Diamond Topaz"),
+    ("EagleGlacier", "Eagle Glacier"),
+    ("EagleMatrix", "Eagle Matrix"),
+    ("EagleParro", "Eagle Parro"),
+    ("EagleRequiem", "Eagle Requiem"),
+    ("EmberDracon", "Ember Dracon"),
+    ("GasHellfire", "Gas Hellfire"),
+    ("KitsuneEmpyrean", "Kitsune Empyrean"),
+    ("KitsuneEmpyreanGalaxy", "Kitsune Empyrean Galaxy"),
+    ("LightningGreen", "Lightning Green"),
+    ("LightningPurple", "Lightning Purple"),
+    ("LightningRed", "Lightning Red"),
+    ("LightningYellow", "Lightning Yellow"),
+    ("LimeBlade", "Lime Blade"),
+    ("NuclearBomb", "Nuclear Bomb"),
+    ("PainCelestial", "Pain Celestial"),
+    ("PainFrustration", "Pain Frustration"),
+    ("PainSadness", "Pain Sadness"),
+    ("PainSuperSpirit", "Pain Super Spirit"),
+    ("PainTorment", "Pain Torment"),
+    ("PortalDivine", "Portal Divine"),
+    ("RunicFiend", "Runic Fiend"),
+    ("ScarletGhost", "Scarlet Ghost"),
+    ("StarlightGravity", "Starlight Gravity"),
+    ("TermiteBomb", "Termite Bomb"),
+    ("TigerWerewolf", "Tiger Werewolf"),
+    ("YetiFiend", "Yeti Fiend"),
+]
 TRADE_HIDDEN_CATALOG = {"dragon", "dragon west", "dragon east", "meme-meme"}  # вшиты в код, из каталога скрываем
 
 # Фрукты для рейдов: ключ -> (название, {навык: цена}). Порядок навыков = порядок кнопок.
@@ -2218,7 +2250,6 @@ class EmojiSt(StatesGroup):
     race = State()
     trade = State()
     perm = State()
-    skin = State()
 
 
 class RulesSt(StatesGroup):
@@ -3335,8 +3366,7 @@ async def menu_trade(cb: CallbackQuery, state: FSMContext):
 
 
 # ---- каталог предметов трейда ----
-TRADE_MAX_ITEMS = 4  # всего штук в одном списке (одинаковые фрукты считаются по штукам)
-TRADE_MULTI_CATS = {"fn", "fp"}  # фрукты можно брать по несколько одинаковых
+TRADE_MAX_ITEMS = 4
 TRADE_COOLDOWN = 5 * 60  # один трейд раз в 5 минут
 TRADE_DAILY_LIMIT = 5  # трейдов в сутки на одного участника
 TRADE_MAX_RATIO = 10  # «хочу взамен» не дороже «отдаю» в 10 раз (по ценам фруктов)
@@ -3402,6 +3432,9 @@ def trade_cat_list(catalog: dict, cat: str) -> list[tuple[str, str]]:
         extra = [(x["id"], x["name"]) for x in catalog["fr"]
                  if x["name"].strip().lower() not in TRADE_HIDDEN_CATALOG]
         return list(base) + extra
+    if cat == "sk":  # скины фруктов вшиты в код; добавленные вручную в /redacttrade — после них
+        have = {n.lower() for _, n in TRADE_SKINS}
+        return list(TRADE_SKINS) + [(x["id"], x["name"]) for x in catalog["sk"] if x["name"].lower() not in have]
     return [(x["id"], x["name"]) for x in catalog[cat]]
 
 
@@ -3444,25 +3477,14 @@ def trade_fruit_kb(prefix: str, back_cb: str) -> InlineKeyboardMarkup:
                btn("Permanent", f"{prefix}_fp", icon_id=TRADE_FR_ICONS["fp"])], [btn("Назад", back_cb)])
 
 
-def trade_counts(sel: list[str]) -> dict[str, int]:
-    """ref -> сколько штук выбрано (порядок первого выбора сохраняется)."""
-    out: dict[str, int] = {}
-    for ref in sel:
-        out[ref] = out.get(ref, 0) + 1
-    return out
-
-
-def trade_qty_label(cat: str, name: str, qty: int = 1) -> str:
-    return trade_label(cat, name) + (f" ×{qty}" if qty > 1 else "")
-
-
 def trade_selected_html(sel: list[str], catalog: dict, icons: dict) -> str:
     lines = []
-    for ref, qty in trade_counts(sel).items():
+    for ref, n in Counter(sel).items():  # одинаковые предметы показываем один раз с ×N
         cat, item_id = ref.split(":", 1)
         name = trade_item_name(catalog, cat, item_id)
         if name:
-            lines.append(f"{custom_emoji_html(trade_icon(icons, cat, item_id), '▫️')} {esc(trade_qty_label(cat, name, qty))}")
+            mult = f" ×{n}" if n > 1 else ""
+            lines.append(f"{custom_emoji_html(trade_icon(icons, cat, item_id), '▫️')} {esc(trade_label(cat, name))}{mult}")
     return "\n".join(lines)
 
 
@@ -3497,20 +3519,12 @@ def trade_main_markup(data: dict) -> InlineKeyboardMarkup:
 
 
 def trade_items_markup(cat: str, catalog: dict, icons: dict, sel: list[str]) -> InlineKeyboardMarkup:
-    counts = trade_counts(sel)
-    multi = cat in TRADE_MULTI_CATS
-    items = trade_cat_list(catalog, cat)
     buttons = []
-    for item_id, name in items:
-        n = counts.get(f"{cat}:{item_id}", 0)
+    for item_id, name in trade_cat_list(catalog, cat):
+        n = sel.count(f"{cat}:{item_id}")
         buttons.append(btn(f"{name} ×{n}" if n > 1 else name, f"tri_{cat}_{item_id}",
                            icon_id=trade_icon(icons, cat, item_id), style="success" if n else None))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-    if multi:  # убрать одну штуку выбранного фрукта
-        for item_id, name in items:
-            n = counts.get(f"{cat}:{item_id}", 0)
-            if n:
-                rows.append([btn(f"➖ {name} ×{n}" if n > 1 else f"➖ {name}", f"trd_{cat}_{item_id}")])
     rows.append([btn("Назад", "trc_fr" if cat in ("fn", "fp") else "trm")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -3518,8 +3532,8 @@ def trade_items_markup(cat: str, catalog: dict, icons: dict, sel: list[str]) -> 
 def trade_items_text(cat: str, sel: list[str], empty: bool, stage: str = "give") -> str:
     title = {"gp": "Gamepass", "sk": "Skins", "ot": "Прочее", "fn": "Fruit • Обычные", "fp": "Fruit • Permanent"}[cat]
     text = (f"<b>{title}</b> • {STAGE_TITLE[stage].lower()}\nВыбрано: <b>{len(sel)}/{TRADE_MAX_ITEMS}</b>. "
-            + ("Нажмите на фрукт, чтобы добавить штуку (можно несколько одинаковых), «➖» — убрать одну."
-               if cat in TRADE_MULTI_CATS else "Нажмите на предмет, чтобы выбрать или убрать."))
+            "Нажмите на предмет, чтобы выбрать. Нажмите ещё раз — добавится ещё один такой же (×2, ×3…), "
+            "а когда места не останется, предмет уберётся.")
     if empty:
         text += "\n<blockquote>Здесь пока пусто. Администрация добавит предметы позже.</blockquote>"
     return text
@@ -3619,33 +3633,14 @@ async def trade_toggle(cb: CallbackQuery, state: FSMContext):
         await cb.answer("Такого предмета больше нет.", show_alert=True)
         return
     ref = f"{cat}:{item_id}"
-    if ref in sel and cat not in TRADE_MULTI_CATS:  # не фрукт: повторное нажатие убирает
-        sel.remove(ref)
+    if sel.count(ref) and len(sel) >= TRADE_MAX_ITEMS:
+        sel[:] = [x for x in sel if x != ref]  # мест нет — убираем все копии предмета
     elif len(sel) >= TRADE_MAX_ITEMS:
-        await cb.answer(f"Максимум {TRADE_MAX_ITEMS} шт. в этом списке.", show_alert=True)
+        await cb.answer(f"Максимум {TRADE_MAX_ITEMS} предмета в этом списке.", show_alert=True)
         return
     else:
-        sel.append(ref)  # фрукт: каждое нажатие добавляет ещё одну штуку
+        sel.append(ref)  # первый клик — выбрать, следующие — добавить ещё один такой же
     await state.update_data(**{"tr_give" if data["tr_stage"] == "give" else "tr_want": sel})
-    await edit(cb, trade_items_text(cat, sel, False, data["tr_stage"]),
-               trade_items_markup(cat, catalog, await trade_icons(), sel))
-
-
-@dp.callback_query(F.data.startswith("trd_"))
-async def trade_minus(cb: CallbackQuery, state: FSMContext):
-    """«➖» — убрать одну штуку фрукта."""
-    data = await trade_ctx(cb, state)
-    if data is None:
-        return
-    sel = trade_sel_of(data)
-    _, cat, item_id = cb.data.split("_", 2)
-    ref = f"{cat}:{item_id}"
-    if cat not in TRADE_MULTI_CATS or ref not in sel:
-        await cb.answer()
-        return
-    sel.remove(ref)  # удаляет одно вхождение
-    await state.update_data(**{"tr_give" if data["tr_stage"] == "give" else "tr_want": sel})
-    catalog = await trade_catalog()
     await edit(cb, trade_items_text(cat, sel, False, data["tr_stage"]),
                trade_items_markup(cat, catalog, await trade_icons(), sel))
 
@@ -3654,10 +3649,10 @@ def trade_ratio_ok(give: list[dict], want: list[dict]) -> tuple[bool, str]:
     """Защита от спама: за обычные фрукты «хочу взамен» не дороже «отдаю» в TRADE_MAX_RATIO раз.
     Проверяем только если у всех предметов обеих сторон есть цена (фрукты); скины и геймпассы без цены пропускаем."""
     def total(items: list[dict]) -> int | None:
-        vals = [(PRICES.get(i["id"]), int(i.get("q", 1))) for i in items if i["c"] in ("fn", "fp")]
-        if len(vals) != len(items) or any(v is None for v, _q in vals):
+        vals = [PRICES.get(i["id"]) for i in items if i["c"] in ("fn", "fp")]
+        if len(vals) != len(items) or any(v is None for v in vals):
             return None
-        return sum(v * q for v, q in vals)
+        return sum(vals)
     g, w = total(give), total(want)
     if g is None or w is None:
         return True, ""
@@ -3668,14 +3663,11 @@ def trade_ratio_ok(give: list[dict], want: list[dict]) -> tuple[bool, str]:
 
 def trade_items_payload(refs: list[str], catalog: dict) -> list[dict]:
     items = []
-    for ref, qty in trade_counts(refs).items():
+    for ref in refs:
         cat, item_id = ref.split(":", 1)
         name = trade_item_name(catalog, cat, item_id)
         if name:
-            item = {"c": cat, "id": item_id, "n": name}
-            if qty > 1:
-                item["q"] = qty  # несколько одинаковых фруктов
-            items.append(item)
+            items.append({"c": cat, "id": item_id, "n": name})
     return items
 
 
@@ -3731,8 +3723,10 @@ async def trade_photo_upload(give: list, want: list) -> tuple[str, int] | None:
         from aiogram.types import BufferedInputFile
         from trade_image import compose_trade_image
         season = await get_config("trade_season") or None
-        def _img_items(items: list) -> list:  # генератор картинки знает только «dragon»
-            return [{**i, "id": "dragon"} if i.get("id") in DRAGON_PHYS_IDS else i for i in items]
+        def _img_items(items: list) -> list:
+            # Dragon West/East: генератор ищет файл «Dragon» + вариант (West/East) + B (обычный), запасной — DragonB
+            return [{**i, "id": "dragon", "n": "Dragon", "v": "West" if i["id"] == "dragon_west" else "East"}
+                    if i.get("id") in DRAGON_PHYS_IDS else i for i in items]
         data = await asyncio.to_thread(compose_trade_image, _img_items(give), _img_items(want), None, season)
         chat_id = await main_chat()
         msg = await B().send_photo(chat_id, BufferedInputFile(data, filename="trade.png"),
@@ -3771,8 +3765,8 @@ async def trade_publish(cb: CallbackQuery, state: FSMContext):
         if not give or not want:
             await cb.answer("Выбранные предметы больше недоступны.", show_alert=True)
             return
-        g_text = ", ".join(trade_qty_label(i["c"], i["n"], i.get("q", 1)) for i in give)
-        w_text = ", ".join(trade_qty_label(i["c"], i["n"], i.get("q", 1)) for i in want)
+        g_text = ", ".join(trade_label(i["c"], i["n"]) for i in give)
+        w_text = ", ".join(trade_label(i["c"], i["n"]) for i in want)
         ru = " ".join(RAID_FRUITS[i["id"]][0] for i in give + want if i["c"] in ("fn", "fp") and i["id"] in RAID_FRUITS)
         payload = {"give": give, "want": want, "text": f"{g_text} → {w_text}", "search": f"{g_text} {w_text} {ru}"}
         upload = await trade_photo_upload(give, want)
@@ -3856,8 +3850,9 @@ async def trade_card(row) -> tuple[str, InlineKeyboardMarkup | None]:
         catalog, icons = await trade_catalog(), await trade_icons()
 
         def lines(items: list) -> str:
-            return "\n".join(f"{custom_emoji_html(trade_icon(icons, i['c'], i['id']), '▫️')} {esc(trade_qty_label(i['c'], i['n'], i.get('q', 1)))}"
-                             for i in items)
+            groups = Counter((i["c"], i["id"], i["n"]) for i in items)
+            return "\n".join(f"{custom_emoji_html(trade_icon(icons, c, iid), '▫️')} {esc(trade_label(c, n))}"
+                             f"{f' ×{k}' if k > 1 else ''}" for (c, iid, n), k in groups.items())
         text += f"\n<b>Отдаёт:</b>\n{lines(p['give'])}\n<b>Хочет взамен:</b>\n{lines(p.get('want', []))}"
     else:
         text += f"\n{esc(p.get('text'))}"
@@ -4037,7 +4032,7 @@ async def tre_item(cb: CallbackQuery):
     catalog = await trade_catalog()
     name = next((x["name"] for x in catalog.get(cat, []) if x["id"] == item_id), None)
     if name is None:
-        await cb.answer("Базовые фрукты удалить нельзя." if cat == "fr" else "Предмет уже удалён.", show_alert=True)
+        await cb.answer("Базовые фрукты и скины удалить нельзя." if cat in ("fr", "sk") else "Предмет уже удалён.", show_alert=True)
         return
     back = "tre_fn" if cat == "fr" else f"tre_{cat}"
     await edit(cb, f"({{14}})Удалить <b>{esc(name)}</b>?",
@@ -4773,7 +4768,7 @@ def emoji_center_markup() -> InlineKeyboardMarkup:
     return kb(
         [InlineKeyboardButton(text="🍎 Эмодзи фруктов", callback_data="em_fruits")],
         [InlineKeyboardButton(text="🔲 Эмодзи Permanent фруктов", callback_data="em_perm")],
-        [InlineKeyboardButton(text="🎭 Эмодзи скинов фруктов", callback_data="em_skins")],
+        [InlineKeyboardButton(text="🎨 Эмодзи скинов фруктов", callback_data="em_skins")],
         [InlineKeyboardButton(text="🔁 Эмодзи трейдов (gamepass/прочее)", callback_data="em_trade")],
         [InlineKeyboardButton(text="📋 Установленные эмодзи", callback_data="em_list")],
         [InlineKeyboardButton(text="🗑 Сбросить эмодзи фруктов", callback_data="em_reset")],
@@ -4808,19 +4803,45 @@ async def em_close(cb: CallbackQuery, state: FSMContext):
         await cb.message.delete()
 
 
-@dp.callback_query(F.data == "em_fruits")
+@dp.callback_query(F.data.in_({"em_fruits", "em_races"}))
 async def em_start(cb: CallbackQuery, state: FSMContext):
     if not creator_cb(cb):
         await cb.answer("⛔ Только создатель.", show_alert=True)
         return
-    await state.set_state(EmojiSt.fruit)
+    fruits = cb.data == "em_fruits"
+    await state.set_state(EmojiSt.fruit if fruits else EmojiSt.race)
     await state.update_data(idx=0)
-    await cb.message.edit_text(emoji_prompt(True, 0))
+    await cb.message.edit_text(emoji_prompt(fruits, 0))
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "em_dragon")
+async def em_dragon(cb: CallbackQuery, state: FSMContext):
+    """Два физических Dragon (West, East) — идут в конце списка EMOJI_FRUITS."""
+    if not creator_cb(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    idx = next(i for i, (k, _) in enumerate(EMOJI_FRUITS) if k == "dragon_west")
+    await state.set_state(EmojiSt.fruit)
+    await state.update_data(idx=idx)
+    await cb.message.edit_text(emoji_prompt(True, idx))
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "em_magnet")
+async def em_magnet(cb: CallbackQuery, state: FSMContext):
+    if not creator_cb(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    idx = next(i for i, (k, _) in enumerate(FRUITS) if k == "magnet")
+    await state.set_state(EmojiSt.fruit)
+    await state.update_data(idx=idx, only=True)
+    await cb.message.edit_text(emoji_prompt(True, idx))
     await cb.answer()
 
 
 def emoji_prompt(fruits: bool, idx: int) -> str:
-    items = EMOJI_SETUP_FRUITS if fruits else RACES
+    items = EMOJI_FRUITS if fruits else RACES
     key, name = items[idx]
     head = "🍎 <b>Настройка Premium Emoji фруктов</b>" if fruits else "🧬 <b>Настройка Premium Emoji рас</b>"
     src = "\nОтправьте одним сообщением <b>Premium Emoji</b> из набора BloxFruitEmodge." if fruits else \
@@ -4832,7 +4853,7 @@ def emoji_prompt(fruits: bool, idx: int) -> str:
 async def emoji_save(msg: Message, state: FSMContext, fruits: bool) -> None:
     if msg.from_user.id != CREATOR_ID:
         return
-    items = EMOJI_SETUP_FRUITS if fruits else RACES
+    items = EMOJI_FRUITS if fruits else RACES
     data = await state.get_data()
     idx = data.get("idx", 0)
     only = bool(data.get("only"))
@@ -4864,23 +4885,28 @@ async def em_fruit_msg(msg: Message, state: FSMContext):
     await emoji_save(msg, state, True)
 
 
-async def emoji_trade_items() -> list[tuple[str, str, str]]:
-    """Предметы трейда, у которых нет базовых эмодзи фруктов: (id, название, категория)."""
+@dp.message(EmojiSt.race, F.text)
+async def em_race_msg(msg: Message, state: FSMContext):
+    if (msg.text or "").startswith("/") and msg.text.strip() != "-":
+        return
+    await emoji_save(msg, state, False)
+
+
+async def emoji_trade_items(only: str | None = None) -> list[tuple[str, str, str]]:
+    """Предметы трейда: (id, название, категория). only="sk" — только скины; иначе всё, кроме скинов."""
     catalog = await trade_catalog()
+    if only == "sk":
+        return [(i, n, "Skin") for i, n in trade_cat_list(catalog, "sk")]
     out = []
-    for cat, title in (("gp", "Gamepass"), ("ot", "Прочее"), ("fr", "Fruit")):  # скины — отдельный раздел
-        out += [(x["id"], x["name"], title) for x in catalog[cat]]
+    for cat, title in (("gp", "Gamepass"), ("ot", "Прочее"), ("fr", "Fruit")):
+        out += [(x["id"], x["name"], title) for x in catalog[cat]
+                if not (cat == "fr" and x["name"].strip().lower() in TRADE_HIDDEN_CATALOG)]
     return out
-
-
-async def emoji_skin_items() -> list[tuple[str, str]]:
-    """Скины фруктов из каталога трейдов (/redacttrade → Skins): (id, название)."""
-    return [(x["id"], x["name"]) for x in (await trade_catalog())["sk"]]
 
 
 async def emoji_perm_items() -> list[tuple[str, str]]:
     """Все фрукты трейда (базовые + добавленные в /redacttrade) для эмодзи Permanent."""
-    return [(k, n) for k, n in trade_cat_list(await trade_catalog(), "fp") if k not in EMOJI_BUILTIN_FRUITS]
+    return trade_cat_list(await trade_catalog(), "fp")
 
 
 def emoji_perm_prompt(items: list, idx: int) -> str:
@@ -4902,6 +4928,19 @@ async def em_perm_start(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@dp.callback_query(F.data == "em_perm_dragon")
+async def em_perm_dragon(cb: CallbackQuery, state: FSMContext):
+    if not creator_cb(cb):
+        await cb.answer("⛔ Только создатель.", show_alert=True)
+        return
+    items = await emoji_perm_items()
+    idx = next(i for i, (k, _) in enumerate(items) if k == "dragon")
+    await state.set_state(EmojiSt.perm)
+    await state.update_data(idx=idx, only=True)
+    await cb.message.edit_text(emoji_perm_prompt(items, idx))
+    await cb.answer()
+
+
 @dp.message(EmojiSt.perm, F.text)
 async def em_perm_msg(msg: Message, state: FSMContext):
     if msg.from_user.id != CREATOR_ID:
@@ -4920,6 +4959,10 @@ async def em_perm_msg(msg: Message, state: FSMContext):
             await reply(msg, "({8})Это не Premium Emoji. Отправьте именно премиум-эмодзи или <code>-</code> чтобы пропустить.")
             return
         await set_config(f"custom_emoji_perm_{key}", emoji_id)
+    if (await state.get_data()).get("only"):  # режим «только Permanent Dragon»
+        await state.clear()
+        await reply(msg, "({20})Premium Emoji для <b>Dragon (Permanent)</b> сохранён.", emoji_center_markup())
+        return
     idx += 1
     if idx >= len(items):
         await state.clear()
@@ -4929,17 +4972,18 @@ async def em_perm_msg(msg: Message, state: FSMContext):
     await msg.answer(emoji_perm_prompt(items, idx))
 
 
-@dp.callback_query(F.data == "em_trade")
+@dp.callback_query(F.data.in_({"em_trade", "em_skins"}))
 async def em_trade_start(cb: CallbackQuery, state: FSMContext):
     if not creator_cb(cb):
         await cb.answer("⛔ Только создатель.", show_alert=True)
         return
-    items = await emoji_trade_items()
+    only = "sk" if cb.data == "em_skins" else None
+    items = await emoji_trade_items(only)
     if not items:
         await cb.answer("Сначала добавьте предметы в /redacttrade.", show_alert=True)
         return
     await state.set_state(EmojiSt.trade)
-    await state.update_data(idx=0)
+    await state.update_data(idx=0, only=only)
     await cb.message.edit_text(emoji_trade_prompt(items, 0))
     await cb.answer()
 
@@ -4957,8 +5001,9 @@ async def em_trade_msg(msg: Message, state: FSMContext):
         return
     if (msg.text or "").startswith("/") and msg.text.strip() != "-":
         return
-    items = await emoji_trade_items()
-    idx = (await state.get_data()).get("idx", 0)
+    st = await state.get_data()
+    items = await emoji_trade_items(st.get("only"))
+    idx = st.get("idx", 0)
     if idx >= len(items):
         await state.clear()
         return
@@ -4978,55 +5023,6 @@ async def em_trade_msg(msg: Message, state: FSMContext):
     await msg.answer(emoji_trade_prompt(items, idx))
 
 
-def emoji_skin_prompt(items: list, idx: int) -> str:
-    _k, name = items[idx]
-    return (f"🎭 <b>Premium Emoji скинов фруктов</b>\n{SEP}\nЭмодзи <b>{idx + 1}/{len(items)}</b>\n"
-            f"Скин: <b>{esc(name)}</b>\nОтправьте одним сообщением <b>Premium Emoji</b> — он будет на кнопке скина и в трейдах.\n"
-            "Пропустить: отправьте <code>-</code>\nДля отмены: /cancel")
-
-
-@dp.callback_query(F.data == "em_skins")
-async def em_skins_start(cb: CallbackQuery, state: FSMContext):
-    if not creator_cb(cb):
-        await cb.answer("⛔ Только создатель.", show_alert=True)
-        return
-    items = await emoji_skin_items()
-    if not items:
-        await cb.answer("Сначала добавьте скины в /redacttrade → Skins.", show_alert=True)
-        return
-    await state.set_state(EmojiSt.skin)
-    await state.update_data(idx=0)
-    await cb.message.edit_text(emoji_skin_prompt(items, 0))
-    await cb.answer()
-
-
-@dp.message(EmojiSt.skin, F.text)
-async def em_skin_msg(msg: Message, state: FSMContext):
-    if msg.from_user.id != CREATOR_ID:
-        return
-    if (msg.text or "").startswith("/") and msg.text.strip() != "-":
-        return
-    items = await emoji_skin_items()
-    idx = (await state.get_data()).get("idx", 0)
-    if idx >= len(items):
-        await state.clear()
-        return
-    skin_id, _name = items[idx]
-    if (msg.text or "").strip() != "-":
-        emoji_id = custom_emoji_id_of(msg)
-        if not emoji_id:
-            await reply(msg, "({8})Это не Premium Emoji. Отправьте именно премиум-эмодзи или <code>-</code> чтобы пропустить.")
-            return
-        await set_config(f"custom_emoji_trade_{skin_id}", emoji_id)  # тот же ключ, что у предметов трейда
-    idx += 1
-    if idx >= len(items):
-        await state.clear()
-        await reply(msg, f"({{20}})Готово: пройдено скинов — {len(items)}.", emoji_center_markup())
-        return
-    await state.update_data(idx=idx)
-    await msg.answer(emoji_skin_prompt(items, idx))
-
-
 @dp.callback_query(F.data == "em_list")
 async def em_list(cb: CallbackQuery):
     if not creator_cb(cb):
@@ -5042,10 +5038,8 @@ async def em_list(cb: CallbackQuery):
     t_icons = await trade_icons()
     perm_set = [n for k, n in await emoji_perm_items() if ("perm_" + k) in t_icons]
     lines.append(f"\n<b>🔲 Permanent фруктов:</b> {len(perm_set)}/{len(await emoji_perm_items())}")
-    skins = await emoji_skin_items()
-    if skins:
-        lines.append("\n<b>🎭 Скины фруктов:</b>")
-        lines += [f"{custom_emoji_html(t_icons.get(i), '▫️')} {esc(n)}" for i, n in skins]
+    sk_items = await emoji_trade_items("sk")
+    lines.append(f"\n<b>🎨 Скины фруктов:</b> {sum(1 for i, _n, _t in sk_items if i in t_icons)}/{len(sk_items)}")
     t_items = await emoji_trade_items()
     if t_items:
         lines.append("\n<b>🔁 Трейды:</b>")
@@ -8198,6 +8192,8 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.22.1", "Картинка трейда: Dragon West и Dragon East подбирают свои файлы; названия скинов совпадают с именами файлов, поэтому все скины отображаются на фото"),
+    ("3.22.0", "Трейды: Skins фруктов (33 скина) вшиты в код с настройкой эмодзи в /addemoji. Можно выбирать несколько одинаковых фруктов и предметов (×2, ×3, ×4). Из /addemoji убраны разделы рас, Magnet и Dragon — они уже вшиты в код"),
     ("3.21.3", "/profile: надёжнее определяется, на кого ответили (служебное сообщение темы больше не считается ответом)"),
     ("3.21.2", "Исправлено: /profile без ответа теперь показывает профиль того, кто написал команду (в чатах с темами подставлялся чужой). Канал обновлений: бот публикует все версии подряд и не останавливается на ошибке"),
     ("3.21.1", "Тест набора в администрацию: добавлены 35 вопросов (21 опрос и 14 развёрнутых). Красивое оформление постов в канале обновлений. Команда /resendupdates — выложить все обновления заново"),
@@ -8206,7 +8202,6 @@ CHANGELOG = [
     ("3.19.8", "Исправлен запуск на чистой базе: таблица questions создаётся до изменения её колонок."),
     ("3.19.7", "Результаты теста в администрацию («Принять» / «Отказать») приходят создателю в личку, а не в админ-чат."),
     ("3.19.6", "Тема «Купля-продажа» получила те же базовые функции, что и «Чат» (команды варнов/банов и модерации)."),
-    ("3.20.0", "Трейды: можно выбрать несколько одинаковых фруктов («➖» убирает одну штуку), на картинке плашка «×N». /addemoji: Magnet, Dragon и расы убраны (вшиты в код), добавлен раздел «Эмодзи скинов фруктов». Картинки скинов находятся и при другом порядке слов или опечатке в названии."),
     ("3.19.5", "Группа HuBBlox: каждый новый сток — новое сообщение; прошлый того же вида меняется на «Истёк» (фон и подпись). Трейды: ограничение соотношения цен и лимит в сутки."),
     ("3.19.4", "Кнопки стока: Обновить/Уведомления, Mirage ↔ Normal, История/Назад; Normal без цвета."),
     ("3.19.3", "Группа HuBBlox: если фото не собралось или подпись слишком длинная — отправляется текст, ошибка пишется в лог; публикация стока больше не откатывается из-за картинки."),
@@ -8826,7 +8821,7 @@ async def app_blocks(app) -> list:
 
         def trade_list(items: list) -> dict:
             return {"type": "list", "items": [{"blocks": [{"type": "paragraph", "text": [
-                rt_icon(trade_icon(icons, it["c"], it["id"]), "▫️"), " ", trade_qty_label(it["c"], it["n"], it.get("q", 1))]}]} for it in items]}
+                rt_icon(trade_icon(icons, it["c"], it["id"]), "▫️"), " ", trade_label(it["c"], it["n"])]}]} for it in items]}
 
         if "give" in p:
             blocks.append({"type": "paragraph", "text": {"type": "bold", "text": "Отдаёт:"}})
