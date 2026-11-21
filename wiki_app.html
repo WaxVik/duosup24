@@ -5,16 +5,16 @@
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root{color-scheme:dark;--bg:#000;--card:#1c1c1e;--label:#f5f5f7;--l2:#a1a1a6;--l3:#86868b;--fill:#7878805c;--fill3:#7676803d;--sep:#54545896;--accent:#0a84ff;
---gfill:rgb(44 44 48/.5);--ghi:rgb(255 255 255/.22);--glo:rgb(0 0 0/.3);--gout:rgb(0 0 0/.5);--gsh:rgb(0 0 0/.45);--rim1:rgb(255 255 255/.32);--rim2:rgb(255 255 255/.1);
+--gfill:rgb(255 255 255/.07);--ghi:rgb(255 255 255/.5);--glo:rgb(0 0 0/.3);--gout:rgb(0 0 0/.5);--gsh:rgb(0 0 0/.45);--rim1:rgb(255 255 255/.75);--rim2:rgb(255 255 255/.12);
 --spring:linear(0,.0345,.1146,.2153,.3212,.4233,.517,.5999,.6716,.7326,.7836,.8258,.8605,.8887,.9116,.93,.9447,.9564,.9658,.9732,.979,.9836,.9872,.99,.9923,.994,.9953,.9964,.9972,.9978,.9983,.9987,1)}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{margin:0;background:var(--bg);color:var(--label);font:17px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,system-ui,sans-serif;letter-spacing:-.022em;padding-top:env(safe-area-inset-top)}
 /* ФУНКЦИОНАЛЬНЫЙ СЛОЙ: Liquid Glass только у панелей и кнопок */
-.glass{position:fixed;z-index:20;isolation:isolate;background:var(--gfill);-webkit-backdrop-filter:blur(16px) saturate(180%);backdrop-filter:blur(16px) saturate(180%);
+.glass{position:fixed;z-index:20;isolation:isolate;background:var(--gfill);-webkit-backdrop-filter:blur(22px) saturate(190%) brightness(1.06);backdrop-filter:blur(22px) saturate(190%) brightness(1.06);
 box-shadow:inset 0 1px .5px var(--ghi),inset 0 -.5px .5px var(--glo),0 0 0 .5px var(--gout),0 8px 28px var(--gsh),0 1px 3px #0000004d}
 .glass::after{content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;pointer-events:none;background:linear-gradient(135deg,var(--rim1),transparent 38%,transparent 62%,var(--rim2));
 -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude}
-.gbtn{position:relative;overflow:hidden;border:0;color:var(--label);font:inherit;font-weight:600;min-height:44px;padding:0 20px;border-radius:999px;background:var(--gfill);-webkit-backdrop-filter:blur(16px) saturate(180%);backdrop-filter:blur(16px) saturate(180%);
+.gbtn{position:relative;overflow:hidden;border:0;color:var(--label);font:inherit;font-weight:600;min-height:44px;padding:0 20px;border-radius:999px;background:var(--gfill);-webkit-backdrop-filter:blur(22px) saturate(190%) brightness(1.06);backdrop-filter:blur(22px) saturate(190%) brightness(1.06);
 box-shadow:inset 0 1px .5px var(--ghi),0 0 0 .5px var(--gout),0 6px 20px var(--gsh);transition:transform .49s var(--spring)}
 .gbtn::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:0;background:radial-gradient(circle at var(--px,50%) var(--py,50%),rgb(255 255 255/.45),transparent 65%);transition:opacity .24s}
 .gbtn:active{transform:scale(1.04)}.gbtn:active::before{opacity:1}
@@ -49,6 +49,24 @@ h1{margin:6px 20px 14px;font-size:34px;line-height:1.1;font-weight:700;letter-sp
 input.f,textarea.f{width:100%;padding:12px 16px;border:0;border-radius:14px;background:var(--card);color:var(--label);font:inherit;outline:0}textarea.f{min-height:96px;resize:vertical}input.f:focus,textarea.f:focus{box-shadow:0 0 0 2px var(--accent)}
 .hide{display:none!important}.empty{text-align:center;color:var(--l2);padding:48px 20px}.sub{color:var(--l2);font-size:13px}
 @keyframes mat{from{opacity:0;transform:scale(.97);filter:blur(6px)}}.in{animation:mat .5s var(--spring)}
+
+/* ---------- анимации: пружины Apple (linear() из токенов) ---------- */
+@keyframes rise{from{opacity:0;transform:translateY(18px) scale(.98)}to{opacity:1;transform:none}}
+@keyframes glassIn{from{opacity:0;transform:translateY(40px) scale(.94);filter:blur(8px)}to{opacity:1;transform:none;filter:none}}
+@keyframes swapIn{from{opacity:0;transform:scale(.96) translateX(24px)}to{opacity:1;transform:none}}
+@keyframes swapBack{from{opacity:0;transform:scale(.96) translateX(-24px)}to{opacity:1;transform:none}}
+@keyframes pop{0%{transform:scale(.9)}60%{transform:scale(1.04)}100%{transform:scale(1)}}
+#home .row{animation:rise .6s var(--spring) both;animation-delay:calc(var(--i,0) * 35ms)}
+.glass{animation:glassIn .7s var(--spring) both}
+.sec,.hero,.head{animation:rise .6s var(--spring) both}.sec{animation-delay:calc(var(--i,0) * 60ms + 80ms)}
+.swap-f{animation:swapIn .55s var(--spring) both}.swap-b{animation:swapBack .55s var(--spring) both}
+.chip{transition:background .35s var(--spring),color .35s,transform .49s var(--spring)}.chip:active{transform:scale(.92)}
+.chip.on{animation:pop .45s var(--spring)}
+.gbtn{transition:transform .49s var(--spring),box-shadow .4s}.gbtn:active{transform:scale(.94)}
+.row{transition:background .25s,transform .49s var(--spring)}.row:active{transform:scale(.985)}
+.thumbs>div{transition:opacity .3s,transform .49s var(--spring),box-shadow .3s}
+.srch{transition:box-shadow .3s,background .3s}.srch:focus{background:rgb(255 255 255/.12);box-shadow:0 0 0 1px rgb(255 255 255/.35)}
+.hero img,.hero video{transition:opacity .4s var(--spring)}
 @media (prefers-reduced-transparency:reduce){.glass,.gbtn{background:#2c2c2e;-webkit-backdrop-filter:none;backdrop-filter:none}.edge{-webkit-backdrop-filter:none;backdrop-filter:none}}
 @media (prefers-contrast:more){.glass,.gbtn{background:#2c2c2e;-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:0 0 0 1px #fff}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
@@ -75,32 +93,32 @@ function clean(html){const d=new DOMParser().parseFromString('<div>'+(html||'').
   w(c)})})(d);return d.innerHTML.replace(/\n/g,'<br>')}
 const norm=s=>(s||'').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}\s]/gu,' ').replace(/\s+/g,' ').trim();
 function amb(){}
-function show(v){['home','view','form'].forEach(x=>$(x).classList.toggle('hide',x!=v));window.scrollTo(0,0);if(v!='home')$(v).classList.add('in');v=='home'?tg.BackButton.hide():tg.BackButton.show()}
-tg.BackButton.onClick(()=>{tg.MainButton.hide();if(!$('form').classList.contains('hide')&&OPEN)openEntry(OPEN);else{LE=false;show('home')}});
+let CUR='home';function show(v,back){['home','view','form'].forEach(x=>$(x).classList.toggle('hide',x!=v));window.scrollTo(0,0);if(v!=CUR){const el=$(v);el.classList.remove('swap-f','swap-b','in');void el.offsetWidth;el.classList.add(back?'swap-b':'swap-f')}CUR=v;v=='home'?tg.BackButton.hide():tg.BackButton.show()}
+tg.BackButton.onClick(()=>{tg.MainButton.hide();if(!$('form').classList.contains('hide')&&OPEN)openEntry(OPEN,1);else{LE=false;show('home',1)}});
 function renderList(){const q=norm($('q').value);const cats=['Все',...new Set(DATA.items.map(i=>i.c))];
  $('chips').innerHTML=cats.map(c=>`<div class="chip ${c==CAT?'on':''}" data-c="${esc(c)}">${esc(c)}</div>`).join('');
  const it=DATA.items.filter(i=>(CAT=='Все'||i.c==CAT)&&(!q||norm(i.t).includes(q)||i.a.some(a=>norm(a).includes(q))));
- $('list').innerHTML=it.length?'<div class="grp">'+it.map(i=>`<div class="row" data-id="${i.id}">${LAY.listphoto?`<div class="th">${i.p?`<img loading="lazy" src="${mu(i.p)}">`:'✦'}</div>`:''}<div class="rt"><b>${esc(i.t)}</b><small>${esc(i.c)}</small></div></div>`).join('')+'</div>':'<div class="empty">Ничего не найдено</div>'}
+ $('list').innerHTML=it.length?'<div class="grp">'+it.map((i,n)=>`<div class="row" style="--i:${n}" data-id="${i.id}">${LAY.listphoto?`<div class="th">${i.p?`<img loading="lazy" src="${mu(i.p)}">`:'✦'}</div>`:''}<div class="rt"><b>${esc(i.t)}</b><small>${esc(i.c)}</small></div></div>`).join('')+'</div>':'<div class="empty">Ничего не найдено</div>'}
 async function load(){try{DATA=await api('/api/list');LAY=DATA.layout;$('add').classList.toggle('hide',!DATA.edit);renderList()}catch(e){$('list').innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
 $('q').oninput=renderList;
 $('chips').onclick=e=>{if(e.target.dataset.c){CAT=e.target.dataset.c;renderList()}};
 $('list').onclick=e=>{const r=e.target.closest('.row');if(r)openEntry(+r.dataset.id)};
 const vid=m=>m.t=='photo'?`<img src="${mu(m.id)}" loading="lazy">`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`;
-function setHero(i){const m=E.media[i];$('hero').innerHTML=m.t=='photo'?`<img src="${mu(m.id)}">`:`<video src="${mu(m.id)}" controls autoplay playsinline></video>`;document.querySelectorAll('.thumbs>div').forEach((d,k)=>d.classList.toggle('on',k==i))}
+function setHero(i){const m=E.media[i];$('hero').innerHTML=(m.t=='photo'?`<img src="${mu(m.id)}">`:`<video src="${mu(m.id)}" controls autoplay playsinline></video>`).replace('<img ','<img class="in" ').replace('<video ','<video class="in" ');document.querySelectorAll('.thumbs>div').forEach((d,k)=>d.classList.toggle('on',k==i))}
 const NAMES={description:'Описание',obtain:'Как получить',stats:'Характеристика',notes:'Примечания',skills:'Скиллы'};
-function renderEntry(){const d=window.E;let h='';
+function renderEntry(back){const d=window.E;let h='';
  if(LE)h+=`<div class="glass bar"><label>Большое фото сверху<input type="checkbox" id="l_hero" ${LAY.hero?'checked':''}></label><label>Миниатюры<input type="checkbox" id="l_thumbs" ${LAY.thumbs?'checked':''}></label><label>Фото в списке<input type="checkbox" id="l_lp" ${LAY.listphoto?'checked':''}></label><button class="gbtn pri" id="lsave">Сохранить макет</button></div>`;
  if(LAY.hero){const m0=d.media[0];h+=`<div class="hero" id="hero">${m0?vid(m0).replace('controls ',''):'<div class="ph">✦</div>'}</div>`;
   if(LAY.thumbs&&d.media.length>1)h+='<div class="thumbs">'+d.media.map((m,i)=>`<div class="${i?'':'on'}" data-i="${i}">${m.t=='photo'?`<img src="${mu(m.id)}" loading="lazy">`:'<i>▶</i>'}</div>`).join('')+'</div>'}
  h+=`<div class="head"><h2>${esc(d.title)}</h2><small>${esc(d.category)}</small></div>`;
- LAY.order.forEach(k=>{const hid=LAY.hide.includes(k);if(hid&&!LE)return;let body='';
+ let n=0;LAY.order.forEach(k=>{const hid=LAY.hide.includes(k);if(hid&&!LE)return;let body='';
   if(k=='skills'){if(!d.skills.length&&!LE)return;body=d.skills.map(s=>`<p><b>${esc(s.label)}${s.form==2?' · V2':''}</b><br>${clean(s.text)}</p>`+(s.media.length?'<div class="grid">'+s.media.map(vid).join('')+'</div>':'')).join('')}
   else{if(!(d[k]||'').trim()&&!LE)return;body=clean(d[k])}
-  h+=`<div class="sec ${hid?'dim':''}"><h3>${NAMES[k]}</h3>${body}${LE?`<div class="tools"><button data-m="up" data-k="${k}">▲</button><button data-m="dn" data-k="${k}">▼</button><button data-m="eye" data-k="${k}">${hid?'🚫':'👁'}</button></div>`:''}</div>`});
+  h+=`<div class="sec ${hid?'dim':''}" style="--i:${n++}"><h3>${NAMES[k]}</h3>${body}${LE?`<div class="tools"><button data-m="up" data-k="${k}">▲</button><button data-m="dn" data-k="${k}">▼</button><button data-m="eye" data-k="${k}">${hid?'🚫':'👁'}</button></div>`:''}</div>`});
  if(d.edit&&!LE)h+='<div class="glass fab"><button class="gbtn" id="le">Макет</button><button class="gbtn pri" id="ed">Править</button></div>';h+='<div style="height:140px"></div>';
- $('view').innerHTML=h;show('view');
+ $('view').innerHTML=h;show('view',back);
  if(d.edit){if(LE)$('lsave').onclick=saveLayout;else{$('ed').onclick=()=>editForm(d);$('le').onclick=()=>{LE=true;renderEntry()}}}}
-async function openEntry(id){try{window.E=await api('/api/entry/'+id);OPEN=id;LE=false;renderEntry()}catch(e){tg.showAlert(e.message)}}
+async function openEntry(id,back){try{window.E=await api('/api/entry/'+id);OPEN=id;LE=false;renderEntry(back)}catch(e){tg.showAlert(e.message)}}
 async function saveLayout(){LAY.hero=$('l_hero').checked;LAY.thumbs=$('l_thumbs').checked;LAY.listphoto=$('l_lp').checked;
  try{await api('/api/layout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(LAY)});LE=false;tg.showAlert('Макет сохранён для всех');renderEntry()}catch(e){tg.showAlert(e.message)}}
 $('view').onclick=e=>{const t=e.target.closest('.thumbs>div');if(t){setHero(+t.dataset.i);return}
