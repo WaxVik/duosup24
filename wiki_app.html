@@ -106,6 +106,8 @@ const H={'X-Init-Data':tg.initData};
 const RAR={mythical:{n:'Мифический',c:['#6b0f1a','#ff3b5c','#ffd0d8']},permanent:{n:'Permanent',c:['#7a5a00','#f5c542','#fff3b0']},legendary:{n:'Легендарный',c:['#8a1f5a','#ff6ec7','#ffd1ef']},rare:{n:'Эпический',c:['#3b1d7a','#9d5cff','#e3d4ff']},uncommon:{n:'Необычный',c:['#124a80','#3da5ff','#cfe7ff']},common:{n:'Обычный',c:['#3a3a3f','#8e8e93','#e5e5ea']},'':{n:'',c:['#2c2c2e','#6e6e73','#c7c7cc']}};
 const ORDER=['permanent','mythical','legendary','rare','uncommon','common',''];
 const RANK=Object.fromEntries(ORDER.map((k,i)=>[k,i]));
+const num=v=>Number(v)||0;
+const fmtPrice=v=>num(v)?' · '+num(v).toLocaleString('ru-RU')+' ₽':'';
 const GOLD=['#6b4300','#ffd34d','#fff6c2'];
 const isGold=c=>/гемпас|gamepass|game ?pass|драгон|dragon/i.test(c||'');
 const gs=(r,cat)=>{const c=isGold(cat)?GOLD:(RAR[r]||RAR['']).c;return `--c1:${c[0]};--c2:${c[1]};--c3:${c[2]}`};
@@ -152,10 +154,10 @@ window.addEventListener('resize',movePill);
 /* ----- список: сортировка по редкости, фото с переворотом у края ----- */
 function renderList(){const q=norm($('q').value);
  const it=DATA.items.filter(i=>(CAT=='Все'||i.c==CAT)&&(!q||norm(i.t).includes(q)||i.a.some(a=>norm(a).includes(q))))
-  .sort((a,b)=>((RANK[a.r||'']??6)-(RANK[b.r||'']??6))||a.t.localeCompare(b.t,'ru'));
+  .sort((a,b)=>((RANK[a.r||'']??6)-(RANK[b.r||'']??6))||(num(b.pr)-num(a.pr))||a.t.localeCompare(b.t,'ru'));
  $('list').innerHTML=it.length?'<div class="grp">'+it.map((i,n)=>`<div class="row" style="--i:${n};${gs(i.r,i.c)}" data-id="${i.id}">`+
   (layFor(i.c).listphoto?`<div class="ring${isGold(i.c)?' gold':''}"><div class="th"><div class="flipper">${face(i.p?{t:'photo',id:i.p}:null)}</div></div></div>`:'')+
-  `<div class="rt"><b>${esc(i.t)}</b><small>${esc(i.c)}</small></div>${rp(i.r,i.c)}</div>`).join('')+'</div>':'<div class="empty">Ничего не найдено</div>'}
+  `<div class="rt"><b>${esc(i.t)}</b><small>${esc(i.c)}${fmtPrice(i.pr)}</small></div>${rp(i.r,i.c)}</div>`).join('')+'</div>':'<div class="empty">Ничего не найдено</div>'}
 function edgeNear(e,box){const r=box.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;return x<=5||y<=5||r.width-x<=5||r.height-y<=5}
 function flipZone(e,sel){const z=e.target.closest(sel);if(FZ&&FZ!==z)FZ.querySelector('.flipper')?.classList.remove('flip');
  if(z)z.querySelector('.flipper')?.classList.toggle('flip',edgeNear(e,z));FZ=z}
