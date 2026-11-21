@@ -40,6 +40,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     WebAppInfo,
+    MenuButtonWebApp,
     BotCommand,
     CallbackQuery,
     ChatMemberUpdated,
@@ -9120,6 +9121,9 @@ WEBAPP_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiki_app
 WEBAPP_FIELDS = ("category", "description", "obtain", "stats", "notes")
 
 
+WIKI_RARITY_KEYS = {"mythical", "permanent", "legendary", "rare", "uncommon", "common"}
+
+
 def webapp_user(init_data: str) -> dict | None:
     """Проверка подписи Telegram (initData) — так сервер знает, кто открыл приложение."""
     import hmac
@@ -9174,9 +9178,9 @@ def webapp_routes():
 
     async def api_list(request):
         uid, can = await webapp_auth(request)
-        rows = await pool().fetch("SELECT id, title, category, aliases, photos, videos FROM wiki_entries ORDER BY title")
+        rows = await pool().fetch("SELECT id, title, category, aliases, photos, videos, rarity FROM wiki_entries ORDER BY title")
         items = [{"id": r["id"], "t": r["title"], "c": r["category"], "a": json.loads(r["aliases"] or "[]"),
-                  "p": (json.loads(r["photos"] or "[]") or [None])[0]} for r in rows]
+                  "p": (json.loads(r["photos"] or "[]") or [None])[0], "r": r["rarity"]} for r in rows]
         return web.json_response({"edit": can, "cats": WIKI_CATEGORIES, "items": items, "layout": await webapp_layout()})
 
     async def api_layout(request):
@@ -9204,7 +9208,7 @@ def webapp_routes():
         return web.json_response({
             "id": r["id"], "title": r["title"], "category": r["category"],
             "aliases": ", ".join(json.loads(r["aliases"] or "[]")),
-            **{f: r[f] for f in ("description", "obtain", "stats", "notes")},
+            "rarity": r["rarity"], **{f: r[f] for f in ("description", "obtain", "stats", "notes")},
             "media": [{"t": t, "id": i} for t, i in wiki_media_of(r)], "skills": skills, "edit": can})
 
     async def api_save(request):
@@ -9222,6 +9226,8 @@ def webapp_routes():
             return web.json_response({"error": "Запись с таким названием уже есть"}, status=400)
         vals = {f: str(d.get(f, ""))[:4000].strip() for f in WEBAPP_FIELDS}
         vals["category"] = vals["category"][:30] or "Другое"
+        rar = str(d.get("rarity", ""))
+        rar = rar if rar in WIKI_RARITY_KEYS else ""
         aliases = json.dumps(wiki_split_aliases(str(d.get("aliases", ""))), ensure_ascii=False)
         if eid:
             await pool().execute(
@@ -9233,6 +9239,7 @@ def webapp_routes():
                 "INSERT INTO wiki_entries (title, norm, aliases, category, description, obtain, stats, notes, updated_at) "
                 "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id", title, norm, aliases, vals["category"],
                 vals["description"], vals["obtain"], vals["stats"], vals["notes"], now_ts())
+        await pool().execute("UPDATE wiki_entries SET rarity=$1 WHERE id=$2", rar, int(eid))
         wiki_dirty()
         LOG.info("wiki app: запись %s сохранил %s", eid, uid)
         return web.json_response({"ok": True, "id": eid})
@@ -9264,6 +9271,7 @@ def webapp_routes():
 
 async def webapp_start():
     """Запускает сервер Mini App (только если задан WEBAPP_URL)."""
+    await pool().execute("ALTER TABLE wiki_entries ADD COLUMN IF NOT EXISTS rarity TEXT NOT NULL DEFAULT ''")
     if not WEBAPP_URL:
         LOG.info("WEBAPP_URL не задан — Wiki Mini App выключено")
         return None
@@ -9271,6 +9279,10 @@ async def webapp_start():
     runner = web.AppRunner(webapp_routes())
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", WEBAPP_PORT).start()
+    try:  # кнопка «Вики» в левом нижнем углу чата — открывает приложение в один тап, без сообщения
+        await B().set_chat_menu_button(menu_button=MenuButtonWebApp(text="Вики", web_app=WebAppInfo(url=WEBAPP_URL)))
+    except Exception as exc:
+        LOG.warning("не удалось поставить кнопку «Вики» в меню: %s", exc)
     LOG.info("Wiki Mini App: %s (порт %s)", WEBAPP_URL, WEBAPP_PORT)
     return runner
 
