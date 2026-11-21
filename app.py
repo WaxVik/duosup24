@@ -39,6 +39,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
+    WebAppInfo,
     BotCommand,
     CallbackQuery,
     ChatMemberUpdated,
@@ -52,7 +53,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.22.2"
+BOT_VERSION = "3.22.4"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -754,6 +755,12 @@ async def remember_user(user, *, count_message: bool = False, joined: bool = Fal
 
 class RememberMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
+        try:
+            if isinstance(event, Message) and event.text and event.text.startswith("/") and event.from_user:
+                LOG.info("команда: %s от=%s чат=%s(%s) тема=%s", event.text.split()[0][:40], event.from_user.id,
+                         event.chat.id, event.chat.type, getattr(event, "message_thread_id", None))
+        except Exception:
+            pass
         try:
             user = getattr(event, "from_user", None)
             if user:
@@ -2440,7 +2447,8 @@ async def reply_menu_click(msg: Message, state: FSMContext, menu_key: str):
             await say(msg, "({8})Режим вики сейчас выключен.")
             return
         await state.set_state(MenuSt.wiki)
-        await say(msg, "({39})<b>Вики</b>\nНазовите предмет, аксессуар или тип — и я расскажу о нём.\n<i>Выйти: /cancel или любая кнопка меню.</i>")
+        await say(msg, "({39})<b>Вики</b>\nНазовите предмет, аксессуар или тип — и я расскажу о нём, "
+                       "или откройте приложение.\n<i>Выйти: /cancel или любая кнопка меню.</i>", wiki_app_markup())
     elif menu_key == "nav":
         await say(msg, await nav_text(), back_only())
     elif menu_key == "violations":
@@ -7150,12 +7158,19 @@ def wk_creator(cb: CallbackQuery) -> bool:
 
 async def wiki_zone(msg: Message) -> bool:
     """Команды наполнения вики: создатель и редакторы вики — в личке с ботом или в админ-чате."""
+    LOG.info("wiki_zone: user=%s редактор=%s чат=%s(%s)", msg.from_user and msg.from_user.id,
+             bool(msg.from_user and wiki_can_edit(msg.from_user.id)), msg.chat.id, msg.chat.type)
     if not msg.from_user or not wiki_can_edit(msg.from_user.id):
         await reply(msg, "({15})У вас недостаточно прав")
         return False
     if msg.chat.type == "private" or msg.chat.id == await admin_chat():
         return True
-    await reply(msg, "({15})Эта команда работает только в личке с ботом (и в админ-чате).")
+    # В основном чате ошибка и неудачная команда удаляются через несколько секунд — со стороны это «игнор».
+    # Поэтому дополнительно шлём подсказку в личку.
+    LOG.info("wiki: команда редактора %s в чате %s — нужна личка с ботом", msg.from_user.id, msg.chat.id)
+    await dm(msg.from_user.id, f"({{39}})Команды вики работают только здесь, в личке с ботом (@{esc(BOT_USERNAME)}). "
+                               "Напишите команду сюда, например <code>/wikiadd Название</code>.")
+    await reply(msg, "({15})Эта команда работает только в личке с ботом — подсказка отправлена вам в личные сообщения.")
     return False
 
 
@@ -8277,6 +8292,8 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.22.4", "Диагностика: в лог пишутся команды и проверка прав редакторов вики"),
+    ("3.22.3", "Вики: редактор, написавший команду не в личке, получает подсказку в личные сообщения"),
     ("3.22.2", "Вики: доступ к наполнению для редакторов (/wikiaccess), команда /wikiall — что добавлено по категориям"),
     ("3.22.1", "Картинка трейда: Dragon West и Dragon East подбирают свои файлы; названия скинов совпадают с именами файлов, поэтому все скины отображаются на фото"),
     ("3.22.0", "Трейды: Skins фруктов (33 скина) вшиты в код с настройкой эмодзи в /addemoji. Можно выбирать несколько одинаковых фруктов и предметов (×2, ×3, ×4). Из /addemoji убраны разделы рас, Magnet и Dragon — они уже вшиты в код"),
@@ -9095,6 +9112,144 @@ dp.message.register(autowarn_handler, F.chat.type.in_({"group", "supergroup"}))
 
 
 # ================================ ЗАПУСК ================================
+# ====================== WIKI MINI APP (сайт-приложение в Telegram) ======================
+# Сервер работает в этом же процессе. Нужны переменные Railway: WEBAPP_URL (https-адрес сервиса) и PORT (Railway ставит сам).
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+WEBAPP_PORT = int(os.getenv("PORT", "8080") or 8080)
+WEBAPP_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiki_app.html")
+WEBAPP_FIELDS = ("category", "description", "obtain", "stats", "notes")
+
+
+def webapp_user(init_data: str) -> dict | None:
+    """Проверка подписи Telegram (initData) — так сервер знает, кто открыл приложение."""
+    import hmac
+    import hashlib
+    from urllib.parse import parse_qsl
+    data = dict(parse_qsl(init_data or "", keep_blank_values=True))
+    got = data.pop("hash", None)
+    if not got or not BOT_TOKEN:
+        return None
+    check = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+    secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+    if not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), got):
+        return None
+    if now_ts() - int(data.get("auth_date", "0") or 0) > 86400:
+        return None
+    try:
+        return json.loads(data.get("user", "{}"))
+    except ValueError:
+        return None
+
+
+async def webapp_auth(request) -> tuple[int, bool]:
+    from aiohttp import web
+    user = webapp_user(request.headers.get("X-Init-Data") or request.query.get("d", ""))
+    if not user or "id" not in user:
+        raise web.HTTPForbidden(text="auth")
+    uid = int(user["id"])
+    if not (await wiki_index())["on"] and uid != CREATOR_ID:
+        raise web.HTTPForbidden(text="off")
+    return uid, wiki_can_edit(uid)
+
+
+def webapp_routes():
+    from aiohttp import web
+
+    async def index(request):
+        if not os.path.exists(WEBAPP_HTML):
+            return web.Response(text="wiki_app.html не найден рядом с app.py", status=500)
+        return web.FileResponse(WEBAPP_HTML, headers={"Cache-Control": "no-cache"})
+
+    async def api_list(request):
+        uid, can = await webapp_auth(request)
+        rows = await pool().fetch("SELECT id, title, category, aliases, photos, videos FROM wiki_entries ORDER BY title")
+        items = [{"id": r["id"], "t": r["title"], "c": r["category"], "a": json.loads(r["aliases"] or "[]"),
+                  "m": bool(json.loads(r["photos"] or "[]") or json.loads(r["videos"] or "[]"))} for r in rows]
+        return web.json_response({"edit": can, "cats": WIKI_CATEGORIES, "items": items})
+
+    async def api_entry(request):
+        uid, can = await webapp_auth(request)
+        r = await pool().fetchrow("SELECT * FROM wiki_entries WHERE id=$1", int(request.match_info["id"]))
+        if not r:
+            raise web.HTTPNotFound()
+        skills = [{"label": k.get("label", ""), "text": k.get("text", ""), "form": int(k.get("form", 1)),
+                   "media": [m for m in k.get("media", []) if isinstance(m, dict) and m.get("id")]}
+                  for k in json.loads(r["skills"] or "[]")]
+        return web.json_response({
+            "id": r["id"], "title": r["title"], "category": r["category"],
+            "aliases": ", ".join(json.loads(r["aliases"] or "[]")),
+            **{f: r[f] for f in ("description", "obtain", "stats", "notes")},
+            "media": [{"t": t, "id": i} for t, i in wiki_media_of(r)], "skills": skills, "edit": can})
+
+    async def api_save(request):
+        uid, can = await webapp_auth(request)
+        if not can:
+            raise web.HTTPForbidden(text="rights")
+        d = await request.json()
+        title = str(d.get("title", "")).strip()[:80]
+        if not title:
+            return web.json_response({"error": "Название не может быть пустым"}, status=400)
+        norm = wiki_norm(title)
+        eid = d.get("id")
+        taken = await pool().fetchval("SELECT id FROM wiki_entries WHERE norm=$1 AND id<>$2", norm, eid or 0)
+        if taken:
+            return web.json_response({"error": "Запись с таким названием уже есть"}, status=400)
+        vals = {f: str(d.get(f, ""))[:4000].strip() for f in WEBAPP_FIELDS}
+        vals["category"] = vals["category"][:30] or "Другое"
+        aliases = json.dumps(wiki_split_aliases(str(d.get("aliases", ""))), ensure_ascii=False)
+        if eid:
+            await pool().execute(
+                "UPDATE wiki_entries SET title=$1, norm=$2, aliases=$3, category=$4, description=$5, obtain=$6, "
+                "stats=$7, notes=$8, updated_at=$9 WHERE id=$10", title, norm, aliases, vals["category"],
+                vals["description"], vals["obtain"], vals["stats"], vals["notes"], now_ts(), int(eid))
+        else:
+            eid = await pool().fetchval(
+                "INSERT INTO wiki_entries (title, norm, aliases, category, description, obtain, stats, notes, updated_at) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id", title, norm, aliases, vals["category"],
+                vals["description"], vals["obtain"], vals["stats"], vals["notes"], now_ts())
+        wiki_dirty()
+        LOG.info("wiki app: запись %s сохранил %s", eid, uid)
+        return web.json_response({"ok": True, "id": eid})
+
+    async def api_media(request):
+        await webapp_auth(request)
+        try:
+            f = await B().get_file(request.match_info["fid"])
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as sess:
+                async with sess.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as resp:
+                    body = await resp.read()
+        except Exception:
+            raise web.HTTPNotFound()
+        ctype = {"mp4": "video/mp4", "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                 "webp": "image/webp", "gif": "image/gif"}.get(f.file_path.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+        return web.Response(body=body, content_type=ctype, headers={"Cache-Control": "private, max-age=86400"})
+
+    app = web.Application(client_max_size=1_000_000)
+    app.add_routes([web.get("/", index), web.get("/api/list", api_list), web.get("/api/entry/{id}", api_entry),
+                    web.post("/api/save", api_save), web.get("/api/media/{fid}", api_media)])
+    return app
+
+
+async def webapp_start():
+    """Запускает сервер Mini App (только если задан WEBAPP_URL)."""
+    if not WEBAPP_URL:
+        LOG.info("WEBAPP_URL не задан — Wiki Mini App выключено")
+        return None
+    from aiohttp import web
+    runner = web.AppRunner(webapp_routes())
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", WEBAPP_PORT).start()
+    LOG.info("Wiki Mini App: %s (порт %s)", WEBAPP_URL, WEBAPP_PORT)
+    return runner
+
+
+def wiki_app_markup() -> InlineKeyboardMarkup | None:
+    if not WEBAPP_URL:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📖 Открыть Wiki", web_app=WebAppInfo(url=WEBAPP_URL))]])
+
+
+
 async def main() -> None:
     global bot, BOT_USERNAME, _stock_task
     if not BOT_TOKEN:
@@ -9109,6 +9264,7 @@ async def main() -> None:
     dp.message.outer_middleware(RememberMiddleware())
     dp.message.outer_middleware(SpamMiddleware())
     dp.callback_query.outer_middleware(RememberMiddleware())
+    webapp_runner = None
     try:
         await init_db()
         await refresh_icon_cache()
@@ -9128,6 +9284,7 @@ async def main() -> None:
         spawn(applications_expiry_loop())
         spawn(publish_changelog())
         spawn(wiki_editors_load())
+        webapp_runner = await webapp_start()
         try:
             await warns_migrate()
         except Exception:
@@ -9140,6 +9297,8 @@ async def main() -> None:
         LOG.info("DuoSup %s запущен как @%s (id=%s)", BOT_VERSION, BOT_USERNAME, me.id)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        if webapp_runner is not None:
+            await webapp_runner.cleanup()
         if db is not None:
             await db.close()
         await bot.session.close()

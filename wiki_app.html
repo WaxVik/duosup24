@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Wiki</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:var(--tg-theme-bg-color,#fff);--tx:var(--tg-theme-text-color,#111);--hint:var(--tg-theme-hint-color,#8a8a8e);--link:var(--tg-theme-link-color,#2481cc);--btn:var(--tg-theme-button-color,#2481cc);--btx:var(--tg-theme-button-text-color,#fff);--card:var(--tg-theme-secondary-bg-color,#f1f1f4)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.45 -apple-system,system-ui,Roboto,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+.top{position:sticky;top:0;background:var(--bg);padding:10px 12px 6px;z-index:5}
+input,textarea,select{width:100%;padding:10px 12px;border:0;border-radius:12px;background:var(--card);color:var(--tx);font:inherit}
+textarea{min-height:90px;resize:vertical}label{display:block;margin:10px 0 4px;color:var(--hint);font-size:13px}
+.chips{display:flex;gap:6px;overflow-x:auto;padding:8px 0 2px;scrollbar-width:none}.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;padding:6px 12px;border-radius:16px;background:var(--card);cursor:pointer;font-size:14px}.chip.on{background:var(--btn);color:var(--btx)}
+.list{padding:4px 12px 80px}.row{display:flex;justify-content:space-between;gap:8px;padding:12px;margin:6px 0;border-radius:14px;background:var(--card);cursor:pointer}
+.row small{color:var(--hint)}h2{margin:6px 12px 0}.sub{margin:0 12px;color:var(--hint)}
+.sec{margin:12px;padding:12px;border-radius:14px;background:var(--card)}.sec h3{margin:0 0 6px;font-size:15px;color:var(--hint)}
+.sec blockquote{margin:6px 0;padding:4px 10px;border-left:3px solid var(--btn)}.sec a{color:var(--link)}
+.media{display:flex;gap:8px;overflow-x:auto;padding:10px 12px;scroll-snap-type:x mandatory}.media>*{flex:none;max-height:260px;max-width:85%;border-radius:12px;scroll-snap-align:start}
+.btn{display:block;width:calc(100% - 24px);margin:12px;padding:12px;border:0;border-radius:12px;background:var(--btn);color:var(--btx);font:inherit;font-weight:600}
+.btn.alt{background:var(--card);color:var(--tx)}.form{padding:0 12px 90px}.hide{display:none}.empty{text-align:center;color:var(--hint);padding:40px}
+</style></head><body>
+<div id="home"><div class="top"><input id="q" placeholder="Поиск по вики…" autocomplete="off"><div class="chips" id="chips"></div></div><div class="list" id="list"></div>
+<button class="btn hide" id="add">➕ Добавить запись</button></div>
+<div id="view" class="hide"></div><div id="form" class="hide"></div>
+<script>
+const tg=window.Telegram.WebApp;tg.ready();tg.expand();
+const H={'X-Init-Data':tg.initData};let DATA=null,CAT='Все',OPEN=null;
+const $=id=>document.getElementById(id);
+const api=async(u,o={})=>{const r=await fetch(u,{...o,headers:{...H,...(o.headers||{})}});if(!r.ok){const t=await r.text();throw new Error(r.status==403?(t=='off'?'Вики сейчас выключена':'Нет доступа'):t||'Ошибка')}return r.json()};
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const mu=(id,t)=>`/api/media/${encodeURIComponent(id)}?d=${encodeURIComponent(tg.initData)}`;
+const OK=new Set(['B','I','U','S','CODE','PRE','BLOCKQUOTE','BR','EM','STRONG','A']);
+function clean(html){const d=new DOMParser().parseFromString('<div>'+(html||'').replace(/\[\[([^\]|]{1,80})(?:\|([^\]]*))?\]\]/g,(m,t,l)=>`<a data-w="${esc(t)}">${esc(l||t)}</a>`)+'</div>','text/html').body.firstChild;
+ (function w(n){[...n.childNodes].forEach(c=>{if(c.nodeType==3)return;if(c.nodeType!=1){c.remove();return}
+  if(c.tagName=='TG-EMOJI'){c.replaceWith(document.createTextNode(c.textContent));return}
+  if(!OK.has(c.tagName)){w(c);c.replaceWith(...c.childNodes);return}
+  const h=c.tagName=='A'?(c.getAttribute('href')||''):'',dw=c.getAttribute('data-w');
+  [...c.attributes].forEach(a=>c.removeAttribute(a.name));
+  if(c.tagName=='A'){if(dw)c.setAttribute('data-w',dw);else if(/^https?:|^tg:/.test(h)){c.setAttribute('href',h);c.setAttribute('target','_blank')}}
+  w(c)})})(d);return d.innerHTML.replace(/\n/g,'<br>')}
+const norm=s=>(s||'').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}\s]/gu,' ').replace(/\s+/g,' ').trim();
+function show(v){['home','view','form'].forEach(x=>$(x).classList.toggle('hide',x!=v));window.scrollTo(0,0);
+ const bb=tg.BackButton;if(v=='home')bb.hide();else bb.show()}
+tg.BackButton.onClick(()=>{if(!$('form').classList.contains('hide')&&OPEN)openEntry(OPEN);else show('home')});
+function renderList(){const q=norm($('q').value);
+ const cats=['Все',...new Set(DATA.items.map(i=>i.c))];
+ $('chips').innerHTML=cats.map(c=>`<div class="chip ${c==CAT?'on':''}" data-c="${esc(c)}">${esc(c)}</div>`).join('');
+ const it=DATA.items.filter(i=>(CAT=='Все'||i.c==CAT)&&(!q||norm(i.t).includes(q)||i.a.some(a=>norm(a).includes(q))));
+ $('list').innerHTML=it.length?it.map(i=>`<div class="row" data-id="${i.id}"><span>${esc(i.t)}${i.m?' 🖼':''}</span><small>${esc(i.c)}</small></div>`).join(''):'<div class="empty">Ничего не найдено</div>'}
+async function load(){try{DATA=await api('/api/list');$('add').classList.toggle('hide',!DATA.edit);renderList()}catch(e){$('list').innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
+$('q').oninput=renderList;
+$('chips').onclick=e=>{if(e.target.dataset.c){CAT=e.target.dataset.c;renderList()}};
+$('list').onclick=e=>{const r=e.target.closest('.row');if(r)openEntry(+r.dataset.id)};
+async function openEntry(id){try{const d=await api('/api/entry/'+id);OPEN=id;window.E=d;
+ let h=`<h2>${esc(d.title)}</h2><p class="sub">${esc(d.category)}</p>`;
+ if(d.media.length)h+='<div class="media">'+d.media.map(m=>m.t=='photo'?`<img src="${mu(m.id)}" loading="lazy">`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`).join('')+'</div>';
+ [['description','Описание'],['obtain','Как получить'],['stats','Характеристика'],['notes','Примечания']].forEach(([k,t])=>{if((d[k]||'').trim())h+=`<div class="sec"><h3>${t}</h3>${clean(d[k])}</div>`});
+ if(d.skills.length){h+='<div class="sec"><h3>Скиллы</h3>'+d.skills.map(s=>`<p><b>${esc(s.label)}${s.form==2?' (V2)':''}</b><br>${clean(s.text)}</p>`+(s.media.length?'<div class="media">'+s.media.map(m=>m.t=='photo'?`<img src="${mu(m.id)}" loading="lazy">`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`).join('')+'</div>':'')).join('')+'</div>'}
+ if(d.edit)h+='<button class="btn alt" id="ed">✏️ Редактировать</button>';
+ $('view').innerHTML=h;show('view');if(d.edit)$('ed').onclick=()=>editForm(d)}catch(e){tg.showAlert(e.message)}}
+$('view').onclick=e=>{const a=e.target.closest('a[data-w]');if(a){const k=norm(a.dataset.w);const f=DATA.items.find(i=>norm(i.t)==k||i.a.some(x=>norm(x)==k));if(f)openEntry(f.id)}};
+function editForm(d){const n=!d;d=d||{title:'',category:'Другое',aliases:'',description:'',obtain:'',stats:'',notes:''};
+ const f=(k,l,t)=>`<label>${l}</label>${t?`<textarea id="f_${k}">${esc(d[k])}</textarea>`:`<input id="f_${k}" value="${esc(d[k])}">`}`;
+ $('form').innerHTML=`<div class="form"><h2 style="margin:6px 0">${n?'Новая запись':'Редактирование'}</h2>${f('title','Название')}
+ <label>Категория</label><input id="f_category" list="cl" value="${esc(d.category)}"><datalist id="cl">${DATA.cats.map(c=>`<option value="${esc(c)}">`).join('')}</datalist>
+ ${f('aliases','Другие названия (через запятую)')}${f('description','Описание',1)}${f('obtain','Как получить',1)}${f('stats','Характеристика',1)}${f('notes','Примечания',1)}
+ <p class="sub" style="margin:8px 0">Можно использовать теги &lt;b&gt;, &lt;i&gt;, &lt;blockquote&gt; и ссылки [[Название]] на другие записи. Фото и видео добавляются через бота (/wikiedit).</p></div>`;
+ show('form');tg.MainButton.setText('Сохранить').show().offClick(save).onClick(save);window.EID=n?null:d.id}
+async function save(){const g=k=>$('f_'+k).value;tg.MainButton.showProgress();
+ try{const r=await api('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:window.EID,...Object.fromEntries(['title','category','aliases','description','obtain','stats','notes'].map(k=>[k,g(k)]))})});
+  tg.MainButton.hide();await load();openEntry(r.id)}catch(e){tg.showAlert(e.message)}finally{tg.MainButton.hideProgress()}}
+$('add').onclick=()=>{OPEN=null;editForm(null)};
+tg.BackButton.onClick(()=>tg.MainButton.hide());
+load();
+</script></body></html>
