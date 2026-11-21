@@ -53,11 +53,12 @@ box-shadow:var(--gvol-s),0 8px 20px -6px rgb(0 0 0/.4);transition:transform .49s
 .edge{position:fixed;left:0;right:0;top:0;height:calc(env(safe-area-inset-top) + 16px);z-index:10;pointer-events:none;-webkit-backdrop-filter:blur(6px) saturate(150%);backdrop-filter:blur(6px) saturate(150%);background:linear-gradient(#0003,#0000);-webkit-mask-image:linear-gradient(#000 40%,transparent);mask-image:linear-gradient(#000 40%,transparent)}
 /* ----- слой контента ----- */
 h1{margin:6px 20px 14px;font-size:34px;line-height:1.1;font-weight:700;letter-spacing:-.03em}h1 small{display:block;font-size:15px;font-weight:400;color:var(--l2);margin-top:2px;letter-spacing:-.01em}
-.list{margin:0 16px;padding:0 0 200px}.grp{background:var(--card);border-radius:20px;overflow:hidden}
+.list{margin:0 16px;padding:0 0 200px}.grp{background:rgb(255 255 255/.03);box-shadow:var(--gvol-s);border-radius:20px;overflow:hidden}
 .row{display:flex;align-items:center;gap:14px;padding:9px 14px 9px 10px;cursor:pointer;position:relative;transition:background .25s,transform .49s var(--spring);animation:rise .6s var(--spring) both;animation-delay:calc(var(--i,0) * 30ms)}
 .row:active{background:var(--fill3);transform:scale(.985)}.row+.row::before{content:"";position:absolute;top:0;left:78px;right:0;height:.5px;background:var(--sep)}
 .ring{flex:none;padding:2px;border-radius:17px;background:linear-gradient(120deg,var(--c1),var(--c2),var(--c3),var(--c2),var(--c1));background-size:300% 100%;animation:flow 6s linear infinite}
-.th{width:54px;height:54px;border-radius:15px;overflow:hidden;position:relative;perspective:500px;background:#111}
+.th{width:54px;height:54px;border-radius:15px;overflow:hidden;position:relative;perspective:500px;background:transparent}
+.th::after{content:"";position:absolute;inset:0;z-index:2;pointer-events:none;background:linear-gradient(160deg,rgb(255 255 255/.16),transparent 42%)}
 .rt{flex:1;min-width:0}.rt b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rt small{color:var(--l2);font-size:13px;letter-spacing:0}
 .rp{flex:none;margin-left:auto;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;color:#0b0b0d;letter-spacing:0;background:linear-gradient(120deg,var(--c1),var(--c2),var(--c3),var(--c2),var(--c1));background-size:300% 100%;animation:flow 6s linear infinite;white-space:nowrap}
 /* переворот фото у края (5px) */
@@ -65,8 +66,10 @@ h1{margin:6px 20px 14px;font-size:34px;line-height:1.1;font-weight:700;letter-sp
 .face{position:absolute;inset:0;backface-visibility:hidden;-webkit-backface-visibility:hidden;display:grid;place-items:center;overflow:hidden;font-size:24px;color:var(--l3)}
 .face.back{transform:rotateY(180deg)}.face img,.face video{width:100%;height:100%;object-fit:cover}.face.back img{transform:scaleX(-1)}
 /* профиль предмета */
-.prof{margin:12px 16px 0;padding:2.5px;border-radius:30px;background:linear-gradient(120deg,var(--c1),var(--c2),var(--c3),var(--c2),var(--c1));background-size:300% 100%;animation:flow 7s linear infinite,rise .6s var(--spring) both}
-.pin{background:#0a0a0c;border-radius:27.5px;overflow:hidden}
+.gold.ring,.gold.rp{background:linear-gradient(110deg,#6b4300 0%,#ffd34d 22%,#fff6c2 34%,#ffd34d 46%,#7a4f00 70%,#ffd34d 88%,#6b4300 100%);background-size:250% 100%;animation:flow 2.6s linear infinite}
+.gold.prof{background:linear-gradient(110deg,#6b4300 0%,#ffd34d 22%,#fff6c2 34%,#ffd34d 46%,#7a4f00 70%,#ffd34d 88%,#6b4300 100%);background-size:250% 100%;animation:flow 2.6s linear infinite,rise .6s var(--spring) both}
+.prof{margin:12px 16px 0;padding:3px;border-radius:30px;box-shadow:0 0 26px -6px var(--c2),0 16px 34px -12px rgb(0 0 0/.7);background:linear-gradient(120deg,var(--c1),var(--c2),var(--c3),var(--c2),var(--c1));background-size:300% 100%;animation:flow 7s linear infinite,rise .6s var(--spring) both}
+.pin{background:rgb(255 255 255/.03);border-radius:27px;overflow:hidden;position:relative}
 .hero{aspect-ratio:1/1;position:relative;background:radial-gradient(circle at 50% 35%,#2c2c2e,#060607);max-height:60vh;width:100%}
 .hero .face{font-size:56px}
 .ptitle{padding:14px 18px 18px}.ptitle h2{margin:0;font-size:30px;line-height:1.1;font-weight:700;letter-spacing:-.03em}
@@ -74,10 +77,11 @@ h1{margin:6px 20px 14px;font-size:34px;line-height:1.1;font-weight:700;letter-sp
 .thumbs{display:flex;gap:8px;overflow-x:auto;padding:12px 16px 0;scrollbar-width:none}.thumbs::-webkit-scrollbar{display:none}
 .thumbs>div{flex:none;width:58px;height:58px;border-radius:14px;overflow:hidden;background:var(--card);cursor:pointer;opacity:.6;position:relative;transition:opacity .3s,transform .49s var(--spring),box-shadow .3s}
 .thumbs>div.on{opacity:1;transform:scale(1.06);box-shadow:0 0 0 2px var(--label)}.thumbs img{width:100%;height:100%;object-fit:cover}.thumbs i{position:absolute;inset:0;display:grid;place-items:center;font-style:normal;background:#0007}
-.sec{margin:14px 16px;padding:14px 16px;background:var(--card);border-radius:20px;position:relative;animation:rise .6s var(--spring) both;animation-delay:calc(var(--i,0) * 60ms + 80ms)}
+.sec{margin:14px 16px;padding:14px 16px;background:rgb(255 255 255/.03);box-shadow:var(--gvol-s);border-radius:20px;position:relative;animation:rise .6s var(--spring) both;animation-delay:calc(var(--i,0) * 60ms + 80ms)}
 .sec h3{margin:0 0 6px;font-size:13px;font-weight:600;color:var(--l2)}.sec blockquote{margin:8px 0;padding:4px 12px;border-left:3px solid var(--fill);color:var(--l2)}.sec a{color:#2997ff}.sec p{margin:0 0 10px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0}.grid img,.grid video{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:12px;background:#000}
-.tools{display:flex;gap:6px;position:absolute;right:10px;top:8px}.tools button{min-width:36px;height:32px;border:0;border-radius:999px;background:var(--fill);color:var(--label);font-size:14px}.dim{opacity:.45}
+.tools{display:flex;gap:6px;position:absolute;right:10px;top:8px}.tools .grip{touch-action:none;cursor:grab;min-width:40px;letter-spacing:-2px;font-weight:700}
+.sec.dragging{animation:none;transform:translateY(var(--dy,0));z-index:5;transition:none;box-shadow:0 18px 40px -10px rgb(0 0 0/.65)}.tools button{min-width:36px;height:32px;border:0;border-radius:999px;background:var(--fill);color:var(--label);font-size:14px}.dim{opacity:.45}
 .fbtn{display:block;width:calc(100% - 32px);margin:12px 16px;height:50px;border:0;border-radius:999px;background:var(--fill);color:var(--label);font:inherit;font-weight:600}
 .form{padding:10px 16px 120px}.form h2{margin:8px 4px 4px;font-size:28px}label{display:block;margin:14px 6px 6px;color:var(--l2);font-size:13px}
 input.f,textarea.f,select.f{width:100%;padding:12px 16px;border:0;border-radius:14px;background:var(--card);color:var(--label);font:inherit;outline:0}textarea.f{min-height:96px;resize:vertical}input.f:focus,textarea.f:focus,select.f:focus{box-shadow:0 0 0 2px var(--accent)}
@@ -99,12 +103,19 @@ input.f,textarea.f,select.f{width:100%;padding:12px 16px;border:0;border-radius:
 <script>
 const tg=window.Telegram.WebApp;tg.ready();tg.expand();try{tg.setHeaderColor('#000000');tg.setBackgroundColor('#000000')}catch(e){}
 const H={'X-Init-Data':tg.initData};
-const RAR={mythical:{n:'Мифический',c:['#6b0f1a','#ff3b5c','#ffd0d8']},permanent:{n:'Permanent',c:['#7a5a00','#f5c542','#fff3b0']},legendary:{n:'Легендарный',c:['#8a1f5a','#ff6ec7','#ffd1ef']},rare:{n:'Редкий / Эпик',c:['#3b1d7a','#9d5cff','#e3d4ff']},uncommon:{n:'Обычный',c:['#124a80','#3da5ff','#cfe7ff']},common:{n:'Комон',c:['#3a3a3f','#8e8e93','#e5e5ea']},'':{n:'',c:['#2c2c2e','#6e6e73','#c7c7cc']}};
-const RANK=Object.fromEntries(Object.keys(RAR).map((k,i)=>[k,i]));
-const gs=r=>{const c=(RAR[r]||RAR['']).c;return `--c1:${c[0]};--c2:${c[1]};--c3:${c[2]}`};
-const rp=r=>(r&&RAR[r])?`<span class="rp" style="${gs(r)}">${RAR[r].n}</span>`:'';
-let DATA=null,CAT='Все',OPEN=null,LAY=null,LE=false,E=null,CUR='home',FZ=null;
+const RAR={mythical:{n:'Мифический',c:['#6b0f1a','#ff3b5c','#ffd0d8']},permanent:{n:'Permanent',c:['#7a5a00','#f5c542','#fff3b0']},legendary:{n:'Легендарный',c:['#8a1f5a','#ff6ec7','#ffd1ef']},rare:{n:'Эпический',c:['#3b1d7a','#9d5cff','#e3d4ff']},uncommon:{n:'Необычный',c:['#124a80','#3da5ff','#cfe7ff']},common:{n:'Обычный',c:['#3a3a3f','#8e8e93','#e5e5ea']},'':{n:'',c:['#2c2c2e','#6e6e73','#c7c7cc']}};
+const ORDER=['permanent','mythical','legendary','rare','uncommon','common',''];
+const RANK=Object.fromEntries(ORDER.map((k,i)=>[k,i]));
+const GOLD=['#6b4300','#ffd34d','#fff6c2'];
+const isGold=c=>/гемпас|gamepass|game ?pass|драгон|dragon/i.test(c||'');
+const gs=(r,cat)=>{const c=isGold(cat)?GOLD:(RAR[r]||RAR['']).c;return `--c1:${c[0]};--c2:${c[1]};--c3:${c[2]}`};
+const rp=(r,cat)=>(r&&RAR[r])?`<span class="rp${isGold(cat)?' gold':''}" style="${gs(r,cat)}">${RAR[r].n}</span>`:'';
+let DATA=null,CAT='Все',OPEN=null,LAY=null,WL=null,LE=false,E=null,CUR='home',FZ=null;
 const $=id=>document.getElementById(id);
+const BASE_KEYS=['hero','thumbs','listphoto','order','hide'];
+const CP=v=>JSON.parse(JSON.stringify(v));
+/* макет категории: свой, если сохранён, иначе общий */
+function layFor(cat){const b=LAY||{},o=(b.cats&&b.cats[cat])||{},r={};BASE_KEYS.forEach(k=>r[k]=CP(o[k]!==undefined?o[k]:b[k]));return r}
 const api=async(u,o={})=>{const r=await fetch(u,{...o,headers:{...H,...(o.headers||{})}});if(!r.ok){const t=await r.text();throw new Error(r.status==403?(t=='off'?'Вики сейчас выключена':t=='rights'?'Нет прав':'Нет доступа'):t||'Ошибка')}return r.json()};
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const mu=id=>`/api/media/${encodeURIComponent(id)}?d=${encodeURIComponent(tg.initData)}`;
@@ -142,9 +153,9 @@ window.addEventListener('resize',movePill);
 function renderList(){const q=norm($('q').value);
  const it=DATA.items.filter(i=>(CAT=='Все'||i.c==CAT)&&(!q||norm(i.t).includes(q)||i.a.some(a=>norm(a).includes(q))))
   .sort((a,b)=>((RANK[a.r||'']??6)-(RANK[b.r||'']??6))||a.t.localeCompare(b.t,'ru'));
- $('list').innerHTML=it.length?'<div class="grp">'+it.map((i,n)=>`<div class="row" style="--i:${n};${gs(i.r)}" data-id="${i.id}">`+
-  (LAY.listphoto?`<div class="ring"><div class="th"><div class="flipper">${face(i.p?{t:'photo',id:i.p}:null)}</div></div></div>`:'')+
-  `<div class="rt"><b>${esc(i.t)}</b><small>${esc(i.c)}</small></div>${rp(i.r)}</div>`).join('')+'</div>':'<div class="empty">Ничего не найдено</div>'}
+ $('list').innerHTML=it.length?'<div class="grp">'+it.map((i,n)=>`<div class="row" style="--i:${n};${gs(i.r,i.c)}" data-id="${i.id}">`+
+  (layFor(i.c).listphoto?`<div class="ring${isGold(i.c)?' gold':''}"><div class="th"><div class="flipper">${face(i.p?{t:'photo',id:i.p}:null)}</div></div></div>`:'')+
+  `<div class="rt"><b>${esc(i.t)}</b><small>${esc(i.c)}</small></div>${rp(i.r,i.c)}</div>`).join('')+'</div>':'<div class="empty">Ничего не найдено</div>'}
 function edgeNear(e,box){const r=box.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;return x<=5||y<=5||r.width-x<=5||r.height-y<=5}
 function flipZone(e,sel){const z=e.target.closest(sel);if(FZ&&FZ!==z)FZ.querySelector('.flipper')?.classList.remove('flip');
  if(z)z.querySelector('.flipper')?.classList.toggle('flip',edgeNear(e,z));FZ=z}
@@ -157,29 +168,42 @@ $('list').onclick=e=>{const r=e.target.closest('.row');if(r)openEntry(+r.dataset
 /* ----- карточка предмета ----- */
 const NAMES={description:'Описание',obtain:'Как получить',stats:'Характеристика',notes:'Примечания',skills:'Скиллы'};
 function setHero(i){const m=E.media[i];$('hf').innerHTML=face(m,1);$('hf').classList.remove('flip');document.querySelectorAll('.thumbs>div').forEach((d,k)=>d.classList.toggle('on',k==i))}
-function renderEntry(back){const d=E,m0=d.media[0];let h='';
- if(LE)h+=`<div class="glass bar"><label>Большое фото сверху<input type="checkbox" id="l_hero" ${LAY.hero?'checked':''}></label><label>Миниатюры<input type="checkbox" id="l_thumbs" ${LAY.thumbs?'checked':''}></label><label>Фото в списке<input type="checkbox" id="l_lp" ${LAY.listphoto?'checked':''}></label><button class="gbtn pri" id="lsave">Сохранить макет</button></div>`;
- h+=`<div class="prof" style="${gs(d.rarity)}"><div class="pin">`;
- if(LAY.hero)h+=`<div class="hero"><div class="flipper" id="hf">${face(m0,1)}</div></div>`;
- h+=`<div class="ptitle"><h2>${esc(d.title)}</h2><div class="pmeta"><span>${esc(d.category)}</span>${rp(d.rarity)}</div></div></div></div>`;
- if(LAY.hero&&LAY.thumbs&&d.media.length>1)h+='<div class="thumbs">'+d.media.map((m,i)=>`<div class="${i?'':'on'}" data-i="${i}">${m.t=='photo'?`<img src="${mu(m.id)}" loading="lazy">`:'<i>▶</i>'}</div>`).join('')+'</div>';
- let n=0;LAY.order.forEach(k=>{const hid=LAY.hide.includes(k);if(hid&&!LE)return;let body='';
+function renderEntry(back){const d=E,m0=d.media[0],L=(LE&&WL)?WL:layFor(d.category);let h='';
+  if(LE){const others=DATA.cats.filter(c=>c!=d.category);h+=`<div class="glass bar"><div class="sub" style="margin:0 2px 4px">Макет категории «${esc(d.category)}». Двигайте блоки за ⋮⋮</div><label>Большое фото сверху<input type="checkbox" id="l_hero" ${L.hero?'checked':''}></label><label>Миниатюры<input type="checkbox" id="l_thumbs" ${L.thumbs?'checked':''}></label><label>Фото в списке<input type="checkbox" id="l_lp" ${L.listphoto?'checked':''}></label><button class="gbtn pri" id="lsave">Сохранить макет</button><select class="f" id="l_to" style="margin-top:6px"><option value="">Скопировать в категорию…</option>${others.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select><button class="gbtn" id="lcopy">Скопировать макет</button></div>`}
+ h+=`<div class="prof${isGold(d.category)?' gold':''}" style="${gs(d.rarity,d.category)}"><div class="pin">`;
+ if(L.hero)h+=`<div class="hero"><div class="flipper" id="hf">${face(m0,1)}</div></div>`;
+ h+=`<div class="ptitle"><h2>${esc(d.title)}</h2><div class="pmeta"><span>${esc(d.category)}</span>${rp(d.rarity,d.category)}</div></div></div></div>`;
+ if(L.hero&&L.thumbs&&d.media.length>1)h+='<div class="thumbs">'+d.media.map((m,i)=>`<div class="${i?'':'on'}" data-i="${i}">${m.t=='photo'?`<img src="${mu(m.id)}" loading="lazy">`:'<i>▶</i>'}</div>`).join('')+'</div>';
+ let n=0;L.order.forEach(k=>{const hid=L.hide.includes(k);if(hid&&!LE)return;let body='';
   if(k=='skills'){if(!d.skills.length&&!LE)return;body=d.skills.map(s=>`<p><b>${esc(s.label)}${s.form==2?' · V2':''}</b><br>${clean(s.text)}</p>`+(s.media.length?'<div class="grid">'+s.media.map(m=>m.t=='photo'?`<img src="${mu(m.id)}" loading="lazy">`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`).join('')+'</div>':'')).join('')}
   else{if(!(d[k]||'').trim()&&!LE)return;body=clean(d[k])}
-  h+=`<div class="sec ${hid?'dim':''}" style="--i:${n++}"><h3>${NAMES[k]}</h3>${body}${LE?`<div class="tools"><button data-m="up" data-k="${k}">▲</button><button data-m="dn" data-k="${k}">▼</button><button data-m="eye" data-k="${k}">${hid?'🚫':'👁'}</button></div>`:''}</div>`});
+  h+=`<div class="sec ${hid?'dim':''}" data-k="${k}" style="--i:${n++}"><h3>${NAMES[k]}</h3>${body}${LE?`<div class="tools"><button class="grip" data-m="drag" data-k="${k}">⋮⋮</button><button data-m="eye" data-k="${k}">${hid?'🚫':'👁'}</button></div>`:''}</div>`});
  if(d.edit&&!LE)h+='<div class="glass fab"><button class="gbtn" id="le">Макет</button><button class="gbtn pri" id="ed">Править</button></div>';
  h+='<div style="height:150px"></div>';
  $('view').innerHTML=h;show('view',back);
- if(d.edit){if(LE)$('lsave').onclick=saveLayout;else{$('ed').onclick=()=>editForm(d);$('le').onclick=()=>{LE=true;renderEntry()}}}}
+ if(d.edit){if(LE){$('lsave').onclick=saveLayout;$('lcopy').onclick=copyLayout}else{$('ed').onclick=()=>editForm(d);$('le').onclick=()=>{WL=layFor(d.category);LE=true;renderEntry()}}}}
 async function openEntry(id,back){try{E=await api('/api/entry/'+id);OPEN=id;LE=false;renderEntry(back)}catch(e){tg.showAlert(e.message)}}
-async function saveLayout(){LAY.hero=$('l_hero').checked;LAY.thumbs=$('l_thumbs').checked;LAY.listphoto=$('l_lp').checked;
- try{await api('/api/layout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(LAY)});LE=false;tg.showAlert('Макет сохранён для всех');renderEntry()}catch(e){tg.showAlert(e.message)}}
+function readBar(){['hero','thumbs','listphoto'].forEach((nm,j)=>{const c=$(['l_hero','l_thumbs','l_lp'][j]);if(c)WL[nm]=c.checked})}
+async function pushLayout(){await api('/api/layout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(LAY)})}
+async function saveLayout(){readBar();const cat=E.category;LAY.cats=LAY.cats||{};LAY.cats[cat]=CP(WL);
+ try{await pushLayout();LE=false;tg.showAlert('Макет сохранён для «'+cat+'»');renderEntry()}catch(e){tg.showAlert(e.message)}}
+async function copyLayout(){readBar();const to=$('l_to').value;if(!to){tg.showAlert('Выберите категорию');return}
+ LAY.cats=LAY.cats||{};LAY.cats[to]=CP(WL);
+ try{await pushLayout();tg.showAlert('Макет скопирован в «'+to+'»')}catch(e){tg.showAlert(e.message)}}
 $('view').onclick=e=>{const t=e.target.closest('.thumbs>div');if(t){setHero(+t.dataset.i);return}
- const b=e.target.closest('.tools button');if(b){const k=b.dataset.k,o=LAY.order,i=o.indexOf(k);
-  if(b.dataset.m=='up'&&i>0)[o[i-1],o[i]]=[o[i],o[i-1]];if(b.dataset.m=='dn'&&i<o.length-1)[o[i+1],o[i]]=[o[i],o[i+1]];
-  if(b.dataset.m=='eye')LAY.hide=LAY.hide.includes(k)?LAY.hide.filter(x=>x!=k):[...LAY.hide,k];
-  ['hero','thumbs','listphoto'].forEach((nm,j)=>{const c=$(['l_hero','l_thumbs','l_lp'][j]);if(c)LAY[nm]=c.checked});renderEntry();return}
+  const b=e.target.closest('.tools button');if(b){const k=b.dataset.k;if(b.dataset.m=='eye'){readBar();WL.hide=WL.hide.includes(k)?WL.hide.filter(x=>x!=k):[...WL.hide,k];renderEntry()}return}
  const a=e.target.closest('a[data-w]');if(a){const k=norm(a.dataset.w);const f=DATA.items.find(i=>norm(i.t)==k||i.a.some(x=>norm(x)==k));if(f)openEntry(f.id)}};
+/* ----- перетаскивание блоков макета ----- */
+let DG=null;
+$('view').addEventListener('pointerdown',e=>{const g=e.target.closest('.tools .grip');if(!g||!LE)return;e.preventDefault();
+ const sec=g.closest('.sec'),all=[...$('view').querySelectorAll('.sec[data-k]')];
+ DG={k:g.dataset.k,el:sec,y0:e.clientY,all,idx:all.indexOf(sec),to:all.indexOf(sec)};sec.classList.add('dragging');g.setPointerCapture(e.pointerId)});
+$('view').addEventListener('pointermove',e=>{if(!DG)return;const dy=e.clientY-DG.y0;DG.el.style.setProperty('--dy',dy+'px');
+ const r0=DG.all[DG.idx].getBoundingClientRect(),cy=r0.top+r0.height/2+dy;let t=0;
+ DG.all.forEach((x,i)=>{if(i===DG.idx)return;const r=x.getBoundingClientRect();if(r.top+r.height/2<cy)t++});DG.to=t});
+const endDrag=()=>{if(!DG)return;const {k,el,to}=DG;DG=null;el.classList.remove('dragging');el.style.removeProperty('--dy');
+ const o=WL.order,i=o.indexOf(k);if(i>-1){o.splice(i,1);o.splice(Math.min(to,o.length),0,k)}renderEntry()};
+$('view').addEventListener('pointerup',endDrag);$('view').addEventListener('pointercancel',endDrag);
 /* ----- редактирование (создатель и редакторы) ----- */
 function editForm(d){const n=!d;d=d||{title:'',category:'Другое',aliases:'',description:'',obtain:'',stats:'',notes:'',rarity:''};
  const f=(k,l,t)=>`<label>${l}</label>${t?`<textarea class="f" id="f_${k}">${esc(d[k])}</textarea>`:`<input class="f" id="f_${k}" value="${esc(d[k])}">`}`;
