@@ -9152,6 +9152,18 @@ async def webapp_auth(request) -> tuple[int, bool]:
     return uid, wiki_can_edit(uid)
 
 
+WEBAPP_LAYOUT_DEFAULT = {"order": ["description", "obtain", "stats", "notes", "skills"], "hide": [],
+                         "hero": True, "thumbs": True, "listphoto": True}
+_media_cache: dict[str, tuple[bytes, str]] = {}  # file_id -> (байты, тип): чтобы не качать из Telegram каждый раз
+
+
+async def webapp_layout() -> dict:
+    try:
+        return {**WEBAPP_LAYOUT_DEFAULT, **json.loads(await get_config("wiki_layout") or "{}")}
+    except ValueError:
+        return dict(WEBAPP_LAYOUT_DEFAULT)
+
+
 def webapp_routes():
     from aiohttp import web
 
@@ -9164,8 +9176,22 @@ def webapp_routes():
         uid, can = await webapp_auth(request)
         rows = await pool().fetch("SELECT id, title, category, aliases, photos, videos FROM wiki_entries ORDER BY title")
         items = [{"id": r["id"], "t": r["title"], "c": r["category"], "a": json.loads(r["aliases"] or "[]"),
-                  "m": bool(json.loads(r["photos"] or "[]") or json.loads(r["videos"] or "[]"))} for r in rows]
-        return web.json_response({"edit": can, "cats": WIKI_CATEGORIES, "items": items})
+                  "p": (json.loads(r["photos"] or "[]") or [None])[0]} for r in rows]
+        return web.json_response({"edit": can, "cats": WIKI_CATEGORIES, "items": items, "layout": await webapp_layout()})
+
+    async def api_layout(request):
+        uid, can = await webapp_auth(request)
+        if not can:
+            raise web.HTTPForbidden(text="rights")
+        d = await request.json()
+        lay = dict(WEBAPP_LAYOUT_DEFAULT)
+        order = [k for k in d.get("order", []) if k in WEBAPP_LAYOUT_DEFAULT["order"]]
+        lay["order"] = order + [k for k in WEBAPP_LAYOUT_DEFAULT["order"] if k not in order]
+        lay["hide"] = [k for k in d.get("hide", []) if k in WEBAPP_LAYOUT_DEFAULT["order"]]
+        for k in ("hero", "thumbs", "listphoto"):
+            lay[k] = bool(d.get(k, True))
+        await set_config("wiki_layout", json.dumps(lay))
+        return web.json_response({"ok": True})
 
     async def api_entry(request):
         uid, can = await webapp_auth(request)
@@ -9213,20 +9239,26 @@ def webapp_routes():
 
     async def api_media(request):
         await webapp_auth(request)
-        try:
-            f = await B().get_file(request.match_info["fid"])
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as sess:
-                async with sess.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as resp:
-                    body = await resp.read()
-        except Exception:
-            raise web.HTTPNotFound()
-        ctype = {"mp4": "video/mp4", "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                 "webp": "image/webp", "gif": "image/gif"}.get(f.file_path.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+        fid = request.match_info["fid"]
+        if fid not in _media_cache:
+            try:
+                f = await B().get_file(fid)
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as sess:
+                    async with sess.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as resp:
+                        body = await resp.read()
+            except Exception:
+                raise web.HTTPNotFound()
+            ctype = {"mp4": "video/mp4", "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                     "webp": "image/webp", "gif": "image/gif"}.get(f.file_path.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+            if sum(len(v[0]) for v in _media_cache.values()) > 60_000_000:  # кэш в памяти до ~60 МБ
+                _media_cache.clear()
+            _media_cache[fid] = (body, ctype)
+        body, ctype = _media_cache[fid]
         return web.Response(body=body, content_type=ctype, headers={"Cache-Control": "private, max-age=86400"})
 
     app = web.Application(client_max_size=1_000_000)
     app.add_routes([web.get("/", index), web.get("/api/list", api_list), web.get("/api/entry/{id}", api_entry),
-                    web.post("/api/save", api_save), web.get("/api/media/{fid}", api_media)])
+                    web.post("/api/save", api_save), web.post("/api/layout", api_layout), web.get("/api/media/{fid}", api_media)])
     return app
 
 
