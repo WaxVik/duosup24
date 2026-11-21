@@ -52,7 +52,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.22.1"
+BOT_VERSION = "3.22.2"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -7124,9 +7124,94 @@ async def wk_back_to_entry(cb: CallbackQuery):
     await wiki_edit_view(cb, html_text, media, wiki_entry_markup(entry, viewer), await wiki_plain_html(entry))
 
 
-# ---------- наполнение: только создатель ----------
+# ---------- наполнение: создатель и редакторы вики ----------
+WIKI_EDITOR_IDS_DEFAULT = {7619986694}  # редакторы вики, вшитые в код (дополнительно: /wikiaccess)
+_wiki_editors: set[int] = set(WIKI_EDITOR_IDS_DEFAULT)
+
+
+async def wiki_editors_load() -> None:
+    """Редакторы вики из базы (добавленные через /wikiaccess) + вшитые в код."""
+    raw = await get_config("wiki_editors")
+    try:
+        extra = {int(x) for x in json.loads(raw)} if raw else set()
+    except (ValueError, TypeError):
+        extra = set()
+    _wiki_editors.clear()
+    _wiki_editors.update(WIKI_EDITOR_IDS_DEFAULT | extra)
+
+
+def wiki_can_edit(user_id: int) -> bool:
+    return user_id == CREATOR_ID or user_id in _wiki_editors
+
+
 def wk_creator(cb: CallbackQuery) -> bool:
-    return cb.from_user.id == CREATOR_ID
+    return wiki_can_edit(cb.from_user.id)
+
+
+async def wiki_zone(msg: Message) -> bool:
+    """Команды наполнения вики: создатель и редакторы вики — в личке с ботом или в админ-чате."""
+    if not msg.from_user or not wiki_can_edit(msg.from_user.id):
+        await reply(msg, "({15})У вас недостаточно прав")
+        return False
+    if msg.chat.type == "private" or msg.chat.id == await admin_chat():
+        return True
+    await reply(msg, "({15})Эта команда работает только в личке с ботом (и в админ-чате).")
+    return False
+
+
+@dp.message(Command("wikiaccess"))
+async def wikiaccess_cmd(msg: Message):
+    """/wikiaccess — список редакторов; /wikiaccess add ID; /wikiaccess remove ID (только создатель)."""
+    if not await redact_zone(msg):
+        return
+    args = command_args(msg)
+    if len(args) == 2 and args[0].lower() in ("add", "remove") and args[1].lstrip("-").isdigit():
+        uid = int(args[1])
+        raw = await get_config("wiki_editors")
+        try:
+            extra = {int(x) for x in json.loads(raw)} if raw else set()
+        except (ValueError, TypeError):
+            extra = set()
+        if args[0].lower() == "add":
+            extra.add(uid)
+        else:
+            extra.discard(uid)
+        await set_config("wiki_editors", json.dumps(sorted(extra)))
+        await wiki_editors_load()
+        if args[0].lower() == "remove" and uid in WIKI_EDITOR_IDS_DEFAULT:
+            await reply(msg, "({8})Этот редактор вшит в код — через команду его не убрать, только правкой "
+                             "WIKI_EDITOR_IDS_DEFAULT в app.py.")
+            return
+    rows = await pool().fetch("SELECT user_id, username, full_name FROM known_users WHERE user_id = ANY($1::bigint[])",
+                              list(_wiki_editors))
+    known = {r["user_id"]: r for r in rows}
+    lines = [f"• {mention(i, known[i]['username'], known[i]['full_name']) if i in known else '<code>' + str(i) + '</code>'}"
+             f" (<code>{i}</code>)" for i in sorted(_wiki_editors)]
+    await reply(msg, "({39})<b>Редакторы вики</b> (кроме создателя):\n" + ("\n".join(lines) or "— пока нет") +
+                "\n\n<code>/wikiaccess add ID</code> • <code>/wikiaccess remove ID</code>")
+
+
+@dp.message(Command("wikiall"))
+async def wikiall_cmd(msg: Message):
+    """/wikiall — что добавлено в вики: категории, сколько записей и их названия."""
+    if not await wiki_zone(msg):
+        return
+    rows = await pool().fetch("SELECT title, category FROM wiki_entries ORDER BY category, title")
+    if not rows:
+        await reply(msg, "({8})В вики пока ничего нет.")
+        return
+    groups: dict[str, list[str]] = {}
+    for r in rows:
+        groups.setdefault(r["category"], []).append(r["title"])
+    blocks = [f"<b>{esc(cat)}</b> — {len(names)}\n<blockquote expandable>{esc(', '.join(names))}</blockquote>"
+              for cat, names in groups.items()]
+    chunk = []
+    for b in blocks:
+        if len("\n".join(chunk + [b])) > 3500:
+            await reply(msg, "\n".join(chunk))
+            chunk = []
+        chunk.append(b)
+    await reply(msg, f"({{39}})<b>Вики: всего записей {len(rows)}</b>, категорий {len(groups)}\n" + "\n".join(chunk))
 
 
 def wk_category_markup(prefix: str) -> InlineKeyboardMarkup:
@@ -7193,7 +7278,7 @@ async def wiki_finish_add(msg: Message, state: FSMContext) -> None:
 
 @dp.message(Command("wikiadd"))
 async def wikiadd_cmd(msg: Message, state: FSMContext):
-    if not await redact_zone(msg):
+    if not await wiki_zone(msg):
         return
     await state.clear()
     title = " ".join(command_args(msg)).strip()[:80]
@@ -7317,7 +7402,7 @@ def wiki_edit_markup(eid: int) -> InlineKeyboardMarkup:
 
 @dp.message(Command("wikiedit"))
 async def wikiedit_cmd(msg: Message, state: FSMContext):
-    if not await redact_zone(msg):
+    if not await wiki_zone(msg):
         return
     await state.clear()
     query = " ".join(command_args(msg))
@@ -7331,7 +7416,7 @@ async def wikiedit_cmd(msg: Message, state: FSMContext):
 
 @dp.message(Command("wikidel"))
 async def wikidel_cmd(msg: Message, state: FSMContext):
-    if not await redact_zone(msg):
+    if not await wiki_zone(msg):
         return
     query = " ".join(command_args(msg))
     entry = await wiki_find(msg, query) if query else None
@@ -7617,7 +7702,7 @@ async def wk_sk_skip(msg: Message, state: FSMContext):
 
 @dp.message(Command("wikilist"))
 async def wikilist_cmd(msg: Message):
-    if not await redact_zone(msg):
+    if not await wiki_zone(msg):
         return
     cat = " ".join(command_args(msg)).strip().lower()
     rows = await pool().fetch("SELECT title, category, obtain, description, photos, videos, skills FROM wiki_entries ORDER BY category, title")
@@ -8192,6 +8277,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.22.2", "Вики: доступ к наполнению для редакторов (/wikiaccess), команда /wikiall — что добавлено по категориям"),
     ("3.22.1", "Картинка трейда: Dragon West и Dragon East подбирают свои файлы; названия скинов совпадают с именами файлов, поэтому все скины отображаются на фото"),
     ("3.22.0", "Трейды: Skins фруктов (33 скина) вшиты в код с настройкой эмодзи в /addemoji. Можно выбирать несколько одинаковых фруктов и предметов (×2, ×3, ×4). Из /addemoji убраны разделы рас, Magnet и Dragon — они уже вшиты в код"),
     ("3.21.3", "/profile: надёжнее определяется, на кого ответили (служебное сообщение темы больше не считается ответом)"),
@@ -9041,6 +9127,7 @@ async def main() -> None:
             LOG.info("STOCK_API_URL не задан — автосток выключен (работает ручная команда /stock)")
         spawn(applications_expiry_loop())
         spawn(publish_changelog())
+        spawn(wiki_editors_load())
         try:
             await warns_migrate()
         except Exception:
