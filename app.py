@@ -54,7 +54,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.26.0"
+BOT_VERSION = "3.26.1"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -8394,6 +8394,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.26.1", "Вики: миниатюры грузятся заметно быстрее, фото подгружаются заранее; кнопка «Добавить запись» у редакторов под панелью; панель макета и кнопки редактора двигаются вместе со страницей"),
     ("3.26.0", "Вики: команда /wikialpha — вырезает чёрный фон у фото фруктов, фото заменяются на PNG с прозрачностью (только создатель, в личке)"),
     ("3.25.1", "Вики: картинки с прозрачным фоном (PNG) отправляются как файл и не теряют прозрачность; фото листаются свайпом внутри плитки, альбом под карточкой, единые капсулы редкости"),
     ("3.22.4", "Диагностика: в лог пишутся команды и проверка прав редакторов вики"),
@@ -9281,6 +9282,68 @@ async def webapp_layout() -> dict:
         return dict(WEBAPP_LAYOUT_DEFAULT)
 
 
+_thumb_cache: dict[str, tuple[bytes, str]] = {}
+_thumb_busy: set[str] = set()
+
+
+async def media_fetch(fid: str) -> tuple[bytes, str]:
+    """Оригинал файла из Telegram, с кэшем в памяти (чтобы не качать второй раз)."""
+    if fid in _media_cache:
+        return _media_cache[fid]
+    try:
+        f = await B().get_file(fid)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as sess:
+            async with sess.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as resp:
+                body = await resp.read()
+    except Exception:
+        raise web.HTTPNotFound()
+    ctype = {"mp4": "video/mp4", "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+             "webp": "image/webp", "gif": "image/gif"}.get(f.file_path.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+    if sum(len(v[0]) for v in _media_cache.values()) > 60_000_000:  # кэш оригиналов до ~60 МБ
+        _media_cache.clear()
+    _media_cache[fid] = (body, ctype)
+    return body, ctype
+
+
+def make_thumb(body: bytes, ctype: str) -> tuple[bytes, str]:
+    """Картинка -> WebP до 640px, прозрачность сохраняется. Видео и GIF отдаём как есть."""
+    if not ctype.startswith("image/") or ctype == "image/gif":
+        return body, ctype
+    try:
+        import io
+        from PIL import Image
+        im = Image.open(io.BytesIO(body))
+        im.thumbnail((640, 640))
+        buf = io.BytesIO()
+        if im.mode in ("RGBA", "LA") or "transparency" in im.info:
+            im.convert("RGBA").save(buf, "WEBP", quality=88, method=4)
+        else:
+            im.convert("RGB").save(buf, "WEBP", quality=85, method=4)
+        return buf.getvalue(), "image/webp"
+    except Exception:
+        return body, ctype
+
+
+async def prewarm_thumbs(fids: list) -> None:
+    """Фоном подгружает миниатюры всех предметов, чтобы список и карточки открывались сразу."""
+    sem = asyncio.Semaphore(4)
+
+    async def one(fid: str) -> None:
+        if fid in _thumb_cache or fid in _thumb_busy:
+            return
+        _thumb_busy.add(fid)
+        try:
+            async with sem:
+                body, ctype = await media_fetch(fid)
+                _thumb_cache[fid] = await asyncio.to_thread(make_thumb, body, ctype)
+        except Exception:
+            pass
+        finally:
+            _thumb_busy.discard(fid)
+
+    await asyncio.gather(*(one(f) for f in fids))
+
+
 def webapp_routes():
     from aiohttp import web
 
@@ -9294,6 +9357,7 @@ def webapp_routes():
         rows = await pool().fetch("SELECT id, title, category, aliases, photos, videos, rarity FROM wiki_entries ORDER BY title")
         items = [{"id": r["id"], "t": r["title"], "c": r["category"], "a": json.loads(r["aliases"] or "[]"),
                   "p": wiki_thumb_id(r), "r": r["rarity"]} for r in rows]
+        asyncio.create_task(prewarm_thumbs([i["p"] for i in items if i["p"]]))
         return web.json_response({"edit": can, "cats": WIKI_CATEGORIES, "items": items, "layout": await webapp_layout()})
 
     async def api_layout(request):
@@ -9359,26 +9423,24 @@ def webapp_routes():
 
     async def api_media(request):
         await webapp_auth(request)
+        body, ctype = await media_fetch(request.match_info["fid"])
+        return web.Response(body=body, content_type=ctype, headers={"Cache-Control": "private, max-age=86400"})
+
+    async def api_thumb(request):
+        # уменьшенная копия (до 640px, WebP с прозрачностью): грузится быстро, в списке и на карточке
+        await webapp_auth(request)
         fid = request.match_info["fid"]
-        if fid not in _media_cache:
-            try:
-                f = await B().get_file(fid)
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as sess:
-                    async with sess.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as resp:
-                        body = await resp.read()
-            except Exception:
-                raise web.HTTPNotFound()
-            ctype = {"mp4": "video/mp4", "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                     "webp": "image/webp", "gif": "image/gif"}.get(f.file_path.rsplit(".", 1)[-1].lower(), "application/octet-stream")
-            if sum(len(v[0]) for v in _media_cache.values()) > 60_000_000:  # кэш в памяти до ~60 МБ
-                _media_cache.clear()
-            _media_cache[fid] = (body, ctype)
-        body, ctype = _media_cache[fid]
+        if fid not in _thumb_cache:
+            body, ctype = await media_fetch(fid)
+            if len(_thumb_cache) > 400:
+                _thumb_cache.clear()
+            _thumb_cache[fid] = await asyncio.to_thread(make_thumb, body, ctype)
+        body, ctype = _thumb_cache[fid]
         return web.Response(body=body, content_type=ctype, headers={"Cache-Control": "private, max-age=86400"})
 
     app = web.Application(client_max_size=1_000_000)
     app.add_routes([web.get("/", index), web.get("/api/list", api_list), web.get("/api/entry/{id}", api_entry),
-                    web.post("/api/save", api_save), web.post("/api/layout", api_layout), web.get("/api/media/{fid}", api_media)])
+                    web.post("/api/save", api_save), web.post("/api/layout", api_layout), web.get("/api/media/{fid}", api_media), web.get("/api/thumb/{fid}", api_thumb)])
     return app
 
 

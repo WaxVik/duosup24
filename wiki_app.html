@@ -120,15 +120,23 @@ input.f,textarea.f,select.f{width:100%;padding:12px 16px;border:0;border-radius:
 .dots i{display:block;width:6px;height:6px;border-radius:3px;background:rgb(255 255 255/.4);transition:width .4s var(--spring),background .3s}.dots i.on{width:18px;background:#fff}
 .ptitle{position:relative;z-index:3;padding:14px 18px 18px;text-shadow:0 2px 12px #000}
 .tglass{position:absolute;inset:0;z-index:2;pointer-events:none;border-radius:inherit;background:rgb(255 255 255/.02);box-shadow:inset 0 1px 0 rgb(255 255 255/.45),inset 0 -8px 14px -8px rgb(0 0 0/.35),inset 0 0 14px rgb(255 255 255/.08)}
+
+/* ===== правки: панели и кнопки редактора едут вместе со страницей, без наложения ===== */
+.glass.bar,.glass.fab{position:relative;left:auto;right:auto;top:auto;bottom:auto;z-index:2}
+.glass.bar{margin:10px 16px 0;border-radius:26px;padding:12px 14px;display:grid;gap:4px}
+.glass.fab{margin:10px 16px 0;display:flex;gap:8px;justify-content:flex-end;background:none;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none;animation:none}
+.glass.fab::after{display:none}
+#dock #add{width:100%;margin:2px 0 0}
+img.ld{opacity:0;transition:opacity .35s var(--spring)}img.ld.ok{opacity:1}
 </style></head><body>
 <div class="edge"></div>
 <div id="home"><h1>Wiki<small>DuoSup • Blox Fruits</small></h1><div class="list" id="list"></div></div>
 <div class="glass dock" id="dock">
   <input class="srch" id="q" placeholder="Поиск" autocomplete="off">
+  <button class="gbtn pri hide" id="add">＋ Добавить запись</button>
   <div class="tabs"><button class="mbtn" id="menu" aria-label="Категории"><i></i><i></i><i></i></button><div class="chips" id="chips"></div></div>
 </div>
 <div class="sheet hide" id="sheet"><div class="scrim" id="scrim"></div><div class="glass sbox" id="sbox"><div id="sitems"></div></div></div>
-<button class="fbtn hide" id="add">＋ Добавить запись</button>
 <div id="view" class="hide"></div><div id="form" class="hide"></div>
 <script>
 const tg=window.Telegram.WebApp;tg.ready();tg.expand();try{tg.setHeaderColor('#000000');tg.setBackgroundColor('#000000')}catch(e){}
@@ -153,10 +161,12 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const mu=id=>`/api/media/${encodeURIComponent(id)}?d=${encodeURIComponent(tg.initData)}`;
 const norm=s=>(s||'').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}\s]/gu,' ').replace(/\s+/g,' ').trim();
 const isImg=m=>m&&(m.t=='photo'||m.t=='image');
+const tu=id=>`/api/thumb/${encodeURIComponent(id)}?d=${encodeURIComponent(tg.initData)}`;
+const ldi=(id,extra='')=>`<img class="ld" src="${tu(id)}" loading="lazy" onload="this.classList.add('ok')"${extra}>`;
 function face(m,ctl){
  if(!m)return '<div class="face">✦</div><div class="face back"></div>';
  if(!isImg(m))return `<div class="face"><video src="${mu(m.id)}" ${ctl?'controls':''} playsinline preload="metadata"></video></div><div class="face back"></div>`;
- return `<div class="face"><img src="${mu(m.id)}" loading="lazy"></div><div class="face back"><img src="${mu(m.id)}" loading="lazy"></div>`}
+ return `<div class="face">${ldi(m.id)}</div><div class="face back">${ldi(m.id)}</div>`}
 const OK=new Set(['B','I','U','S','CODE','PRE','BLOCKQUOTE','BR','EM','STRONG','A']);
 function clean(html){const d=new DOMParser().parseFromString('<div>'+(html||'').replace(/\[\[([^\]|]{1,80})(?:\|([^\]]*))?\]\]/g,(m,t,l)=>`<a data-w="${esc(t)}">${esc(l||t)}</a>`)+'</div>','text/html').body.firstChild;
  (function w(n){[...n.childNodes].forEach(c=>{if(c.nodeType==3)return;if(c.nodeType!=1){c.remove();return}
@@ -210,20 +220,20 @@ $('view').addEventListener('pointermove',e=>{if(!SW)return;const dx=e.clientX-SW
 const swEnd=()=>{if(!SW)return;const was=SW.lock,dx=SW.dx;SW.tr&&SW.tr.classList.remove('drag');SW=null;if(was=='x'){Math.abs(dx)>40?go(HI+(dx<0?1:-1)):go(HI)}};
 $('view').addEventListener('pointerup',swEnd);$('view').addEventListener('pointercancel',swEnd);
 
-function renderEntry(back){const d=E,m0=d.media[0],L=(LE&&WL)?WL:layFor(d.category);let h='';
+function renderEntry(back){const d=E,m0=d.media[0],L=(LE&&WL)?WL:layFor(d.category);let h='',fab='';if(!d.edit)LE=false;
   if(LE){const others=DATA.cats.filter(c=>c!=d.category);h+=`<div class="glass bar"><div class="sub" style="margin:0 2px 4px">Макет категории «${esc(d.category)}». Двигайте блоки за ⋮⋮</div><label>Большое фото сверху<input type="checkbox" id="l_hero" ${L.hero?'checked':''}></label><label>Миниатюры<input type="checkbox" id="l_thumbs" ${L.thumbs?'checked':''}></label><label>Фото в списке<input type="checkbox" id="l_lp" ${L.listphoto?'checked':''}></label><button class="gbtn pri" id="lsave">Сохранить макет</button><select class="f" id="l_to" style="margin-top:6px"><option value="">Скопировать в категорию…</option>${others.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select><button class="gbtn" id="lcopy">Скопировать макет</button></div>`}
  h+=`<div class="prof${isGold(d.category)?' gold':''}" style="${gs(d.rarity,d.category)}"><div class="grad"></div>`;
  if(L.hero)h+=`<div class="hero"><div class="track" id="track">${(d.media.length?d.media:[null]).map(m=>`<div class="slide"><div class="flipper">${face(m,1)}</div></div>`).join('')}</div>${(L.thumbs&&d.media.length>1)?'<div class="dots">'+d.media.map((m,i)=>`<i class="${i?'':'on'}"></i>`).join('')+'</div>':''}</div>`;
  h+=`<div class="ptitle"><h2>${esc(d.title)}</h2><div class="pmeta"><span>${esc(d.category)}</span>${rp(d.rarity,d.category)}</div></div><div class="tglass"></div></div>`;
- if(false)h+='<div class="thumbs">'+d.media.map((m,i)=>`<div class="${i?'':'on'}" data-i="${i}">${isImg(m)?`<img src="${mu(m.id)}" loading="lazy">`:'<i>▶</i>'}</div>`).join('')+'</div>';
+ if(false)h+='<div class="thumbs">'+d.media.map((m,i)=>`<div class="${i?'':'on'}" data-i="${i}">${isImg(m)?`${ldi(m.id)}`:'<i>▶</i>'}</div>`).join('')+'</div>';
  let n=0;L.order.forEach(k=>{const hid=L.hide.includes(k);if(hid&&!LE)return;let body='';
-  if(k=='skills'){if(!d.skills.length&&!LE)return;body=d.skills.map(s=>`<p><b>${esc(s.label)}${s.form==2?' · V2':''}</b><br>${clean(s.text)}</p>`+(s.media.length?'<div class="grid">'+s.media.map(m=>isImg(m)?`<img src="${mu(m.id)}" loading="lazy">`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`).join('')+'</div>':'')).join('')}
+  if(k=='skills'){if(!d.skills.length&&!LE)return;body=d.skills.map(s=>`<p><b>${esc(s.label)}${s.form==2?' · V2':''}</b><br>${clean(s.text)}</p>`+(s.media.length?'<div class="grid">'+s.media.map(m=>isImg(m)?`${ldi(m.id)}`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`).join('')+'</div>':'')).join('')}
   else{if(!(d[k]||'').trim()&&!LE)return;body=clean(d[k])}
   h+=`<div class="sec ${hid?'dim':''}" data-k="${k}" style="--i:${n++}"><h3>${NAMES[k]}</h3>${body}${LE?`<div class="tools"><button class="grip" data-m="drag" data-k="${k}">⋮⋮</button><button data-m="eye" data-k="${k}">${hid?'🚫':'👁'}</button></div>`:''}</div>`});
- if(d.media.length)h+='<div class="album"><h3>Альбом · '+d.media.length+'</h3><div class="ag">'+d.media.map((m,i)=>`<div class="at" data-i="${i}">${isImg(m)?`<img src="${mu(m.id)}" loading="lazy">`:`<video src="${mu(m.id)}" preload="metadata" muted playsinline></video><i>▶</i>`}</div>`).join('')+'</div></div>';
- if(d.edit&&!LE)h+='<div class="glass fab"><button class="gbtn" id="le">Макет</button><button class="gbtn pri" id="ed">Править</button></div>';
+ if(d.media.length)h+='<div class="album"><h3>Альбом · '+d.media.length+'</h3><div class="ag">'+d.media.map((m,i)=>`<div class="at" data-i="${i}">${isImg(m)?`${ldi(m.id)}`:`<video src="${mu(m.id)}" preload="metadata" muted playsinline></video><i>▶</i>`}</div>`).join('')+'</div></div>';
+ if(d.edit&&!LE)fab+='<div class="glass fab"><button class="gbtn" id="le">Макет</button><button class="gbtn pri" id="ed">Править</button></div>';
  h+='<div style="height:150px"></div>';
- $('view').innerHTML=h;show('view',back);
+ $('view').innerHTML=fab+h;show('view',back);
  if(d.edit){if(LE){$('lsave').onclick=saveLayout;$('lcopy').onclick=copyLayout}else{$('ed').onclick=()=>editForm(d);$('le').onclick=()=>{WL=layFor(d.category);LE=true;renderEntry()}}}}
 async function openEntry(id,back){try{E=await api('/api/entry/'+id);OPEN=id;LE=false;renderEntry(back)}catch(e){tg.showAlert(e.message)}}
 function readBar(){['hero','thumbs','listphoto'].forEach((nm,j)=>{const c=$(['l_hero','l_thumbs','l_lp'][j]);if(c)WL[nm]=c.checked})}
@@ -234,7 +244,7 @@ async function copyLayout(){readBar();const to=$('l_to').value;if(!to){tg.showAl
  LAY.cats=LAY.cats||{};LAY.cats[to]=CP(WL);
  try{await pushLayout();tg.showAlert('Макет скопирован в «'+to+'»')}catch(e){tg.showAlert(e.message)}}
 $('view').onclick=e=>{const al=e.target.closest('.album .at');if(al){const m=E.media[+al.dataset.i];const lb=document.createElement('div');lb.className='lb';
- lb.innerHTML=(isImg(m)?`<img src="${mu(m.id)}">`:`<video src="${mu(m.id)}" controls autoplay playsinline></video>`)+'<button class="gbtn x">✕</button>';
+ lb.innerHTML=(isImg(m)?`${ldi(m.id)}`:`<video src="${mu(m.id)}" controls autoplay playsinline></video>`)+'<button class="gbtn x">✕</button>';
  lb.onclick=ev=>{if(ev.target===lb||ev.target.closest('.x'))lb.remove()};document.body.appendChild(lb);return}
  
   const b=e.target.closest('.tools button');if(b){const k=b.dataset.k;if(b.dataset.m=='eye'){readBar();WL.hide=WL.hide.includes(k)?WL.hide.filter(x=>x!=k):[...WL.hide,k];renderEntry()}return}
