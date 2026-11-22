@@ -95,6 +95,19 @@ input.f,textarea.f,select.f{width:100%;padding:12px 16px;border:0;border-radius:
 @media (prefers-reduced-transparency:reduce){.glass,.gbtn{background:#2c2c2e;-webkit-backdrop-filter:none;backdrop-filter:none}.edge{-webkit-backdrop-filter:none;backdrop-filter:none}}
 @media (prefers-contrast:more){.glass,.gbtn{background:#2c2c2e;-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:0 0 0 1px #fff}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* ===== плитка предмета: слои снизу вверх — градиент, фото, стекло ===== */
+@keyframes drift{0%,100%{background-position:50% 0%}50%{background-position:50% 100%}}
+.prof{position:relative;margin:12px 16px 0;padding:0;border-radius:30px;overflow:hidden;background:rgb(255 255 255/.02);box-shadow:var(--gvol);animation:rise .6s var(--spring) both}
+.prof .grad{position:absolute;inset:0;z-index:0;border-radius:inherit;pointer-events:none;background:linear-gradient(180deg,var(--c2) 0%,var(--c1) 14%,transparent 30%,transparent 62%,var(--c1) 80%,var(--c3) 100%);background-size:100% 240%;animation:drift 7s ease-in-out infinite}
+.gold.prof .grad{background:linear-gradient(180deg,#fff6c2 0%,#ffd34d 14%,transparent 30%,transparent 62%,#ffd34d 80%,#6b4300 100%);background-size:100% 240%;animation:drift 4s ease-in-out infinite}
+.hero{position:relative;z-index:1;aspect-ratio:1/1;max-height:60vh;width:100%;overflow:hidden;background:none}
+.track{display:flex;height:100%;transition:transform .5s var(--spring)}.track.drag{transition:none}
+.slide{position:relative;flex:0 0 100%;height:100%}
+.slide .face{font-size:56px;background:none}.slide .face img,.slide .face video{object-fit:contain}
+.dots{position:absolute;left:0;right:0;bottom:12px;display:flex;justify-content:center;gap:6px;z-index:3;pointer-events:none}
+.dots i{display:block;width:6px;height:6px;border-radius:3px;background:rgb(255 255 255/.4);transition:width .4s var(--spring),background .3s}.dots i.on{width:18px;background:#fff}
+.ptitle{position:relative;z-index:3;padding:14px 18px 18px;text-shadow:0 2px 12px #000}
+.tglass{position:absolute;inset:0;z-index:2;pointer-events:none;border-radius:inherit;background:rgb(255 255 255/.02);box-shadow:inset 0 1px 0 rgb(255 255 255/.45),inset 0 -8px 14px -8px rgb(0 0 0/.35),inset 0 0 14px rgb(255 255 255/.08)}
 </style></head><body>
 <div class="edge"></div>
 <div id="home"><h1>Wiki<small>DuoSup • Blox Fruits</small></h1><div class="list" id="list"></div></div>
@@ -127,9 +140,10 @@ const api=async(u,o={})=>{const r=await fetch(u,{...o,headers:{...H,...(o.header
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const mu=id=>`/api/media/${encodeURIComponent(id)}?d=${encodeURIComponent(tg.initData)}`;
 const norm=s=>(s||'').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}\s]/gu,' ').replace(/\s+/g,' ').trim();
+const isImg=m=>m&&(m.t=='photo'||m.t=='image');
 function face(m,ctl){
  if(!m)return '<div class="face">✦</div><div class="face back"></div>';
- if(m.t!='photo')return `<div class="face"><video src="${mu(m.id)}" ${ctl?'controls':''} playsinline preload="metadata"></video></div><div class="face back"></div>`;
+ if(!isImg(m))return `<div class="face"><video src="${mu(m.id)}" ${ctl?'controls':''} playsinline preload="metadata"></video></div><div class="face back"></div>`;
  return `<div class="face"><img src="${mu(m.id)}" loading="lazy"></div><div class="face back"><img src="${mu(m.id)}" loading="lazy"></div>`}
 const OK=new Set(['B','I','U','S','CODE','PRE','BLOCKQUOTE','BR','EM','STRONG','A']);
 function clean(html){const d=new DOMParser().parseFromString('<div>'+(html||'').replace(/\[\[([^\]|]{1,80})(?:\|([^\]]*))?\]\]/g,(m,t,l)=>`<a data-w="${esc(t)}">${esc(l||t)}</a>`)+'</div>','text/html').body.firstChild;
@@ -168,21 +182,30 @@ function flipZone(e,sel){const z=e.target.closest(sel);if(FZ&&FZ!==z)FZ.querySel
  if(z)z.querySelector('.flipper')?.classList.toggle('flip',edgeNear(e,z));FZ=z}
 $('list').addEventListener('pointermove',e=>flipZone(e,'.th'));
 $('list').addEventListener('pointerleave',()=>{FZ&&FZ.querySelector('.flipper')?.classList.remove('flip');FZ=null});
-$('view').addEventListener('pointermove',e=>flipZone(e,'.hero'));
+$('view').addEventListener('pointermove',e=>{if(!SW||SW.lock!='x')flipZone(e,'.slide')});
 $('view').addEventListener('pointerleave',()=>{FZ&&FZ.querySelector('.flipper')?.classList.remove('flip');FZ=null});
 $('q').oninput=renderList;
 $('list').onclick=e=>{const r=e.target.closest('.row');if(r)openEntry(+r.dataset.id)};
 /* ----- карточка предмета ----- */
 const NAMES={description:'Описание',obtain:'Как получить',stats:'Характеристика',notes:'Примечания',skills:'Скиллы'};
-function setHero(i){const m=E.media[i];$('hf').innerHTML=face(m,1);$('hf').classList.remove('flip');document.querySelectorAll('.thumbs>div').forEach((d,k)=>d.classList.toggle('on',k==i))}
+let HI=0,SW=null;
+function go(i){const tr=$('track');if(!tr)return;const n=tr.children.length;HI=Math.max(0,Math.min(n-1,i));tr.style.transform=`translateX(${-HI*100}%)`;
+ document.querySelectorAll('.dots i').forEach((d,k)=>d.classList.toggle('on',k==HI))}
+$('view').addEventListener('pointerdown',e=>{const hr=e.target.closest('.hero');if(!hr||e.target.closest('.tools'))return;SW={x0:e.clientX,y0:e.clientY,dx:0,lock:null,tr:$('track')}});
+$('view').addEventListener('pointermove',e=>{if(!SW)return;const dx=e.clientX-SW.x0,dy=e.clientY-SW.y0;
+ if(!SW.lock&&(Math.abs(dx)>8||Math.abs(dy)>8)){SW.lock=Math.abs(dx)>Math.abs(dy)?'x':'y';if(SW.lock=='x'&&SW.tr)SW.tr.classList.add('drag')}
+ if(SW.lock=='x'&&SW.tr){SW.dx=dx;SW.tr.style.transform=`translateX(calc(${-HI*100}% + ${dx}px))`;FZ&&FZ.querySelector('.flipper')?.classList.remove('flip')}});
+const swEnd=()=>{if(!SW)return;const was=SW.lock,dx=SW.dx;SW.tr&&SW.tr.classList.remove('drag');SW=null;if(was=='x'){Math.abs(dx)>40?go(HI+(dx<0?1:-1)):go(HI)}};
+$('view').addEventListener('pointerup',swEnd);$('view').addEventListener('pointercancel',swEnd);
+
 function renderEntry(back){const d=E,m0=d.media[0],L=(LE&&WL)?WL:layFor(d.category);let h='';
   if(LE){const others=DATA.cats.filter(c=>c!=d.category);h+=`<div class="glass bar"><div class="sub" style="margin:0 2px 4px">Макет категории «${esc(d.category)}». Двигайте блоки за ⋮⋮</div><label>Большое фото сверху<input type="checkbox" id="l_hero" ${L.hero?'checked':''}></label><label>Миниатюры<input type="checkbox" id="l_thumbs" ${L.thumbs?'checked':''}></label><label>Фото в списке<input type="checkbox" id="l_lp" ${L.listphoto?'checked':''}></label><button class="gbtn pri" id="lsave">Сохранить макет</button><select class="f" id="l_to" style="margin-top:6px"><option value="">Скопировать в категорию…</option>${others.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select><button class="gbtn" id="lcopy">Скопировать макет</button></div>`}
- h+=`<div class="prof${isGold(d.category)?' gold':''}" style="${gs(d.rarity,d.category)}"><div class="pin">`;
- if(L.hero)h+=`<div class="hero"><div class="flipper" id="hf">${face(m0,1)}</div></div>`;
- h+=`<div class="ptitle"><h2>${esc(d.title)}</h2><div class="pmeta"><span>${esc(d.category)}</span>${rp(d.rarity,d.category)}</div></div></div></div>`;
- if(L.hero&&L.thumbs&&d.media.length>1)h+='<div class="thumbs">'+d.media.map((m,i)=>`<div class="${i?'':'on'}" data-i="${i}">${m.t=='photo'?`<img src="${mu(m.id)}" loading="lazy">`:'<i>▶</i>'}</div>`).join('')+'</div>';
+ h+=`<div class="prof${isGold(d.category)?' gold':''}" style="${gs(d.rarity,d.category)}"><div class="grad"></div>`;
+ if(L.hero)h+=`<div class="hero"><div class="track" id="track">${(d.media.length?d.media:[null]).map(m=>`<div class="slide"><div class="flipper">${face(m,1)}</div></div>`).join('')}</div>${(L.thumbs&&d.media.length>1)?'<div class="dots">'+d.media.map((m,i)=>`<i class="${i?'':'on'}"></i>`).join('')+'</div>':''}</div>`;
+ h+=`<div class="ptitle"><h2>${esc(d.title)}</h2><div class="pmeta"><span>${esc(d.category)}</span>${rp(d.rarity,d.category)}</div></div><div class="tglass"></div></div>`;
+ if(false)h+='<div class="thumbs">'+d.media.map((m,i)=>`<div class="${i?'':'on'}" data-i="${i}">${isImg(m)?`<img src="${mu(m.id)}" loading="lazy">`:'<i>▶</i>'}</div>`).join('')+'</div>';
  let n=0;L.order.forEach(k=>{const hid=L.hide.includes(k);if(hid&&!LE)return;let body='';
-  if(k=='skills'){if(!d.skills.length&&!LE)return;body=d.skills.map(s=>`<p><b>${esc(s.label)}${s.form==2?' · V2':''}</b><br>${clean(s.text)}</p>`+(s.media.length?'<div class="grid">'+s.media.map(m=>m.t=='photo'?`<img src="${mu(m.id)}" loading="lazy">`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`).join('')+'</div>':'')).join('')}
+  if(k=='skills'){if(!d.skills.length&&!LE)return;body=d.skills.map(s=>`<p><b>${esc(s.label)}${s.form==2?' · V2':''}</b><br>${clean(s.text)}</p>`+(s.media.length?'<div class="grid">'+s.media.map(m=>isImg(m)?`<img src="${mu(m.id)}" loading="lazy">`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`).join('')+'</div>':'')).join('')}
   else{if(!(d[k]||'').trim()&&!LE)return;body=clean(d[k])}
   h+=`<div class="sec ${hid?'dim':''}" data-k="${k}" style="--i:${n++}"><h3>${NAMES[k]}</h3>${body}${LE?`<div class="tools"><button class="grip" data-m="drag" data-k="${k}">⋮⋮</button><button data-m="eye" data-k="${k}">${hid?'🚫':'👁'}</button></div>`:''}</div>`});
  if(d.edit&&!LE)h+='<div class="glass fab"><button class="gbtn" id="le">Макет</button><button class="gbtn pri" id="ed">Править</button></div>';
@@ -197,7 +220,7 @@ async function saveLayout(){readBar();const cat=E.category;LAY.cats=LAY.cats||{}
 async function copyLayout(){readBar();const to=$('l_to').value;if(!to){tg.showAlert('Выберите категорию');return}
  LAY.cats=LAY.cats||{};LAY.cats[to]=CP(WL);
  try{await pushLayout();tg.showAlert('Макет скопирован в «'+to+'»')}catch(e){tg.showAlert(e.message)}}
-$('view').onclick=e=>{const t=e.target.closest('.thumbs>div');if(t){setHero(+t.dataset.i);return}
+$('view').onclick=e=>{
   const b=e.target.closest('.tools button');if(b){const k=b.dataset.k;if(b.dataset.m=='eye'){readBar();WL.hide=WL.hide.includes(k)?WL.hide.filter(x=>x!=k):[...WL.hide,k];renderEntry()}return}
  const a=e.target.closest('a[data-w]');if(a){const k=norm(a.dataset.w);const f=DATA.items.find(i=>norm(i.t)==k||i.a.some(x=>norm(x)==k));if(f)openEntry(f.id)}};
 /* ----- перетаскивание блоков макета ----- */
@@ -268,7 +291,7 @@ tileLens();
 var q=new Set(),raf=0;
  var ro=new ResizeObserver(function(l){l.forEach(function(e){q.add(e.target)});
   if(!raf)raf=requestAnimationFrame(function(){raf=0;var o=Array.from(q);q.clear();o.forEach(build)})});
- var SEL='.dock,.bar,.gbtn';
+ var SEL='.dock,.bar,.gbtn,.tglass';
  function scan(root){
   if(!root.querySelectorAll)return;
   var list=[].slice.call(root.querySelectorAll(SEL));

@@ -7242,7 +7242,13 @@ def wk_category_markup(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+IMG_DOC = F.document.mime_type.in_({"image/png", "image/webp", "image/jpeg", "image/gif"})
+
+
 def wk_media_item(msg: Message):
+    if msg.document and msg.document.mime_type and msg.document.mime_type.startswith("image/"):
+        # картинка отправлена как файл — Telegram не сжимает её, прозрачный фон сохраняется
+        return ("image", msg.document.file_id)
     if msg.photo:
         return ("photo", msg.photo[-1].file_id)
     if msg.video:
@@ -7370,7 +7376,7 @@ async def wk_notes(msg: Message, state: FSMContext):
     await reply(msg, "({39})Отправьте <b>фото и видео</b> по одному (они будут слайд-шоу). Когда закончите — /done. «-» — без медиа.")
 
 
-@dp.message(WikiSt.photos, F.photo | F.video | F.animation)
+@dp.message(WikiSt.photos, F.photo | F.video | F.animation | IMG_DOC)
 async def wk_photo(msg: Message, state: FSMContext):
     media = (await state.get_data()).get("media", [])
     media.append(list(wk_media_item(msg)))
@@ -7546,7 +7552,7 @@ async def wk_edit_value(msg: Message, state: FSMContext):
     await reply(msg, wiki_card(entry), wiki_edit_markup(eid))
 
 
-@dp.message(WikiSt.edit_photos, F.photo | F.video | F.animation)
+@dp.message(WikiSt.edit_photos, F.photo | F.video | F.animation | IMG_DOC)
 async def wk_edit_photo(msg: Message, state: FSMContext):
     media = (await state.get_data()).get("media", [])
     media.append(list(wk_media_item(msg)))
@@ -7681,7 +7687,7 @@ async def wk_sk_text(msg: Message, state: FSMContext):
     await reply(msg, "({39})Теперь несколько фото или видео этого приёма по одному, затем /done. «-» — без медиа.")
 
 
-@dp.message(WikiSt.sk_media, F.photo | F.video | F.animation)
+@dp.message(WikiSt.sk_media, F.photo | F.video | F.animation | IMG_DOC)
 async def wk_sk_media(msg: Message, state: FSMContext):
     media = (await state.get_data()).get("media", [])
     media.append(list(wk_media_item(msg)))
@@ -9161,6 +9167,16 @@ WEBAPP_LAYOUT_DEFAULT = {"order": ["description", "obtain", "stats", "notes", "s
 _media_cache: dict[str, tuple[bytes, str]] = {}  # file_id -> (байты, тип): чтобы не качать из Telegram каждый раз
 
 
+def wiki_thumb_id(r):
+    photos = json.loads(r["photos"] or "[]")
+    if photos:
+        return photos[0]
+    for m in json.loads(r["videos"] or "[]"):
+        if isinstance(m, dict) and m.get("t") == "image" and m.get("id"):
+            return m["id"]
+    return None
+
+
 async def webapp_layout() -> dict:
     try:
         return {**WEBAPP_LAYOUT_DEFAULT, **json.loads(await get_config("wiki_layout") or "{}")}
@@ -9180,7 +9196,7 @@ def webapp_routes():
         uid, can = await webapp_auth(request)
         rows = await pool().fetch("SELECT id, title, category, aliases, photos, videos, rarity FROM wiki_entries ORDER BY title")
         items = [{"id": r["id"], "t": r["title"], "c": r["category"], "a": json.loads(r["aliases"] or "[]"),
-                  "p": (json.loads(r["photos"] or "[]") or [None])[0], "r": r["rarity"]} for r in rows]
+                  "p": wiki_thumb_id(r), "r": r["rarity"]} for r in rows]
         return web.json_response({"edit": can, "cats": WIKI_CATEGORIES, "items": items, "layout": await webapp_layout()})
 
     async def api_layout(request):
