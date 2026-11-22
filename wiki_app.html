@@ -95,6 +95,18 @@ input.f,textarea.f,select.f{width:100%;padding:12px 16px;border:0;border-radius:
 @media (prefers-reduced-transparency:reduce){.glass,.gbtn{background:#2c2c2e;-webkit-backdrop-filter:none;backdrop-filter:none}.edge{-webkit-backdrop-filter:none;backdrop-filter:none}}
 @media (prefers-contrast:more){.glass,.gbtn{background:#2c2c2e;-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:0 0 0 1px #fff}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* ===== единый размер капсул редкости ===== */
+.rp,.pmeta .rp{display:inline-flex;align-items:center;justify-content:center;flex:none;width:112px;height:24px;padding:0 6px;box-sizing:border-box;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;text-align:center;font-size:11px;letter-spacing:.2px}
+.hero,.track,.slide{touch-action:pan-y;user-select:none;-webkit-user-select:none}
+/* ===== альбом под карточкой ===== */
+.album{margin:14px 16px 0}.album h3{margin:0 4px 8px;font-size:13px;font-weight:600;color:var(--l2)}
+.album .ag{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.album .at{position:relative;aspect-ratio:1/1;border-radius:16px;overflow:hidden;background:var(--card);box-shadow:var(--gvol-s);cursor:pointer;transition:transform .49s var(--spring)}
+.album .at:active{transform:scale(.96)}.album .at img,.album .at video{width:100%;height:100%;object-fit:contain}
+.album .at i{position:absolute;inset:0;display:grid;place-items:center;font-style:normal;color:var(--label);background:#0006;font-size:22px}
+.lb{position:fixed;inset:0;z-index:50;background:#000d;display:grid;place-items:center;padding:20px;animation:mat .3s var(--spring) both}
+.lb img,.lb video{max-width:100%;max-height:86vh;object-fit:contain;border-radius:18px}
+.lb .x{position:absolute;top:calc(env(safe-area-inset-top) + 12px);right:14px}
 /* ===== плитка предмета: слои снизу вверх — градиент, фото, стекло ===== */
 @keyframes drift{0%,100%{background-position:50% 0%}50%{background-position:50% 100%}}
 .prof{position:relative;margin:12px 16px 0;padding:0;border-radius:30px;overflow:hidden;background:rgb(255 255 255/.02);box-shadow:var(--gvol);animation:rise .6s var(--spring) both}
@@ -121,7 +133,7 @@ input.f,textarea.f,select.f{width:100%;padding:12px 16px;border:0;border-radius:
 <script>
 const tg=window.Telegram.WebApp;tg.ready();tg.expand();try{tg.setHeaderColor('#000000');tg.setBackgroundColor('#000000')}catch(e){}
 const H={'X-Init-Data':tg.initData};
-const RAR={mythical:{n:'Мифический',c:['#6b0f1a','#ff3b5c','#ffd0d8']},permanent:{n:'Permanent',c:['#7a5a00','#f5c542','#fff3b0']},legendary:{n:'Легендарный',c:['#8a1f5a','#ff6ec7','#ffd1ef']},rare:{n:'Эпический',c:['#3b1d7a','#9d5cff','#e3d4ff']},uncommon:{n:'Необычный',c:['#124a80','#3da5ff','#cfe7ff']},common:{n:'Обычный',c:['#3a3a3f','#8e8e93','#e5e5ea']},'':{n:'',c:['#2c2c2e','#6e6e73','#c7c7cc']}};
+const RAR={mythical:{n:'Mythical',c:['#6b0f1a','#ff3b5c','#ffd0d8']},permanent:{n:'Permanent',c:['#7a5a00','#f5c542','#fff3b0']},legendary:{n:'Legendary',c:['#8a1f5a','#ff6ec7','#ffd1ef']},rare:{n:'Rare / Epic',c:['#3b1d7a','#9d5cff','#e3d4ff']},uncommon:{n:'Uncommon',c:['#124a80','#3da5ff','#cfe7ff']},common:{n:'Common',c:['#3a3a3f','#8e8e93','#e5e5ea']},'':{n:'',c:['#2c2c2e','#6e6e73','#c7c7cc']}};
 const ORDER=['permanent','mythical','legendary','rare','uncommon','common',''];
 const RANK=Object.fromEntries(ORDER.map((k,i)=>[k,i]));
 const num=v=>Number(v)||0;
@@ -208,6 +220,7 @@ function renderEntry(back){const d=E,m0=d.media[0],L=(LE&&WL)?WL:layFor(d.catego
   if(k=='skills'){if(!d.skills.length&&!LE)return;body=d.skills.map(s=>`<p><b>${esc(s.label)}${s.form==2?' · V2':''}</b><br>${clean(s.text)}</p>`+(s.media.length?'<div class="grid">'+s.media.map(m=>isImg(m)?`<img src="${mu(m.id)}" loading="lazy">`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`).join('')+'</div>':'')).join('')}
   else{if(!(d[k]||'').trim()&&!LE)return;body=clean(d[k])}
   h+=`<div class="sec ${hid?'dim':''}" data-k="${k}" style="--i:${n++}"><h3>${NAMES[k]}</h3>${body}${LE?`<div class="tools"><button class="grip" data-m="drag" data-k="${k}">⋮⋮</button><button data-m="eye" data-k="${k}">${hid?'🚫':'👁'}</button></div>`:''}</div>`});
+ if(d.media.length)h+='<div class="album"><h3>Альбом · '+d.media.length+'</h3><div class="ag">'+d.media.map((m,i)=>`<div class="at" data-i="${i}">${isImg(m)?`<img src="${mu(m.id)}" loading="lazy">`:`<video src="${mu(m.id)}" preload="metadata" muted playsinline></video><i>▶</i>`}</div>`).join('')+'</div></div>';
  if(d.edit&&!LE)h+='<div class="glass fab"><button class="gbtn" id="le">Макет</button><button class="gbtn pri" id="ed">Править</button></div>';
  h+='<div style="height:150px"></div>';
  $('view').innerHTML=h;show('view',back);
@@ -220,7 +233,10 @@ async function saveLayout(){readBar();const cat=E.category;LAY.cats=LAY.cats||{}
 async function copyLayout(){readBar();const to=$('l_to').value;if(!to){tg.showAlert('Выберите категорию');return}
  LAY.cats=LAY.cats||{};LAY.cats[to]=CP(WL);
  try{await pushLayout();tg.showAlert('Макет скопирован в «'+to+'»')}catch(e){tg.showAlert(e.message)}}
-$('view').onclick=e=>{
+$('view').onclick=e=>{const al=e.target.closest('.album .at');if(al){const m=E.media[+al.dataset.i];const lb=document.createElement('div');lb.className='lb';
+ lb.innerHTML=(isImg(m)?`<img src="${mu(m.id)}">`:`<video src="${mu(m.id)}" controls autoplay playsinline></video>`)+'<button class="gbtn x">✕</button>';
+ lb.onclick=ev=>{if(ev.target===lb||ev.target.closest('.x'))lb.remove()};document.body.appendChild(lb);return}
+ 
   const b=e.target.closest('.tools button');if(b){const k=b.dataset.k;if(b.dataset.m=='eye'){readBar();WL.hide=WL.hide.includes(k)?WL.hide.filter(x=>x!=k):[...WL.hide,k];renderEntry()}return}
  const a=e.target.closest('a[data-w]');if(a){const k=norm(a.dataset.w);const f=DATA.items.find(i=>norm(i.t)==k||i.a.some(x=>norm(x)==k));if(f)openEntry(f.id)}};
 /* ----- перетаскивание блоков макета ----- */
