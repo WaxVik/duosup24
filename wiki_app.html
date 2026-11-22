@@ -193,9 +193,13 @@ $('scrim').onclick=()=>$('sheet').classList.add('hide');
 $('sitems').onclick=e=>{const s=e.target.closest('.si');if(s){setCat(s.dataset.c);$('sheet').classList.add('hide')}};
 window.addEventListener('resize',movePill);
 /* ----- список: сортировка по редкости, фото с переворотом у края ----- */
+/* порядок фруктов как в стоке (сверху вниз); всё, чего нет в списке, — после фруктов по редкости */
+const STOCK=['Meme-Meme','Magnet','Dragon','Control','Kitsune','Yeti','Leopard','Spirit','Venom','Shadow','Dough','T-Rex','Mammoth','Gravity','Blizzard','Pain','Lightning','Portal','Phoenix','Sound','Spider','Creation','Love','Buddha','Quake','Magma','Ghost','Rubber','Light','Diamond','Eagle','Dark','Sand','Ice','Flame','Spike','Smoke','Bomb','Spring','Blade','Spin','Rocket'];
+const STOCK_IDX=Object.fromEntries(STOCK.map((n,i)=>[norm(n),i]));
+function stockIdx(i){const k=norm(i.t);if(k in STOCK_IDX)return STOCK_IDX[k];const a=i.a.map(norm).find(x=>x in STOCK_IDX);return a!==undefined?STOCK_IDX[a]:1000}
 function renderList(){const q=norm($('q').value);
  const it=DATA.items.filter(i=>(CAT=='Все'||i.c==CAT)&&(!q||norm(i.t).includes(q)||i.a.some(a=>norm(a).includes(q))))
-  .sort((a,b)=>((RANK[a.r||'']??6)-(RANK[b.r||'']??6))||(num(b.pr)-num(a.pr))||a.t.localeCompare(b.t,'ru'));
+  .sort((a,b)=>(stockIdx(a)-stockIdx(b))||((RANK[a.r||'']??6)-(RANK[b.r||'']??6))||(num(b.pr)-num(a.pr))||a.t.localeCompare(b.t,'ru'));
  $('list').innerHTML=it.length?'<div class="grp">'+it.map((i,n)=>`<div class="row" style="--i:${n};${gs(i.r,i.c)}" data-id="${i.id}">`+
   (layFor(i.c).listphoto?`<div class="th"><div class="grad"></div><div class="gl"></div><div class="flipper">${face(i.p?{t:'photo',id:i.p}:null)}</div></div>`:'')+
   `<div class="rt"><b>${esc(i.t)}</b><small>${esc(i.c)}${fmtPrice(i.pr)}</small></div>${rp(i.r,i.c)}</div>`).join('')+'</div>':'<div class="empty">Ничего не найдено</div>'}
