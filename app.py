@@ -54,7 +54,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.25.1"
+BOT_VERSION = "3.26.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -7810,6 +7810,101 @@ async def wiki_seed_if_empty() -> None:
     LOG.info("wiki: загружена заготовка: %s записей", added + updated)
 
 
+def wiki_cut_black(data: bytes) -> bytes:
+    """Чёрный фон по краям картинки становится прозрачным. Заливка идёт только от краёв,
+    поэтому тёмные места внутри предмета не трогаются. Возвращает PNG."""
+    import io
+    from collections import deque
+    import numpy as np
+    from PIL import Image, ImageFilter
+    im = Image.open(io.BytesIO(data)).convert("RGB")
+    a = np.asarray(im)
+    h, w = a.shape[:2]
+    dark = a.max(axis=2) <= 30
+    reach = np.zeros((h, w), dtype=bool)
+    q: deque = deque()
+
+    def seed(y: int, x: int) -> None:
+        if dark[y, x] and not reach[y, x]:
+            reach[y, x] = True
+            q.append((y, x))
+
+    for x in range(w):
+        seed(0, x)
+        seed(h - 1, x)
+    for y in range(h):
+        seed(y, 0)
+        seed(y, w - 1)
+    while q:
+        y, x = q.popleft()
+        for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+            if 0 <= ny < h and 0 <= nx < w and dark[ny, nx] and not reach[ny, nx]:
+                reach[ny, nx] = True
+                q.append((ny, nx))
+    alpha = Image.fromarray(np.where(reach, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(1.2))
+    out_im = im.convert("RGBA")
+    out_im.putalpha(alpha)
+    buf = io.BytesIO()
+    out_im.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+
+@dp.message(Command("wikialpha"))
+async def wikialpha_cmd(msg: Message):
+    """/wikialpha — вырезает чёрный фон у фото фруктов и заменяет их на PNG с прозрачностью.
+    Старые фото сохраняются в config (wiki_alpha_bak_<id>) на случай отката. Только создатель, в личке.
+    /wikialpha all — то же для всех записей с фото."""
+    if not private_creator(msg):
+        await reply(msg, "({15})Эта команда доступна только создателю и только в личке с ботом.")
+        return
+    try:
+        import io  # noqa: F401
+        import numpy  # noqa: F401
+        import PIL  # noqa: F401
+    except ImportError:
+        await reply(msg, "({8})Не хватает библиотек. Добавьте <code>pillow</code> и <code>numpy</code> в requirements.txt и задеплойте.")
+        return
+    from aiogram.types import BufferedInputFile
+    everything = (command_args(msg) or [""])[0].lower() == "all"
+    rows = await pool().fetch("SELECT id, title, category, photos, videos FROM wiki_entries ORDER BY title")
+    todo = [r for r in rows if json.loads(r["photos"] or "[]") and (everything or "фрукт" in (r["category"] or "").lower())]
+    if not todo:
+        await reply(msg, "({8})Нет записей с фото для обработки.")
+        return
+    await reply(msg, f"({{61}})Начинаю: записей {len(todo)}. Это может занять несколько минут, по окончании пришлю итог.")
+    done, failed = 0, []
+    for r in todo:
+        photos = json.loads(r["photos"] or "[]")
+        videos = [v for v in json.loads(r["videos"] or "[]") if isinstance(v, dict)]
+        try:
+            new_ids = []
+            for fid in photos:
+                buf = io.BytesIO()
+                await B().download(fid, destination=buf)
+                png = await asyncio.to_thread(wiki_cut_black, buf.getvalue())
+                sent = await B().send_document(msg.chat.id, BufferedInputFile(png, filename=f"{r['title']}.png"),
+                                               disable_notification=True)
+                new_ids.append(sent.document.file_id)
+                try:
+                    await B().delete_message(msg.chat.id, sent.message_id)  # file_id остаётся, чат не засоряем
+                except Exception:
+                    pass
+            await set_config(f"wiki_alpha_bak_{r['id']}", json.dumps({"photos": photos, "videos": videos}))
+            new_videos = [{"t": "image", "id": x} for x in new_ids] + videos
+            await pool().execute("UPDATE wiki_entries SET photos='[]', videos=$1, updated_at=$2 WHERE id=$3",
+                                 json.dumps(new_videos, ensure_ascii=False), now_ts(), r["id"])
+            done += 1
+        except Exception as exc:
+            LOG.warning("wikialpha: %s не обработана: %s", r["title"], exc)
+            failed.append(f"{r['title']} ({str(exc)[:80]})")
+        await asyncio.sleep(0.5)
+    wiki_dirty()
+    text = f"({{20}})Готово: обработано записей {done} из {len(todo)}."
+    if failed:
+        text += "\nНе удалось:\n" + "\n".join(esc(x) for x in failed[:30])
+    await reply(msg, text)
+
+
 @dp.message(Command("wikiimport"))
 async def wikiimport_cmd(msg: Message, state: FSMContext):
     if not await redact_zone(msg):
@@ -8299,6 +8394,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.26.0", "Вики: команда /wikialpha — вырезает чёрный фон у фото фруктов, фото заменяются на PNG с прозрачностью (только создатель, в личке)"),
     ("3.25.1", "Вики: картинки с прозрачным фоном (PNG) отправляются как файл и не теряют прозрачность; фото листаются свайпом внутри плитки, альбом под карточкой, единые капсулы редкости"),
     ("3.22.4", "Диагностика: в лог пишутся команды и проверка прав редакторов вики"),
     ("3.22.3", "Вики: редактор, написавший команду не в личке, получает подсказку в личные сообщения"),
