@@ -209,7 +209,7 @@ function renderList(){const q=norm($('q').value);
   .sort((a,b)=>(stockIdx(a)-stockIdx(b))||((RANK[a.r||'']??6)-(RANK[b.r||'']??6))||(num(b.pr)-num(a.pr))||a.t.localeCompare(b.t,'ru'));
  $('list').innerHTML=it.length?'<div class="grp">'+it.map((i,n)=>`<div class="row" style="--i:${n};${gs(i.r,i.c)}" data-id="${i.id}">`+
   (layFor(i.c).listphoto?`<div class="th"><div class="grad"></div><div class="gl"></div><div class="flipper">${face(i.p?{t:'photo',id:i.p}:null)}</div></div>`:'')+
-  `<div class="rt"><b>${esc(i.t)}</b><small>${esc(i.c)}${fmtPrice(i.pr)}</small></div>${rp(i.r,i.c)}</div>`).join('')+'</div>':'<div class="empty">Ничего не найдено</div>'}
+  `<div class="rt"><b>${esc(i.t)}</b><small>${esc(i.c)}</small></div>${rp(i.r,i.c)}</div>`).join('')+'</div>':'<div class="empty">Ничего не найдено</div>'}
 function edgeNear(e,box){const r=box.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;return x<=5||y<=5||r.width-x<=5||r.height-y<=5}
 function flipZone(e,sel){const z=e.target.closest(sel);if(FZ&&FZ!==z)FZ.querySelector('.flipper')?.classList.remove('flip');
  if(z)z.querySelector('.flipper')?.classList.toggle('flip',edgeNear(e,z));FZ=z}
