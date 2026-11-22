@@ -130,15 +130,33 @@ input.f,textarea.f,select.f{width:100%;padding:12px 16px;border:0;border-radius:
 img.ld{opacity:0;transition:opacity .35s var(--spring)}img.ld.ok{opacity:1}
 .pz{color:#30d158;font-weight:700;letter-spacing:0}
 .pz.big{display:block;margin-top:6px;font-size:26px;font-weight:800;letter-spacing:-.02em;color:#30d158;-webkit-text-stroke:1.6px #04260f;paint-order:stroke fill;text-shadow:0 1px 0 #04260f,0 2px 0 #04260f,0 0 16px #30d15899}
+
+/* ===== настройка: Liquid glass можно выключить (матовый режим) ===== */
+.lgrow{display:flex;align-items:center;justify-content:space-between;margin:0 16px 14px;padding:12px 16px;border-radius:18px;background:var(--card);font-size:16px}
+.sw{position:relative;flex:none;width:51px;height:31px;border:0;border-radius:16px;background:#39393d;transition:background .4s var(--spring)}
+.sw i{position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 2px 6px #0006;transition:transform .49s var(--spring)}
+.sw[aria-checked="true"]{background:#30d158}.sw[aria-checked="true"] i{transform:translateX(20px)}
+body.nolg .glass,body.nolg .gbtn,body.nolg .tglass,body.nolg .dock,body.nolg .edge{background:#1c1c1e!important;-webkit-backdrop-filter:none!important;backdrop-filter:none!important;box-shadow:0 0 0 .5px #ffffff22,0 8px 24px #0008!important}
+body.nolg .glass::after,body.nolg .gbtn::before{display:none}
+body.nolg .glass.fab{background:none!important;box-shadow:none!important}
+
+.hdr{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.gear{flex:none;margin:6px 16px 0 0;width:44px;height:44px;padding:0;border-radius:50%;font-size:22px;display:grid;place-items:center}
+.srow2{display:flex;justify-content:space-between;align-items:center;min-height:52px;padding:10px 16px;font-size:17px;color:var(--label)}
+.si-h{padding:8px 16px 4px;font-weight:700;font-size:20px}
+body.nolg .tglass{display:none}
+body.nolg .prof{background:#141416;box-shadow:0 0 0 1px #ffffff2e,0 8px 24px #0008}
+body.nolg .gl{display:none}
+body.noanim *,body.noanim *::before,body.noanim *::after{animation:none!important;transition:none!important}
 </style></head><body>
 <div class="edge"></div>
-<div id="home"><h1>Wiki<small>DuoSup • Blox Fruits</small></h1><div class="list" id="list"></div></div>
+<div id="home"><div class="hdr"><h1>Wiki<small>DuoSup • Blox Fruits</small></h1><button class="gear gbtn" id="gear" aria-label="Настройки">⚙</button></div><div class="list" id="list"></div></div>
 <div class="glass dock" id="dock">
   <input class="srch" id="q" placeholder="Поиск" autocomplete="off">
   <button class="gbtn pri hide" id="add">＋ Добавить запись</button>
   <div class="tabs"><button class="mbtn" id="menu" aria-label="Категории"><i></i><i></i><i></i></button><div class="chips" id="chips"></div></div>
 </div>
-<div class="sheet hide" id="sheet"><div class="scrim" id="scrim"></div><div class="glass sbox" id="sbox"><div id="sitems"></div><div id="ncbox" class="hide" style="padding:8px 8px 4px"><button class="gbtn" id="nc_open" style="width:100%">＋ Создать категорию</button><div id="nc_form" class="hide" style="margin-top:8px;display:grid;gap:8px"><input class="f" id="nc_name" placeholder="Название категории" maxlength="30"><button class="gbtn pri" id="nc_ok" style="width:100%">Создать</button></div></div></div></div>
+<div class="sheet hide" id="setsheet"><div class="scrim" id="setscrim"></div><div class="glass sbox" id="setbox"><div class="si-h">Настройки</div><div class="srow2"><span>Liquid glass</span><button class="sw" id="lgsw" role="switch" aria-checked="true" aria-label="Liquid glass"><i></i></button></div><div class="srow2"><span>Анимации</span><button class="sw" id="answ" role="switch" aria-checked="true" aria-label="Анимации"><i></i></button></div><div class="srow2"><span>Переворот фото у края</span><button class="sw" id="flsw" role="switch" aria-checked="true" aria-label="Переворот"><i></i></button></div><p class="sub" style="padding:6px 16px 10px">Без Liquid glass панели и карточки становятся матовыми с обычной рамкой.</p></div></div><div class="sheet hide" id="sheet"><div class="scrim" id="scrim"></div><div class="glass sbox" id="sbox"><div id="sitems"></div><div id="ncbox" class="hide" style="padding:8px 8px 4px"><button class="gbtn" id="nc_open" style="width:100%">＋ Создать категорию</button><div id="nc_form" class="hide" style="margin-top:8px;display:grid;gap:8px"><input class="f" id="nc_name" placeholder="Название категории" maxlength="30"><button class="gbtn pri" id="nc_ok" style="width:100%">Создать</button></div></div></div></div>
 <div id="view" class="hide"></div><div id="form" class="hide"></div>
 <script>
 const tg=window.Telegram.WebApp;tg.ready();tg.expand();try{tg.setHeaderColor('#000000');tg.setBackgroundColor('#000000')}catch(e){}
@@ -211,7 +229,7 @@ function renderList(){const q=norm($('q').value);
   (layFor(i.c).listphoto?`<div class="th"><div class="grad"></div><div class="gl"></div><div class="flipper">${face(i.p?{t:'photo',id:i.p}:null)}</div></div>`:'')+
   `<div class="rt"><b>${esc(i.t)}</b><small>${esc(i.c)}</small></div>${rp(i.r,i.c)}</div>`).join('')+'</div>':'<div class="empty">Ничего не найдено</div>'}
 function edgeNear(e,box){const r=box.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;return x<=5||y<=5||r.width-x<=5||r.height-y<=5}
-function flipZone(e,sel){const z=e.target.closest(sel);if(FZ&&FZ!==z)FZ.querySelector('.flipper')?.classList.remove('flip');
+function flipZone(e,sel){if(document.body.classList.contains('noflip')){FZ=null;return}const z=e.target.closest(sel);if(FZ&&FZ!==z)FZ.querySelector('.flipper')?.classList.remove('flip');
  if(z)z.querySelector('.flipper')?.classList.toggle('flip',edgeNear(e,z));FZ=z}
 $('list').addEventListener('pointermove',e=>flipZone(e,'.th'));
 $('list').addEventListener('pointerleave',()=>{FZ&&FZ.querySelector('.flipper')?.classList.remove('flip');FZ=null});
@@ -286,6 +304,17 @@ async function save(){const g=k=>$('f_'+k).value;tg.MainButton.showProgress();
   tg.MainButton.hide();await load();openEntry(r.id)}catch(e){tg.showAlert(e.message)}finally{tg.MainButton.hideProgress()}}
 $('add').onclick=()=>{OPEN=null;editForm(null)};
 document.addEventListener('pointerdown',e=>{const el=e.target.closest('.gbtn');if(!el)return;const r=el.getBoundingClientRect();el.style.setProperty('--px',(e.clientX-r.left)+'px');el.style.setProperty('--py',(e.clientY-r.top)+'px')});
+/* ----- настройки: запоминаются на устройстве ----- */
+const PREF={lg:['nolg',true],an:['noanim',true],fl:['noflip',true]};
+const PREF_SW={lg:'lgsw',an:'answ',fl:'flsw'};
+function getPref(k){try{const v=localStorage.getItem('wiki_'+k);return v===null?PREF[k][1]:v==='1'}catch(e){return PREF[k][1]}}
+function applyPref(k,on,save=true){const [cls,def]=PREF[k];document.body.classList.toggle(cls,k=='lg'?!on:(k=='an'?!on:!on));
+ const sw=$(PREF_SW[k]);if(sw)sw.setAttribute('aria-checked',on?'true':'false');
+ if(save)try{localStorage.setItem('wiki_'+k,on?'1':'0')}catch(e){}}
+['lg','an','fl'].forEach(k=>applyPref(k,getPref(k),false));
+['lg','an','fl'].forEach(k=>$(PREF_SW[k]).onclick=()=>applyPref(k,!getPref(k)));
+$('gear').onclick=()=>$('setsheet').classList.remove('hide');
+$('setscrim').onclick=()=>$('setsheet').classList.add('hide');
 /* открытие сразу на предмете: из кнопки в чате (#e123 или startapp=e123) */
 function deepOpen(){const mm=(location.hash||'').match(/#e(\d+)/)||((tg.initDataUnsafe&&tg.initDataUnsafe.start_param)||'').match(/^e(\d+)$/);
  if(mm&&!window._deep){window._deep=1;openEntry(+mm[1])}}
