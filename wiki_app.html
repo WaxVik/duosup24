@@ -283,7 +283,10 @@ async function save(){const g=k=>$('f_'+k).value;tg.MainButton.showProgress();
   tg.MainButton.hide();await load();openEntry(r.id)}catch(e){tg.showAlert(e.message)}finally{tg.MainButton.hideProgress()}}
 $('add').onclick=()=>{OPEN=null;editForm(null)};
 document.addEventListener('pointerdown',e=>{const el=e.target.closest('.gbtn');if(!el)return;const r=el.getBoundingClientRect();el.style.setProperty('--px',(e.clientX-r.left)+'px');el.style.setProperty('--py',(e.clientY-r.top)+'px')});
-async function load(){try{DATA=await api('/api/list');LAY=DATA.layout;$('add').classList.toggle('hide',!DATA.edit);renderTabs();renderList()}catch(e){$('list').innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
+/* открытие сразу на предмете: из кнопки в чате (#e123 или startapp=e123) */
+function deepOpen(){const mm=(location.hash||'').match(/#e(\d+)/)||((tg.initDataUnsafe&&tg.initDataUnsafe.start_param)||'').match(/^e(\d+)$/);
+ if(mm&&!window._deep){window._deep=1;openEntry(+mm[1])}}
+async function load(){try{DATA=await api('/api/list');LAY=DATA.layout;$('add').classList.toggle('hide',!DATA.edit);renderTabs();renderList();deepOpen()}catch(e){$('list').innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
 load();
 </script><script>
 /* СТЕКЛО: у края пилюли фон «переворачивается» как в закалённом стекле (Chromium / Telegram Android).

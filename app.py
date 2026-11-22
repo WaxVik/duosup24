@@ -54,7 +54,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.26.2"
+BOT_VERSION = "3.26.3"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -2357,6 +2357,9 @@ def reply_menu(page: int = 1) -> ReplyKeyboardMarkup:
             [rb("Профиль", "profile"), rb("Вики", "wiki")],
             [rb("Навигация", "nav"), rb("Дальше", "next", "success")],
         ]
+    if WEBAPP_URL:  # «Вики» открывает приложение сразу, без сообщения
+        rows = [[KeyboardButton(text=b.text, web_app=WebAppInfo(url=WEBAPP_URL), icon_custom_emoji_id=b.icon_custom_emoji_id)
+                 if b.text == "Вики" else b for b in r] for r in rows]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -6922,12 +6925,25 @@ async def wiki_plain_html(entry) -> str:
     return text[:4000]
 
 
-def wiki_entry_markup(entry, viewer: int = 0):
-    """Под карточкой — кнопка «Посмотреть скиллы» (если они есть). viewer: чужие нажатия не принимаются."""
+WEBAPP_SHORT = os.getenv("WEBAPP_SHORT", "wiki").strip() or "wiki"  # короткое имя Mini App из BotFather (/newapp)
+
+
+def wiki_entry_markup(entry, viewer: int = 0, chat_id: int = 0):
+    """Под карточкой: «Открыть карточку» (сразу откроет предмет в приложении) и «Посмотреть скиллы».
+    В личке кнопка web_app открывает приложение на предмете; в группах — ссылка t.me/<бот>/<short>?startapp=e<id>."""
+    rows = []
+    eid = entry["id"]
+    if WEBAPP_URL:
+        if chat_id > 0:
+            rows.append([InlineKeyboardButton(text="📖 Открыть карточку", web_app=WebAppInfo(url=f"{WEBAPP_URL}#e{eid}"))])
+        elif BOT_USERNAME:
+            rows.append([InlineKeyboardButton(text="📖 Открыть карточку", url=f"https://t.me/{BOT_USERNAME}/{WEBAPP_SHORT}?startapp=e{eid}")])
     forms = wiki_forms(entry)
-    if not forms:
+    if forms:
+        rows.append([btn("({21}) Посмотреть скиллы", f"wk_s_{eid}_{forms[0]}_{viewer}")])
+    if not rows:
         return None
-    return kb([btn("({21}) Посмотреть скиллы", f"wk_s_{entry['id']}_{forms[0]}_{viewer}")])
+    return kb(*rows)
 
 
 def wiki_skill_nav(entry, form: int, viewer: int):
@@ -6982,7 +6998,7 @@ async def edit_rich(chat_id: int, message_id: int, html_text: str, media: dict, 
 
 async def wiki_send(chat_id: int, entry, thread_id: int | None = None, reply_to: int | None = None,
                     viewer: int = 0) -> None:
-    markup = wiki_entry_markup(entry, viewer)
+    markup = wiki_entry_markup(entry, viewer, chat_id)
     try:
         html_text, media = await wiki_rich_payload(entry)
         await send_rich(chat_id, html_text, media, thread_id, reply_to, markup)
@@ -8394,6 +8410,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.26.3", "Вики: кнопка «Вики» в меню открывает приложение сразу; карточка предмета в чате открывается в приложении одним нажатием"),
     ("3.26.2", "Вики: порядок фруктов как в стоке; в приложении редакторы могут создавать категории (меню ☰)"),
     ("3.26.1", "Вики: миниатюры грузятся заметно быстрее, фото подгружаются заранее; кнопка «Добавить запись» у редакторов под панелью; панель макета и кнопки редактора двигаются вместе со страницей"),
     ("3.26.0", "Вики: команда /wikialpha — вырезает чёрный фон у фото фруктов, фото заменяются на PNG с прозрачностью (только создатель, в личке)"),
