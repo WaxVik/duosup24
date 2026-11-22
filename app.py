@@ -54,7 +54,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.26.3"
+BOT_VERSION = "3.26.4"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -8410,6 +8410,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.26.4", "Вики: цена предмета (в долларах) — задаётся в редакторе, показывается зелёным под названием и во вкладках категорий"),
     ("3.26.3", "Вики: кнопка «Вики» в меню открывает приложение сразу; карточка предмета в чате открывается в приложении одним нажатием"),
     ("3.26.2", "Вики: порядок фруктов как в стоке; в приложении редакторы могут создавать категории (меню ☰)"),
     ("3.26.1", "Вики: миниатюры грузятся заметно быстрее, фото подгружаются заранее; кнопка «Добавить запись» у редакторов под панелью; панель макета и кнопки редактора двигаются вместе со страницей"),
@@ -9380,9 +9381,9 @@ def webapp_routes():
 
     async def api_list(request):
         uid, can = await webapp_auth(request)
-        rows = await pool().fetch("SELECT id, title, category, aliases, photos, videos, rarity FROM wiki_entries ORDER BY title")
+        rows = await pool().fetch("SELECT id, title, category, aliases, photos, videos, rarity, price FROM wiki_entries ORDER BY title")
         items = [{"id": r["id"], "t": r["title"], "c": r["category"], "a": json.loads(r["aliases"] or "[]"),
-                  "p": wiki_thumb_id(r), "r": r["rarity"]} for r in rows]
+                  "p": wiki_thumb_id(r), "r": r["rarity"], "pr": r["price"]} for r in rows]
         asyncio.create_task(prewarm_thumbs([i["p"] for i in items if i["p"]]))
         custom = await wiki_custom_cats()
         cats = WIKI_CATEGORIES + [c for c in custom if c not in WIKI_CATEGORIES]
@@ -9428,7 +9429,7 @@ def webapp_routes():
         return web.json_response({
             "id": r["id"], "title": r["title"], "category": r["category"],
             "aliases": ", ".join(json.loads(r["aliases"] or "[]")),
-            "rarity": r["rarity"], **{f: r[f] for f in ("description", "obtain", "stats", "notes")},
+            "rarity": r["rarity"], "price": r["price"], **{f: r[f] for f in ("description", "obtain", "stats", "notes")},
             "media": [{"t": t, "id": i} for t, i in wiki_media_of(r)], "skills": skills, "edit": can})
 
     async def api_save(request):
@@ -9459,7 +9460,8 @@ def webapp_routes():
                 "INSERT INTO wiki_entries (title, norm, aliases, category, description, obtain, stats, notes, updated_at) "
                 "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id", title, norm, aliases, vals["category"],
                 vals["description"], vals["obtain"], vals["stats"], vals["notes"], now_ts())
-        await pool().execute("UPDATE wiki_entries SET rarity=$1 WHERE id=$2", rar, int(eid))
+        price = re.sub(r"\D", "", str(d.get("price", "")))[:9]  # только цифры, в долларах
+        await pool().execute("UPDATE wiki_entries SET rarity=$1, price=$2 WHERE id=$3", rar, price, int(eid))
         wiki_dirty()
         LOG.info("wiki app: запись %s сохранил %s", eid, uid)
         return web.json_response({"ok": True, "id": eid})
@@ -9490,6 +9492,7 @@ def webapp_routes():
 async def webapp_start():
     """Запускает сервер Mini App (только если задан WEBAPP_URL)."""
     await pool().execute("ALTER TABLE wiki_entries ADD COLUMN IF NOT EXISTS rarity TEXT NOT NULL DEFAULT ''")
+    await pool().execute("ALTER TABLE wiki_entries ADD COLUMN IF NOT EXISTS price TEXT NOT NULL DEFAULT ''")
     if not WEBAPP_URL:
         LOG.info("WEBAPP_URL не задан — Wiki Mini App выключено")
         return None
