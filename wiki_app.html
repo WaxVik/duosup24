@@ -136,7 +136,7 @@ img.ld{opacity:0;transition:opacity .35s var(--spring)}img.ld.ok{opacity:1}
   <button class="gbtn pri hide" id="add">＋ Добавить запись</button>
   <div class="tabs"><button class="mbtn" id="menu" aria-label="Категории"><i></i><i></i><i></i></button><div class="chips" id="chips"></div></div>
 </div>
-<div class="sheet hide" id="sheet"><div class="scrim" id="scrim"></div><div class="glass sbox" id="sbox"><div id="sitems"></div></div></div>
+<div class="sheet hide" id="sheet"><div class="scrim" id="scrim"></div><div class="glass sbox" id="sbox"><div id="sitems"></div><div id="ncbox" class="hide" style="padding:8px 8px 4px"><button class="gbtn" id="nc_open" style="width:100%">＋ Создать категорию</button><div id="nc_form" class="hide" style="margin-top:8px;display:grid;gap:8px"><input class="f" id="nc_name" placeholder="Название категории" maxlength="30"><button class="gbtn pri" id="nc_ok" style="width:100%">Создать</button></div></div></div></div>
 <div id="view" class="hide"></div><div id="form" class="hide"></div>
 <script>
 const tg=window.Telegram.WebApp;tg.ready();tg.expand();try{tg.setHeaderColor('#000000');tg.setBackgroundColor('#000000')}catch(e){}
@@ -182,7 +182,8 @@ function show(v,back){['home','view','form'].forEach(x=>$(x).classList.toggle('h
 tg.BackButton.onClick(()=>{tg.MainButton.hide();if(!$('form').classList.contains('hide')&&OPEN)openEntry(OPEN,1);else{LE=false;show('home',1)}});
 /* ----- категории: капсула переезжает к выбранной ----- */
 function movePill(){const on=document.querySelector('#chips .chip.on'),p=$('pill');if(!on||!p)return;p.style.width=on.offsetWidth+'px';p.style.transform=`translateX(${on.offsetLeft}px)`}
-function renderTabs(){const cats=['Все',...new Set(DATA.items.map(i=>i.c))];
+function renderTabs(){const cats=['Все',...new Set([...DATA.items.map(i=>i.c),...(DATA.custom||[])])];
+ $('ncbox').classList.toggle('hide',!DATA.edit);
  $('chips').innerHTML='<span class="pill" id="pill"></span>'+cats.map(c=>`<span class="chip ${c==CAT?'on':''}" data-c="${esc(c)}">${esc(c)}</span>`).join('');
  $('sitems').innerHTML=cats.map(c=>`<div class="si ${c==CAT?'on':''}" data-c="${esc(c)}"><span>${esc(c)}</span><span style="color:var(--l3)">${c=='Все'?DATA.items.length:DATA.items.filter(i=>i.c==c).length}</span></div>`).join('');
  requestAnimationFrame(movePill)}
@@ -190,12 +191,16 @@ function setCat(c){CAT=c;document.querySelectorAll('#chips .chip').forEach(x=>x.
 $('chips').onclick=e=>{const c=e.target.closest('.chip');if(c)setCat(c.dataset.c)};
 $('menu').onclick=()=>$('sheet').classList.remove('hide');
 $('scrim').onclick=()=>$('sheet').classList.add('hide');
+$('nc_open').onclick=()=>{$('nc_form').classList.toggle('hide');$('nc_name').focus()};
+$('nc_ok').onclick=async()=>{const name=$('nc_name').value.trim();if(!name){tg.showAlert('Введите название');return}
+ try{await api('/api/cat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});$('nc_name').value='';$('nc_form').classList.add('hide');
+  await load();setCat(name);$('sheet').classList.add('hide');tg.showAlert('Категория «'+name+'» создана')}catch(e){tg.showAlert(e.message)}};
 $('sitems').onclick=e=>{const s=e.target.closest('.si');if(s){setCat(s.dataset.c);$('sheet').classList.add('hide')}};
 window.addEventListener('resize',movePill);
 /* ----- список: сортировка по редкости, фото с переворотом у края ----- */
 /* порядок фруктов как в стоке (сверху вниз); всё, чего нет в списке, — после фруктов по редкости */
-const STOCK=['Meme-Meme','Magnet','Dragon','Control','Kitsune','Yeti','Leopard','Spirit','Venom','Shadow','Dough','T-Rex','Mammoth','Gravity','Blizzard','Pain','Lightning','Portal','Phoenix','Sound','Spider','Creation','Love','Buddha','Quake','Magma','Ghost','Rubber','Light','Diamond','Eagle','Dark','Sand','Ice','Flame','Spike','Smoke','Bomb','Spring','Blade','Spin','Rocket'];
-const STOCK_IDX=Object.fromEntries(STOCK.map((n,i)=>[norm(n),i]));
+const STOCK=['Meme-Meme','Dragon','Control','Kitsune','Yeti','Magnet','Leopard','Spirit','Gas','Venom','Shadow','Dough','T-Rex','Mammoth','Gravity','Blizzard','Pain','Lightning','Portal','Phoenix','Sound','Spider','Creation','Love','Buddha','Quake','Magma','Ghost','Rubber','Light','Diamond','Eagle','Dark','Sand','Ice','Flame','Spike','Smoke','Bomb','Spring','Blade','Spin','Rocket'];
+const STOCK_IDX=Object.fromEntries(STOCK.map((n,i)=>[norm(n),i]));STOCK_IDX[norm('Tiger')]=STOCK_IDX[norm('Leopard')];
 function stockIdx(i){const k=norm(i.t);if(k in STOCK_IDX)return STOCK_IDX[k];const a=i.a.map(norm).find(x=>x in STOCK_IDX);return a!==undefined?STOCK_IDX[a]:1000}
 function renderList(){const q=norm($('q').value);
  const it=DATA.items.filter(i=>(CAT=='Все'||i.c==CAT)&&(!q||norm(i.t).includes(q)||i.a.some(a=>norm(a).includes(q))))

@@ -54,7 +54,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.26.1"
+BOT_VERSION = "3.26.2"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -8394,6 +8394,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.26.2", "Вики: порядок фруктов как в стоке; в приложении редакторы могут создавать категории (меню ☰)"),
     ("3.26.1", "Вики: миниатюры грузятся заметно быстрее, фото подгружаются заранее; кнопка «Добавить запись» у редакторов под панелью; панель макета и кнопки редактора двигаются вместе со страницей"),
     ("3.26.0", "Вики: команда /wikialpha — вырезает чёрный фон у фото фруктов, фото заменяются на PNG с прозрачностью (только создатель, в личке)"),
     ("3.25.1", "Вики: картинки с прозрачным фоном (PNG) отправляются как файл и не теряют прозрачность; фото листаются свайпом внутри плитки, альбом под карточкой, единые капсулы редкости"),
@@ -9265,6 +9266,14 @@ WEBAPP_LAYOUT_DEFAULT = {"order": ["description", "obtain", "stats", "notes", "s
 _media_cache: dict[str, tuple[bytes, str]] = {}  # file_id -> (байты, тип): чтобы не качать из Telegram каждый раз
 
 
+async def wiki_custom_cats() -> list:
+    """Категории, созданные через приложение (хранятся в config)."""
+    try:
+        return [str(x) for x in json.loads(await get_config("wiki_cats") or "[]")]
+    except ValueError:
+        return []
+
+
 def wiki_thumb_id(r):
     photos = json.loads(r["photos"] or "[]")
     if photos:
@@ -9358,7 +9367,24 @@ def webapp_routes():
         items = [{"id": r["id"], "t": r["title"], "c": r["category"], "a": json.loads(r["aliases"] or "[]"),
                   "p": wiki_thumb_id(r), "r": r["rarity"]} for r in rows]
         asyncio.create_task(prewarm_thumbs([i["p"] for i in items if i["p"]]))
-        return web.json_response({"edit": can, "cats": WIKI_CATEGORIES, "items": items, "layout": await webapp_layout()})
+        custom = await wiki_custom_cats()
+        cats = WIKI_CATEGORIES + [c for c in custom if c not in WIKI_CATEGORIES]
+        return web.json_response({"edit": can, "cats": cats, "custom": custom, "items": items, "layout": await webapp_layout()})
+
+    async def api_cat(request):
+        # создать категорию (только создатель и редакторы вики)
+        uid, can = await webapp_auth(request)
+        if not can:
+            raise web.HTTPForbidden(text="rights")
+        name = str((await request.json()).get("name", "")).strip()
+        if not (2 <= len(name) <= 30):
+            return web.json_response({"error": "Название от 2 до 30 символов"}, status=400)
+        custom = await wiki_custom_cats()
+        if name.lower() in {c.lower() for c in WIKI_CATEGORIES + custom}:
+            return web.json_response({"error": "Такая категория уже есть"}, status=400)
+        custom.append(name)
+        await set_config("wiki_cats", json.dumps(custom, ensure_ascii=False))
+        return web.json_response({"ok": True})
 
     async def api_layout(request):
         uid, can = await webapp_auth(request)
@@ -9440,7 +9466,7 @@ def webapp_routes():
 
     app = web.Application(client_max_size=1_000_000)
     app.add_routes([web.get("/", index), web.get("/api/list", api_list), web.get("/api/entry/{id}", api_entry),
-                    web.post("/api/save", api_save), web.post("/api/layout", api_layout), web.get("/api/media/{fid}", api_media), web.get("/api/thumb/{fid}", api_thumb)])
+                    web.post("/api/save", api_save), web.post("/api/layout", api_layout), web.get("/api/media/{fid}", api_media), web.get("/api/thumb/{fid}", api_thumb), web.post("/api/cat", api_cat)])
     return app
 
 
