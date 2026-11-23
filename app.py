@@ -54,7 +54,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.26.4"
+BOT_VERSION = "3.27.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -8410,6 +8410,7 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.27.0", "Вики: возврат назад сохраняет место в списке; вкладки карточки «Обычный», «Мутация», «Скиллы»; скиллы и фото листаются по кругу; настройки: FPS и анимация переключателей"),
     ("3.26.4", "Вики: цена предмета (в долларах) — задаётся в редакторе, показывается зелёным под названием и во вкладках категорий"),
     ("3.26.3", "Вики: кнопка «Вики» в меню открывает приложение сразу; карточка предмета в чате открывается в приложении одним нажатием"),
     ("3.26.2", "Вики: порядок фруктов как в стоке; в приложении редакторы могут создавать категории (меню ☰)"),
@@ -9292,6 +9293,32 @@ async def wiki_custom_cats() -> list:
         return []
 
 
+def wiki_mutations(title: str, aliases: list) -> list:
+    """Мутации предмета = скины, в названии которых есть слово-название фрукта (ArcsteelMagnet -> Magnet)."""
+    keys = {title.lower(), title.split()[0].lower(), *(a.lower() for a in aliases)}
+    hint = {"dragon": "dracon"}
+    out = []
+    for stem, name in TRADE_SKINS:
+        words = [w.lower() for w in re.findall(r"[A-Z][a-z]*|\d+", stem)]
+        if any(k in words or hint.get(k) in words for k in keys):
+            out.append({"id": stem, "n": name})
+    return out
+
+
+def wiki_skin_file(name: str):
+    """Файл картинки скина: trade_assets/skins/<Имя>.png (регистр не важен)."""
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return None
+    base = os.path.dirname(os.path.abspath(__file__))
+    for sub_dir in ("trade_assets/skins", "trade_assets/skin", "skins", "skin"):
+        d = os.path.join(base, *sub_dir.split("/"))
+        if os.path.isdir(d):
+            for fn in os.listdir(d):
+                if fn.lower() in (name.lower() + ".png", name.lower() + ".webp"):
+                    return os.path.join(d, fn)
+    return None
+
+
 def wiki_thumb_id(r):
     photos = json.loads(r["photos"] or "[]")
     if photos:
@@ -9429,7 +9456,8 @@ def webapp_routes():
         return web.json_response({
             "id": r["id"], "title": r["title"], "category": r["category"],
             "aliases": ", ".join(json.loads(r["aliases"] or "[]")),
-            "rarity": r["rarity"], "price": r["price"], **{f: r[f] for f in ("description", "obtain", "stats", "notes")},
+            "rarity": r["rarity"], "price": r["price"], "mut": wiki_mutations(r["title"], json.loads(r["aliases"] or "[]")),
+            **{f: r[f] for f in ("description", "obtain", "stats", "notes")},
             "media": [{"t": t, "id": i} for t, i in wiki_media_of(r)], "skills": skills, "edit": can})
 
     async def api_save(request):
@@ -9471,6 +9499,13 @@ def webapp_routes():
         body, ctype = await media_fetch(request.match_info["fid"])
         return web.Response(body=body, content_type=ctype, headers={"Cache-Control": "private, max-age=86400"})
 
+    async def api_skin(request):
+        await webapp_auth(request)
+        path = wiki_skin_file(request.match_info["name"])
+        if not path:
+            raise web.HTTPNotFound()
+        return web.FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
+
     async def api_thumb(request):
         # уменьшенная копия (до 640px, WebP с прозрачностью): грузится быстро, в списке и на карточке
         await webapp_auth(request)
@@ -9485,7 +9520,7 @@ def webapp_routes():
 
     app = web.Application(client_max_size=1_000_000)
     app.add_routes([web.get("/", index), web.get("/api/list", api_list), web.get("/api/entry/{id}", api_entry),
-                    web.post("/api/save", api_save), web.post("/api/layout", api_layout), web.get("/api/media/{fid}", api_media), web.get("/api/thumb/{fid}", api_thumb), web.post("/api/cat", api_cat)])
+                    web.post("/api/save", api_save), web.post("/api/layout", api_layout), web.get("/api/media/{fid}", api_media), web.get("/api/thumb/{fid}", api_thumb), web.post("/api/cat", api_cat), web.get("/api/skin/{name}", api_skin)])
     return app
 
 

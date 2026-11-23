@@ -148,6 +148,25 @@ body.nolg .tglass{display:none}
 body.nolg .prof{background:#141416;box-shadow:0 0 0 1px #ffffff2e,0 8px 24px #0008}
 body.nolg .gl{display:none}
 body.noanim *,body.noanim *::before,body.noanim *::after{animation:none!important;transition:none!important}
+
+/* ===== вкладки карточки, мутации, скиллы по кругу, переключатели как у iOS ===== */
+.seg{display:flex;gap:4px;margin:10px 16px 0;padding:4px;border-radius:999px;background:var(--fill3)}
+.seg button{flex:1;height:36px;border:0;border-radius:999px;background:none;color:var(--l2);font:inherit;font-size:15px;font-weight:600;transition:background .4s var(--spring),color .3s}
+.seg button.on{background:var(--card);color:var(--label);box-shadow:0 2px 8px #0006,inset 0 1px 0 #ffffff26}
+.mgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 16px 0}
+.mc{background:var(--card);border-radius:20px;padding:10px;text-align:center;cursor:pointer;transition:transform .49s var(--spring)}.mc:active{transform:scale(.97)}
+.mimg{aspect-ratio:1/1;border-radius:14px;overflow:hidden;background:#0008;display:grid;place-items:center}.mimg img{width:100%;height:100%;object-fit:contain}
+.mc b{display:block;margin-top:8px;font-size:15px;font-weight:600}
+.skl{position:relative;overflow:hidden;margin:12px 0 0}
+.skl .track{display:flex;align-items:flex-start;transition:transform .5s var(--spring)}.skl .track.drag{transition:none}
+.skl .slide{flex:0 0 100%;height:auto;padding:0 16px}.skl .sec{margin:0}
+.skl .dots{position:static;margin:10px 0 0;pointer-events:auto}
+.skc .grid img,.skc .grid video{border-radius:14px}
+.sw{transition:background .4s var(--spring)}
+.sw i{width:27px;background:linear-gradient(180deg,#ffffff,#e4e4ea);transition:transform .49s var(--spring),width .32s var(--spring)}
+.sw:active i{width:34px}
+.sw[aria-checked="true"]:active i{transform:translateX(14px)}
+.sw[aria-checked="true"]{background:linear-gradient(180deg,#3fe07a,#25b957)}
 </style></head><body>
 <div class="edge"></div>
 <div id="home"><div class="hdr"><h1>Wiki<small>DuoSup • Blox Fruits</small></h1><button class="gear gbtn" id="gear" aria-label="Настройки">⚙</button></div><div class="list" id="list"></div></div>
@@ -156,7 +175,8 @@ body.noanim *,body.noanim *::before,body.noanim *::after{animation:none!importan
   <button class="gbtn pri hide" id="add">＋ Добавить запись</button>
   <div class="tabs"><button class="mbtn" id="menu" aria-label="Категории"><i></i><i></i><i></i></button><div class="chips" id="chips"></div></div>
 </div>
-<div class="sheet hide" id="setsheet"><div class="scrim" id="setscrim"></div><div class="glass sbox" id="setbox"><div class="si-h">Настройки</div><div class="srow2"><span>Liquid glass</span><button class="sw" id="lgsw" role="switch" aria-checked="true" aria-label="Liquid glass"><i></i></button></div><div class="srow2"><span>Анимации</span><button class="sw" id="answ" role="switch" aria-checked="true" aria-label="Анимации"><i></i></button></div><div class="srow2"><span>Переворот фото у края</span><button class="sw" id="flsw" role="switch" aria-checked="true" aria-label="Переворот"><i></i></button></div><p class="sub" style="padding:6px 16px 10px">Без Liquid glass панели и карточки становятся матовыми с обычной рамкой.</p></div></div><div class="sheet hide" id="sheet"><div class="scrim" id="scrim"></div><div class="glass sbox" id="sbox"><div id="sitems"></div><div id="ncbox" class="hide" style="padding:8px 8px 4px"><button class="gbtn" id="nc_open" style="width:100%">＋ Создать категорию</button><div id="nc_form" class="hide" style="margin-top:8px;display:grid;gap:8px"><input class="f" id="nc_name" placeholder="Название категории" maxlength="30"><button class="gbtn pri" id="nc_ok" style="width:100%">Создать</button></div></div></div></div>
+<div class="sheet hide" id="setsheet"><div class="scrim" id="setscrim"></div><div class="glass sbox" id="setbox"><div class="si-h">Настройки</div><div class="srow2"><span>Liquid glass</span><button class="sw" id="lgsw" role="switch" aria-checked="true" aria-label="Liquid glass"><i></i></button></div><div class="srow2"><span>Анимации</span><button class="sw" id="answ" role="switch" aria-checked="true" aria-label="Анимации"><i></i></button></div><div class="srow2"><span>Переворот фото у края</span><button class="sw" id="flsw" role="switch" aria-checked="true" aria-label="Переворот"><i></i></button></div><div class="srow2"><span>FPS</span><span id="fps" style="color:var(--l2);font-variant-numeric:tabular-nums">—</span></div>
+    <p class="sub" style="padding:6px 16px 10px">Без Liquid glass панели и карточки становятся матовыми с обычной рамкой.</p></div></div><div class="sheet hide" id="sheet"><div class="scrim" id="scrim"></div><div class="glass sbox" id="sbox"><div id="sitems"></div><div id="ncbox" class="hide" style="padding:8px 8px 4px"><button class="gbtn" id="nc_open" style="width:100%">＋ Создать категорию</button><div id="nc_form" class="hide" style="margin-top:8px;display:grid;gap:8px"><input class="f" id="nc_name" placeholder="Название категории" maxlength="30"><button class="gbtn pri" id="nc_ok" style="width:100%">Создать</button></div></div></div></div>
 <div id="view" class="hide"></div><div id="form" class="hide"></div>
 <script>
 const tg=window.Telegram.WebApp;tg.ready();tg.expand();try{tg.setHeaderColor('#000000');tg.setBackgroundColor('#000000')}catch(e){}
@@ -170,7 +190,7 @@ const GOLD=['#6b4300','#ffd34d','#fff6c2'];
 const isGold=c=>/гемпас|gamepass|game ?pass|драгон|dragon/i.test(c||'');
 const gs=(r,cat)=>{const c=isGold(cat)?GOLD:(RAR[r]||RAR['']).c;return `--c1:${c[0]};--c2:${c[1]};--c3:${c[2]}`};
 const rp=(r,cat)=>(r&&RAR[r])?`<span class="rp${isGold(cat)?' gold':''}" style="${gs(r,cat)}">${RAR[r].n}</span>`:'';
-let DATA=null,CAT='Все',OPEN=null,LAY=null,WL=null,LE=false,E=null,CUR='home',FZ=null;
+let ETAB='normal',DATA=null,CAT='Все',OPEN=null,LAY=null,WL=null,LE=false,E=null,CUR='home',FZ=null;
 const $=id=>document.getElementById(id);
 const BASE_KEYS=['hero','thumbs','listphoto','order','hide'];
 const CP=v=>JSON.parse(JSON.stringify(v));
@@ -181,6 +201,8 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const mu=id=>`/api/media/${encodeURIComponent(id)}?d=${encodeURIComponent(tg.initData)}`;
 const norm=s=>(s||'').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}\s]/gu,' ').replace(/\s+/g,' ').trim();
 const isImg=m=>m&&(m.t=='photo'||m.t=='image');
+const skinUrl=id=>`/api/skin/${encodeURIComponent(id)}?d=${encodeURIComponent(tg.initData)}`;
+function openLb(inner){const lb=document.createElement('div');lb.className='lb';lb.innerHTML=inner+'<button class="gbtn x">✕</button>';lb.onclick=ev=>{if(ev.target===lb||ev.target.closest('.x'))lb.remove()};document.body.appendChild(lb)}
 const tu=id=>`/api/thumb/${encodeURIComponent(id)}?d=${encodeURIComponent(tg.initData)}`;
 const ldi=(id,extra='')=>`<img class="ld" src="${tu(id)}" loading="lazy" onload="this.classList.add('ok')"${extra}>`;
 function face(m,ctl){
@@ -196,9 +218,10 @@ function clean(html){const d=new DOMParser().parseFromString('<div>'+(html||'').
   [...c.attributes].forEach(a=>c.removeAttribute(a.name));
   if(c.tagName=='A'){if(dw)c.setAttribute('data-w',dw);else if(/^https?:|^tg:/.test(h)){c.setAttribute('href',h);c.setAttribute('target','_blank')}}
   w(c)})})(d);return d.innerHTML.replace(/\n/g,'<br>')}
-function show(v,back){['home','view','form'].forEach(x=>$(x).classList.toggle('hide',x!=v));$('dock').classList.toggle('hide',v!='home');window.scrollTo(0,0);
- if(v!=CUR){const el=$(v);el.classList.remove('swap-f','swap-b');void el.offsetWidth;el.classList.add(back?'swap-b':'swap-f')}CUR=v;
- v=='home'?tg.BackButton.hide():tg.BackButton.show()}
+let SAVEY={};
+function show(v,back){['home','view','form'].forEach(x=>$(x).classList.toggle('hide',x!=v));$('dock').classList.toggle('hide',v!='home');
+ if(v!=CUR){SAVEY[CUR]=scrollY;const el=$(v);el.classList.remove('swap-f','swap-b');void el.offsetWidth;el.classList.add(back?'swap-b':'swap-f');window.scrollTo(0,back?(SAVEY[v]||0):0)}
+ CUR=v;v=='home'?tg.BackButton.hide():tg.BackButton.show()}
 tg.BackButton.onClick(()=>{tg.MainButton.hide();if(!$('form').classList.contains('hide')&&OPEN)openEntry(OPEN,1);else{LE=false;show('home',1)}});
 /* ----- категории: капсула переезжает к выбранной ----- */
 function movePill(){const on=document.querySelector('#chips .chip.on'),p=$('pill');if(!on||!p)return;p.style.width=on.offsetWidth+'px';p.style.transform=`translateX(${on.offsetLeft}px)`}
@@ -239,32 +262,42 @@ $('q').oninput=renderList;
 $('list').onclick=e=>{const r=e.target.closest('.row');if(r)openEntry(+r.dataset.id)};
 /* ----- карточка предмета ----- */
 const NAMES={description:'Описание',obtain:'Как получить',stats:'Характеристика',notes:'Примечания',skills:'Скиллы'};
-let HI=0,SW=null;
-function go(i){const tr=$('track');if(!tr)return;const n=tr.children.length;HI=Math.max(0,Math.min(n-1,i));tr.style.transform=`translateX(${-HI*100}%)`;
- document.querySelectorAll('.dots i').forEach((d,k)=>d.classList.toggle('on',k==HI))}
-$('view').addEventListener('pointerdown',e=>{const hr=e.target.closest('.hero');if(!hr||e.target.closest('.tools'))return;SW={x0:e.clientX,y0:e.clientY,dx:0,lock:null,tr:$('track')}});
+let SW=null;
+function goCar(root,i){const tr=root.querySelector('.track');if(!tr)return;const n=tr.children.length||1;const k=((i%n)+n)%n;root.dataset.i=k;tr.style.transform=`translateX(${-k*100}%)`;
+ root.querySelectorAll('.dots i').forEach((d,j)=>d.classList.toggle('on',j==k))}
+$('view').addEventListener('pointerdown',e=>{const root=e.target.closest('.hero,.skl');if(!root||!root.querySelector('.track')||e.target.closest('.tools,.seg'))return;
+ SW={root,tr:root.querySelector('.track'),i:+(root.dataset.i||0),x0:e.clientX,y0:e.clientY,dx:0,lock:null}});
 $('view').addEventListener('pointermove',e=>{if(!SW)return;const dx=e.clientX-SW.x0,dy=e.clientY-SW.y0;
- if(!SW.lock&&(Math.abs(dx)>8||Math.abs(dy)>8)){SW.lock=Math.abs(dx)>Math.abs(dy)?'x':'y';if(SW.lock=='x'&&SW.tr)SW.tr.classList.add('drag')}
- if(SW.lock=='x'&&SW.tr){SW.dx=dx;SW.tr.style.transform=`translateX(calc(${-HI*100}% + ${dx}px))`;FZ&&FZ.querySelector('.flipper')?.classList.remove('flip')}});
-const swEnd=()=>{if(!SW)return;const was=SW.lock,dx=SW.dx;SW.tr&&SW.tr.classList.remove('drag');SW=null;if(was=='x'){Math.abs(dx)>40?go(HI+(dx<0?1:-1)):go(HI)}};
+ if(!SW.lock&&(Math.abs(dx)>8||Math.abs(dy)>8)){SW.lock=Math.abs(dx)>Math.abs(dy)?'x':'y';if(SW.lock=='x')SW.tr.classList.add('drag')}
+ if(SW.lock=='x'){SW.dx=dx;SW.tr.style.transform=`translateX(calc(${-SW.i*100}% + ${dx}px))`;FZ&&FZ.querySelector('.flipper')?.classList.remove('flip')}});
+const swEnd=()=>{if(!SW)return;const s=SW;SW=null;s.tr.classList.remove('drag');if(s.lock=='x'){Math.abs(s.dx)>40?goCar(s.root,s.i+(s.dx<0?1:-1)):goCar(s.root,s.i)}};
 $('view').addEventListener('pointerup',swEnd);$('view').addEventListener('pointercancel',swEnd);
 
-function renderEntry(back){const d=E,m0=d.media[0],L=(LE&&WL)?WL:layFor(d.category);let h='',fab='';if(!d.edit)LE=false;
+
+function renderEntry(back){const d=E,L=(LE&&WL)?WL:layFor(d.category);let h='',fab='';if(!d.edit)LE=false;
   if(LE){const others=DATA.cats.filter(c=>c!=d.category);h+=`<div class="glass bar"><div class="sub" style="margin:0 2px 4px">Макет категории «${esc(d.category)}». Двигайте блоки за ⋮⋮</div><label>Большое фото сверху<input type="checkbox" id="l_hero" ${L.hero?'checked':''}></label><label>Миниатюры<input type="checkbox" id="l_thumbs" ${L.thumbs?'checked':''}></label><label>Фото в списке<input type="checkbox" id="l_lp" ${L.listphoto?'checked':''}></label><button class="gbtn pri" id="lsave">Сохранить макет</button><select class="f" id="l_to" style="margin-top:6px"><option value="">Скопировать в категорию…</option>${others.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select><button class="gbtn" id="lcopy">Скопировать макет</button></div>`}
- h+=`<div class="prof${isGold(d.category)?' gold':''}" style="${gs(d.rarity,d.category)}"><div class="grad"></div>`;
- if(L.hero)h+=`<div class="hero"><div class="track" id="track">${(d.media.length?d.media:[null]).map(m=>`<div class="slide"><div class="flipper">${face(m,1)}</div></div>`).join('')}</div>${(L.thumbs&&d.media.length>1)?'<div class="dots">'+d.media.map((m,i)=>`<i class="${i?'':'on'}"></i>`).join('')+'</div>':''}</div>`;
- h+=`<div class="ptitle"><h2>${esc(d.title)}</h2>${num(d.price)?`<div class="pz big">$${num(d.price)}</div>`:''}<div class="pmeta"><span>${esc(d.category)}</span>${rp(d.rarity,d.category)}</div></div><div class="tglass"></div></div>`;
- if(false)h+='<div class="thumbs">'+d.media.map((m,i)=>`<div class="${i?'':'on'}" data-i="${i}">${isImg(m)?`${ldi(m.id)}`:'<i>▶</i>'}</div>`).join('')+'</div>';
- let n=0;L.order.forEach(k=>{const hid=L.hide.includes(k);if(hid&&!LE)return;let body='';
-  if(k=='skills'){if(!d.skills.length&&!LE)return;body=d.skills.map(s=>`<p><b>${esc(s.label)}${s.form==2?' · V2':''}</b><br>${clean(s.text)}</p>`+(s.media.length?'<div class="grid">'+s.media.map(m=>isImg(m)?`${ldi(m.id)}`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`).join('')+'</div>':'')).join('')}
-  else{if(!(d[k]||'').trim()&&!LE)return;body=clean(d[k])}
-  h+=`<div class="sec ${hid?'dim':''}" data-k="${k}" style="--i:${n++}"><h3>${NAMES[k]}</h3>${body}${LE?`<div class="tools"><button class="grip" data-m="drag" data-k="${k}">⋮⋮</button><button data-m="eye" data-k="${k}">${hid?'🚫':'👁'}</button></div>`:''}</div>`});
- if(d.media.length)h+='<div class="album"><h3>Альбом · '+d.media.length+'</h3><div class="ag">'+d.media.map((m,i)=>`<div class="at" data-i="${i}">${isImg(m)?`${ldi(m.id)}`:`<video src="${mu(m.id)}" preload="metadata" muted playsinline></video><i>▶</i>`}</div>`).join('')+'</div></div>';
- if(d.edit&&!LE)fab+='<div class="glass fab"><button class="gbtn" id="le">Макет</button><button class="gbtn pri" id="ed">Править</button></div>';
- h+='<div style="height:150px"></div>';
- $('view').innerHTML=fab+h;show('view',back);
- if(d.edit){if(LE){$('lsave').onclick=saveLayout;$('lcopy').onclick=copyLayout}else{$('ed').onclick=()=>editForm(d);$('le').onclick=()=>{WL=layFor(d.category);LE=true;renderEntry()}}}}
-async function openEntry(id,back){try{E=await api('/api/entry/'+id);OPEN=id;LE=false;renderEntry(back)}catch(e){tg.showAlert(e.message)}}
+  const TABS=[['normal','Обычный'],['mut','Мутация'],['skill','Скиллы']];
+  h+=`<div class="seg">${TABS.map(([k,t])=>`<button data-t="${k}" class="${ETAB==k?'on':''}">${t}</button>`).join('')}</div>`;
+  if(ETAB=='mut'){
+    const ms=d.mut||[];
+    h+=ms.length?`<div class="mgrid">${ms.map(m=>`<div class="mc" data-sk="${esc(m.id)}"><div class="mimg"><img class="ld" src="${skinUrl(m.id)}" loading="lazy" onload="this.classList.add('ok')"></div><b>${esc(m.n)}</b></div>`).join('')}</div>`:'<div class="empty">Мутаций для этого предмета пока нет</div>';
+  }else if(ETAB=='skill'){
+    h+=d.skills.length?`<div class="skl" data-i="0"><div class="track">${d.skills.map(s=>`<div class="slide"><div class="sec skc"><h3>${esc(s.label)}${s.form==2?' · V2':''}</h3>${clean(s.text)}${s.media.length?'<div class="grid">'+s.media.map(m=>isImg(m)?`${ldi(m.id)}`:`<video src="${mu(m.id)}" controls playsinline preload="metadata"></video>`).join('')+'</div>':''}</div></div>`).join('')}</div>${d.skills.length>1?'<div class="dots">'+d.skills.map((s,i)=>`<i class="${i?'':'on'}"></i>`).join('')+'</div>':''}</div>`:'<div class="empty">Скиллов пока нет</div>';
+  }else{
+    const m0=d.media[0];
+    h+=`<div class="prof${isGold(d.category)?' gold':''}" style="${gs(d.rarity,d.category)}"><div class="grad"></div>`;
+    if(L.hero)h+=`<div class="hero" data-i="0"><div class="track">${(d.media.length?d.media:[null]).map(m=>`<div class="slide"><div class="flipper">${face(m,1)}</div></div>`).join('')}</div>${(L.thumbs&&d.media.length>1)?'<div class="dots">'+d.media.map((m,i)=>`<i class="${i?'':'on'}"></i>`).join('')+'</div>':''}</div>`;
+    h+=`<div class="ptitle"><h2>${esc(d.title)}</h2>${num(d.price)?`<div class="pz big">$${num(d.price)}</div>`:''}<div class="pmeta"><span>${esc(d.category)}</span>${rp(d.rarity,d.category)}</div></div><div class="tglass"></div></div>`;
+    let n=0;L.order.forEach(k=>{if(k=='skills')return;const hid=L.hide.includes(k);if(hid&&!LE)return;let body='';
+      if(!(d[k]||'').trim()&&!LE)return;body=clean(d[k]);
+      h+=`<div class="sec ${hid?'dim':''}" data-k="${k}" style="--i:${n++}"><h3>${NAMES[k]}</h3>${body}${LE?`<div class="tools"><button class="grip" data-m="drag" data-k="${k}">⋮⋮</button><button data-m="eye" data-k="${k}">${hid?'🚫':'👁'}</button></div>`:''}</div>`});
+    if(d.media.length)h+='<div class="album"><h3>Альбом · '+d.media.length+'</h3><div class="ag">'+d.media.map((m,i)=>`<div class="at" data-i="${i}">${isImg(m)?`${ldi(m.id)}`:`<video src="${mu(m.id)}" preload="metadata" muted playsinline></video><i>▶</i>`}</div>`).join('')+'</div></div>';
+  }
+  if(d.edit&&!LE)fab+='<div class="glass fab"><button class="gbtn" id="le">Макет</button><button class="gbtn pri" id="ed">Править</button></div>';
+  h+='<div style="height:150px"></div>';
+  $('view').innerHTML=fab+h;show('view',back);
+  if(d.edit){if(LE){$('lsave').onclick=saveLayout;$('lcopy').onclick=copyLayout}else{$('ed').onclick=()=>editForm(d);$('le').onclick=()=>{WL=layFor(d.category);LE=true;renderEntry()}}}}
+async function openEntry(id,back){try{E=await api('/api/entry/'+id);OPEN=id;LE=false;if(!back)ETAB='normal';renderEntry(back)}catch(e){tg.showAlert(e.message)}}
 function readBar(){['hero','thumbs','listphoto'].forEach((nm,j)=>{const c=$(['l_hero','l_thumbs','l_lp'][j]);if(c)WL[nm]=c.checked})}
 async function pushLayout(){await api('/api/layout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(LAY)})}
 async function saveLayout(){readBar();const cat=E.category;LAY.cats=LAY.cats||{};LAY.cats[cat]=CP(WL);
@@ -272,7 +305,9 @@ async function saveLayout(){readBar();const cat=E.category;LAY.cats=LAY.cats||{}
 async function copyLayout(){readBar();const to=$('l_to').value;if(!to){tg.showAlert('Выберите категорию');return}
  LAY.cats=LAY.cats||{};LAY.cats[to]=CP(WL);
  try{await pushLayout();tg.showAlert('Макет скопирован в «'+to+'»')}catch(e){tg.showAlert(e.message)}}
-$('view').onclick=e=>{const al=e.target.closest('.album .at');if(al){const m=E.media[+al.dataset.i];const lb=document.createElement('div');lb.className='lb';
+$('view').onclick=e=>{const sg=e.target.closest('.seg button');if(sg){ETAB=sg.dataset.t;renderEntry();return}
+ const mc=e.target.closest('.mc');if(mc){openLb(`<img src="${skinUrl(mc.dataset.sk)}">`);return}
+ const al=e.target.closest('.album .at');if(al){const m=E.media[+al.dataset.i];const lb=document.createElement('div');lb.className='lb';
  lb.innerHTML=(isImg(m)?`${ldi(m.id)}`:`<video src="${mu(m.id)}" controls autoplay playsinline></video>`)+'<button class="gbtn x">✕</button>';
  lb.onclick=ev=>{if(ev.target===lb||ev.target.closest('.x'))lb.remove()};document.body.appendChild(lb);return}
  
@@ -313,8 +348,11 @@ function applyPref(k,on,save=true){const [cls,def]=PREF[k];document.body.classLi
  if(save)try{localStorage.setItem('wiki_'+k,on?'1':'0')}catch(e){}}
 ['lg','an','fl'].forEach(k=>applyPref(k,getPref(k),false));
 ['lg','an','fl'].forEach(k=>$(PREF_SW[k]).onclick=()=>applyPref(k,!getPref(k)));
-$('gear').onclick=()=>$('setsheet').classList.remove('hide');
-$('setscrim').onclick=()=>$('setsheet').classList.add('hide');
+let FPS_ON=false,fpsN=0,fpsT=0;
+function fpsLoop(t){if(!FPS_ON)return;fpsN++;if(!fpsT)fpsT=t;if(t-fpsT>=500){$('fps').textContent=Math.round(fpsN*1000/(t-fpsT));fpsN=0;fpsT=t}requestAnimationFrame(fpsLoop)}
+function setSheet(on){$('setsheet').classList.toggle('hide',!on);FPS_ON=on;if(on){fpsN=0;fpsT=0;requestAnimationFrame(fpsLoop)}}
+$('gear').onclick=()=>setSheet(true);
+$('setscrim').onclick=()=>setSheet(false);
 /* открытие сразу на предмете: из кнопки в чате (#e123 или startapp=e123) */
 function deepOpen(){const mm=(location.hash||'').match(/#e(\d+)/)||((tg.initDataUnsafe&&tg.initDataUnsafe.start_param)||'').match(/^e(\d+)$/);
  if(mm&&!window._deep){window._deep=1;openEntry(+mm[1])}}
