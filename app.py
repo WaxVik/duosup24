@@ -55,7 +55,7 @@ from aiogram.types import (
 )
 
 LOG = logging.getLogger("duosup")
-BOT_VERSION = "3.28.0"
+BOT_VERSION = "3.29.0"
 
 # ============================ НАСТРОЙКИ ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -128,7 +128,7 @@ PREMIUM_EMOJI: dict[int, str] = {
     13: "5377782964262307848", 14: "5210952531676504517", 15: "5260293700088511294",
     16: "5240241223632954241", 17: "5253742260054409879", 18: "5377752727692544013",
     19: "5274099962655816924", 20: "5206607081334906820", 21: "5341715473882955310",
-    22: "5449683594425410231", 23: "5264919878082509254", 24: "5395444784611480792",
+    22: "5449683594425410231", 23: "5264919878082509254", 24: "5879841310902324730",
     25: "5397782960512444700", 26: "5271604874419647061", 27: "5445267414562389170",
     28: "5438496463044752972", 29: "5217822164362739968", 30: "5325547803936572038",
     31: "5377756253860693612", 32: "5377656524720083736", 33: "5463258057607760727",
@@ -2326,7 +2326,7 @@ RM_ICONS = {
     "games": "5361741454685256344", "back": "5875082500023258804", "refresh": "5375338737028841420",
     "history": "5413879192267805083", "roblox": "5220186290456120696",
     "apps": "5337080053119336309", "about": "5334544901428229844", "mine": "5222444124698853913",
-    "help": "5443038326535759644", "edit": "5395444784611480792", "sea": "5332637016825805678",
+    "help": "5443038326535759644", "edit": "5879841310902324730", "sea": "5332637016825805678",
     "events": "5350488305362315240", "trade": "5271984412089690485", "trial": "5350725881478293775",
     "raid": "5350770579202944020",
 }
@@ -2571,7 +2571,7 @@ async def nav_text() -> str:
         f"({{61}})<b>Навигация</b>\n"
         "<b>Главное меню</b>\n<blockquote>"
         "<b>Сток</b> — актуальный сток Normal и Mirage, уведомления о нужных фруктах.\n"
-        "<b>Мини игры</b> — гача и ПВП (скоро).\n"
+        "<b>Мини игры</b> — гача и PvP: комбо, инвентарь, крафт, достижения, магазин за Gram, бои <code>!пвп</code> в теме «Чат».\n"
         "<b>Заявки</b> — создать заявку (морские ивенты, ивенты, трейды, рейды, триалы), найти чужую, «Мои заявки», «Помощь».\n"
         "<b>Профиль</b> — ник Roblox, комментарий, награды.\n"
         "<b>Вики</b> — назовите предмет, аксессуар или тип, и бот расскажет о нём.\n"
@@ -2760,75 +2760,120 @@ async def setrules_text(msg: Message, state: FSMContext):
 
 
 # ------------------------------- ПРОФИЛЬ -------------------------------
+PROFILE_ICONS = {"tag": "5854776233950188167", "msgs": "5891243564309942507", "warn": "5881702736843511327",
+                 "date": "5967412305338568701", "award": "5350488305362315240"}
+PROFILE_FALLBACK = {"tag": "📌", "msgs": "💬", "warn": "⚠️", "date": "🗓", "award": "🏆", "titles": "🔴", "ach": "🔴"}
+PROFILE_SEP = "━┅━┅━┅━┅━┅━≪•≫━┅━┅━┅━┅━┅━"
+# 🔴 у «Титулы» и «Достижения» — настраиваются в /addemoji → «Эмодзи профиля»
+PROFILE_CUSTOM = [("titles", "Титулы (🔴)"), ("ach", "Достижения (🔴)")]
+
+
+async def profile_icons() -> dict[str, str]:
+    out = dict(PROFILE_ICONS)
+    for r in await pool().fetch("SELECT key, value FROM config WHERE key LIKE 'custom_emoji_profile_%' AND value <> ''"):
+        out[r["key"].removeprefix("custom_emoji_profile_")] = r["value"]
+    return out
+
+
+async def profile_data(user_id: int) -> dict:
+    row = await user_row(user_id)
+    known = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", user_id)
+    mod = await pool().fetchrow("SELECT role, level FROM moderators WHERE user_id=$1", user_id)
+    active, titles, ach = await game_profile_data(user_id)
+    return {
+        "username": known["username"] if known else None, "full_name": (known and known["full_name"]) or "",
+        "tag": (row and row["profile_tag"]) or active or (mod and mod["level"] > 0 and mod["role"]) or "—",
+        "warns": int(row["warns"]) if row else 0, "msgs": int(row["messages_count"]) if row else 0,
+        "comment": (row and row["profile_comment"]) or "—", "nick": row and row["roblox_username"],
+        "awards": [x.strip() for x in ((row and row["achievements"]) or "").split("\n") if x.strip()],
+        "titles": titles, "ach": ach, "active": active, "joined": fmt_date(row["joined_at"] if row else None),
+    }
+
+
 async def profile_html(user_id: int) -> str:
-    row = await user_row(user_id)
-    known = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", user_id)
-    mod = await pool().fetchrow("SELECT role, level FROM moderators WHERE user_id=$1", user_id)
-    username = known["username"] if known else None
-    tg = f"@{esc(username)}" if username else mention(user_id, None, known["full_name"] if known else None)
-    tag = (row and row["profile_tag"]) or (mod and mod["level"] > 0 and mod["role"]) or "—"
-    warns = int(row["warns"]) if row else 0
-    comment = (row and row["profile_comment"]) or "—"
-    achievements = [x.strip() for x in ((row and row["achievements"]) or "").split("\n") if x.strip()]
-    ach = "\n".join(f"• {esc(x)}" for x in achievements) or "• —"
-    base = (
-        f"{e(44)} <b>{tg}</b>\n{SEP}\n"
-        f"{e(73)} <b>Ник:</b> {esc((row and row['roblox_username']) or '—')}\n"
-        f"{e(25)} <b>Тег:</b> {esc(tag)}\n"
-        f"{e(8)} <b>Варны:</b> {warns}/{MAX_WARNS}\n"
-        f"{e(60)} <b>Кол-во сообщений:</b> {int(row['messages_count']) if row else 0}\n"
-        f"<blockquote><b>Комментарий:</b>\n<i>{comment_html(comment)}</i>\n"
-        f"<b>Награды</b> {e(72)}\n{ach}</blockquote>\n"
-        f"{SEP}\n{e(64)} <b>В сообществе с:</b> {fmt_date(row['joined_at'] if row else None)}"
-    )
-    head, tail = base.rsplit(SEP, 1)  # блоки игр (титул, достижения) — перед нижним разделителем
-    return head + (await game_profile_html(user_id)).lstrip("\n") + "\n" + SEP + tail
-
-
-async def profile_blocks(user_id: int) -> list:
-    """Профиль Rich-блоками: кнопка «↗️ Перейти в Roblox» стоит прямо в тексте, под ником."""
     from urllib.parse import quote
-    row = await user_row(user_id)
-    known = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", user_id)
-    mod = await pool().fetchrow("SELECT role, level FROM moderators WHERE user_id=$1", user_id)
-    tag = (row and row["profile_tag"]) or (mod and mod["level"] > 0 and mod["role"]) or "—"
-    warns = int(row["warns"]) if row else 0
-    comment = (row and row["profile_comment"]) or "—"
-    achievements = [x.strip() for x in ((row and row["achievements"]) or "").split("\n") if x.strip()]
-    nick = row and row["roblox_username"]
+    d = await profile_data(user_id)
+    ic = await profile_icons()
+
+    def pe(k: str) -> str:
+        return custom_emoji_html(ic.get(k), PROFILE_FALLBACK[k])
+
+    who = f"@{esc(d['username'])}" if d["username"] else mention(user_id, None, d["full_name"])
+    name = f" • {esc(d['full_name'])}" if d["full_name"] and d["username"] else ""
+    nick = d["nick"]
+    nick_line = (f"<b>{esc(nick)}</b> — <a href=\"https://www.roblox.com/user.aspx?username={quote(nick)}\">"
+                 f"↗️ Профиль Roblox</a>") if nick else "<i>ник Roblox не указан</i>"
+    titles = "\n".join(f"• {esc(t)}" + (" (надет)" if t == d["active"] else "") for t in d["titles"]) or "—"
+    return (
+        f"━┅━┅━┅━≪{e(44)} <b>PROFILE</b>≫━┅━┅━┅━\n{who}{name}\n{nick_line}\n{PROFILE_SEP}\n"
+        f"{pe('tag')} <b>Тег:</b> {esc(d['tag'])}\n{pe('warn')} <b>Варны:</b> {d['warns']}/{MAX_WARNS}\n"
+        f"{pe('msgs')} <b>Кол-во сообщений:</b> {d['msgs']}\n{PROFILE_SEP}\n"
+        f"<blockquote expandable><b>Комментарий</b>\n<i>{comment_html(d['comment'])}</i></blockquote>\n"
+        f"<blockquote expandable><b>Награды</b> {pe('award')}\n"
+        + ("\n".join(f"• {esc(x)}" for x in d["awards"]) or "—") + "</blockquote>\n"
+        f"<blockquote expandable><b>Титулы</b> {pe('titles')}\n{titles}</blockquote>\n"
+        f"<blockquote expandable><b>Достижения</b> {pe('ach')}\n"
+        + ("\n".join(f"• {esc(x)}" for x in d["ach"]) or "—") + "</blockquote>\n"
+        f"{PROFILE_SEP}\n{pe('date')} <b>В сообществе с:</b> {d['joined']}"
+    )
+
+
+async def profile_blocks(user_id: int, center: bool = True) -> list:
+    """Профиль Rich-блоками: ник по центру, под ним кнопка «Перейти в Roblox», сворачиваемые блоки."""
+    from urllib.parse import quote
+    d = await profile_data(user_id)
+    ic = await profile_icons()
     bold = lambda t: {"type": "bold", "text": t}  # noqa: E731
+
+    def pe(k: str):
+        return rt_icon(ic.get(k), PROFILE_FALLBACK[k])
+
+    def fold(title: list, lines: list) -> dict:
+        return {"type": "blockquote", "expandable": True, "blocks": [
+            {"type": "paragraph", "text": title}, *[{"type": "paragraph", "text": x} for x in (lines or ["—"])]]}
+
+    who = [rt_user(user_id, d["username"], d["full_name"])]
+    if d["full_name"] and d["username"]:
+        who.append(f" • {d['full_name']}")
+    nick_par: dict = {"type": "paragraph", "text": bold(d["nick"] or "—")}
+    if center:
+        nick_par["align"] = "center"
     blocks: list = [
-        {"type": "paragraph", "text": [rt_emoji(44, "👤"), " ", bold(rt_user(user_id, known and known["username"], known and known["full_name"]))]},
-        {"type": "paragraph", "text": html.unescape(SEP)},
-        {"type": "paragraph", "text": [rt_emoji(73, "🔹"), " ", bold("Ник:"), f" {nick or '—'}"]},
+        {"type": "paragraph", "text": ["━┅━┅━┅━≪", rt_emoji(44, "👤"), " ", bold("PROFILE"), "≫━┅━┅━┅━"]},
+        {"type": "paragraph", "text": who},
+        nick_par,
     ]
-    if nick:
-        blocks.append({"type": "buttons", "align": "left", "buttons": [
+    if d["nick"]:
+        blocks.append({"type": "buttons", "align": "center" if center else "left", "buttons": [
             {"text": [{"type": "custom_emoji", "custom_emoji_id": ROBLOX_ICON, "alternative_text": "↗️"}, " Перейти в Roblox"],
-             "url": f"https://www.roblox.com/user.aspx?username={quote(nick)}"}]})
+             "url": f"https://www.roblox.com/user.aspx?username={quote(d['nick'])}"}]})
     blocks += [
-        {"type": "paragraph", "text": [rt_emoji(25, "🔖"), " ", bold("Тег:"), f" {tag}"]},
-        {"type": "paragraph", "text": [rt_emoji(8, "⚠️"), " ", bold("Варны:"), f" {warns}/{MAX_WARNS}"]},
-        {"type": "paragraph", "text": [rt_emoji(60, "💬"), " ", bold("Кол-во сообщений:"), f" {int(row['messages_count']) if row else 0}"]},
-        {"type": "blockquote", "blocks": [
-            {"type": "paragraph", "text": bold("Комментарий:")},
-            {"type": "paragraph", "text": {"type": "italic", "text": comment_rich(comment)}},
-            {"type": "paragraph", "text": [bold("Награды"), " ", rt_emoji(72, "🏆")]},
-            *[{"type": "paragraph", "text": f"• {a}"} for a in (achievements or ["—"])]]},
-        {"type": "paragraph", "text": html.unescape(SEP)},
-        {"type": "paragraph", "text": [rt_emoji(64, "🗓"), " ", bold("В сообществе с:"), f" {fmt_date(row['joined_at'] if row else None)}"]},
+        {"type": "paragraph", "text": PROFILE_SEP},
+        {"type": "paragraph", "text": [pe("tag"), " ", bold("Тег:"), f" {d['tag']}"]},
+        {"type": "paragraph", "text": [pe("warn"), " ", bold("Варны:"), f" {d['warns']}/{MAX_WARNS}"]},
+        {"type": "paragraph", "text": [pe("msgs"), " ", bold("Кол-во сообщений:"), f" {d['msgs']}"]},
+        {"type": "paragraph", "text": PROFILE_SEP},
+        {"type": "blockquote", "expandable": True, "blocks": [
+            {"type": "paragraph", "text": bold("Комментарий")},
+            {"type": "paragraph", "text": {"type": "italic", "text": comment_rich(d["comment"])}}]},
+        fold([bold("Награды"), " ", pe("award")], [f"• {a}" for a in d["awards"]]),
+        fold([bold("Титулы"), " ", pe("titles")], [f"• {t}" + (" (надет)" if t == d["active"] else "") for t in d["titles"]]),
+        fold([bold("Достижения"), " ", pe("ach")], [f"• {a}" for a in d["ach"]]),
+        {"type": "paragraph", "text": PROFILE_SEP},
+        {"type": "paragraph", "text": [pe("date"), " ", bold("В сообществе с:"), f" {d['joined']}"]},
     ]
-    blocks[-2:-2] = await game_profile_blocks(user_id)
     return blocks
 
 
 async def show_profile(msg: Message, user_id: int, markup=None) -> None:
-    try:
-        await send_rich_blocks(msg.chat.id, await profile_blocks(user_id), topic_of(msg),
-                               msg.message_id if msg.chat.type != "private" else None, markup)
-    except Exception as exc:
-        LOG.warning("profile: Rich-блоки не получились (%s), отправляю обычным", exc)
-        await reply(msg, await profile_html(user_id), markup)
+    for center in (True, False):  # если Telegram не принимает выравнивание по центру — пробуем без него
+        try:
+            await send_rich_blocks(msg.chat.id, await profile_blocks(user_id, center), topic_of(msg),
+                                   msg.message_id if msg.chat.type != "private" else None, markup)
+            return
+        except Exception as exc:
+            LOG.warning("profile: Rich-блоки (center=%s) не получились: %s", center, exc)
+    await reply(msg, await profile_html(user_id), markup)
 
 
 @dp.message(Command("profile"))
@@ -2857,11 +2902,16 @@ async def profile_cmd(msg: Message):
 @dp.callback_query(F.data == "menu_profile")
 async def menu_profile(cb: CallbackQuery):
     markup = kb([btn("Редактировать профиль ({24})", "profile_edit")], [btn("Навигация ({61})", "menu_nav")], [BACK()])
-    try:
-        await edit_rich_blocks(cb.message.chat.id, cb.message.message_id, await profile_blocks(cb.from_user.id), markup)
-        await cb.answer()
-    except Exception:
-        await edit(cb, await profile_html(cb.from_user.id), markup)
+    for center in (True, False):
+        try:
+            await edit_rich_blocks(cb.message.chat.id, cb.message.message_id, await profile_blocks(cb.from_user.id, center), markup)
+            await cb.answer()
+            return
+        except Exception as exc:
+            if "not modified" in str(exc).lower():
+                await cb.answer()
+                return
+    await edit(cb, await profile_html(cb.from_user.id), markup)
 
 
 @dp.callback_query(F.data == "profile_edit")
@@ -4276,9 +4326,8 @@ async def app_finish(cb: CallbackQuery):
     if not app or app["user_id"] != cb.from_user.id:
         await cb.answer("Это не ваша заявка.", show_alert=True)
         return
-    await pool().execute("UPDATE applications SET status='closed' WHERE id=$1", app_id)
-    app = await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id)
-    await refresh_application_post(app_id)
+    if app["status"] != "closed":
+        await close_application(app_id)
     await cb.answer(f"Заявка {num(app_id)} завершена")
     await menu_apps(cb)
 
@@ -4789,6 +4838,7 @@ def emoji_center_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⚔️ Эмодзи мечей", callback_data="em_sw"),
          InlineKeyboardButton(text="🔫 Эмодзи оружий", callback_data="em_wp")],
         [InlineKeyboardButton(text="🥋 Эмодзи стилей боя", callback_data="em_st")],
+        [InlineKeyboardButton(text="🔴 Эмодзи профиля (титулы, достижения)", callback_data="em_pf")],
         [InlineKeyboardButton(text="🔁 Эмодзи трейдов (gamepass/прочее)", callback_data="em_trade")],
         [InlineKeyboardButton(text="📋 Установленные эмодзи", callback_data="em_list")],
         [InlineKeyboardButton(text="🗑 Сбросить эмодзи фруктов", callback_data="em_reset")],
@@ -4915,9 +4965,11 @@ async def em_race_msg(msg: Message, state: FSMContext):
 async def emoji_trade_items(only: str | None = None) -> list[tuple[str, str, str]]:
     """Предметы трейда: (id, название, категория). only="sk" — только скины; иначе всё, кроме скинов."""
     catalog = await trade_catalog()
+    if only == "pf":
+        return [(k, n, "Профиль") for k, n in PROFILE_CUSTOM]
     if only in ("sw", "wp", "st"):
-        src = {"sw": GD.SWORDS, "wp": GD.WEAPONS, "st": [("combat", "Combat")] + [(k, n) for k, n, _ in GD.STYLES]}[only]
-        return [(f"{only}_{k}", n, {"sw": "Меч", "wp": "Оружие", "st": "Стиль"}[only]) for k, n in src]
+        src = {"sw": GD.SWORDS, "wp": GD.WEAPONS, "st": GD.STYLES}[only]
+        return [(f"{only}_{k}", n, {"sw": "Меч", "wp": "Оружие", "st": "Стиль боя"}[only]) for k, n, _p in src]
     if only == "sk":
         return [(i, n, "Skin") for i, n in trade_cat_list(catalog, "sk")]
     out = []
@@ -4995,12 +5047,12 @@ async def em_perm_msg(msg: Message, state: FSMContext):
     await msg.answer(emoji_perm_prompt(items, idx))
 
 
-@dp.callback_query(F.data.in_({"em_trade", "em_skins", "em_sw", "em_wp", "em_st"}))
+@dp.callback_query(F.data.in_({"em_trade", "em_skins", "em_sw", "em_wp", "em_st", "em_pf"}))
 async def em_trade_start(cb: CallbackQuery, state: FSMContext):
     if not creator_cb(cb):
         await cb.answer("⛔ Только создатель.", show_alert=True)
         return
-    only = {"em_skins": "sk", "em_sw": "sw", "em_wp": "wp", "em_st": "st"}.get(cb.data)
+    only = {"em_skins": "sk", "em_sw": "sw", "em_wp": "wp", "em_st": "st", "em_pf": "pf"}.get(cb.data)
     items = await emoji_trade_items(only)
     if not items:
         await cb.answer("Сначала добавьте предметы в /redacttrade.", show_alert=True)
@@ -5036,7 +5088,8 @@ async def em_trade_msg(msg: Message, state: FSMContext):
         if not emoji_id:
             await reply(msg, "({8})Это не Premium Emoji. Отправьте именно премиум-эмодзи или <code>-</code> чтобы пропустить.")
             return
-        await set_config(f"custom_emoji_trade_{item_id}", emoji_id)
+        prefix = "custom_emoji_profile_" if st.get("only") == "pf" else "custom_emoji_trade_"
+        await set_config(f"{prefix}{item_id}", emoji_id)
     idx += 1
     if idx >= len(items):
         await state.clear()
@@ -5063,6 +5116,12 @@ async def em_list(cb: CallbackQuery):
     lines.append(f"\n<b>🔲 Permanent фруктов:</b> {len(perm_set)}/{len(await emoji_perm_items())}")
     sk_items = await emoji_trade_items("sk")
     lines.append(f"\n<b>🎨 Скины фруктов:</b> {sum(1 for i, _n, _t in sk_items if i in t_icons)}/{len(sk_items)}")
+    for only, title in (("sw", "🗡 Мечи"), ("wp", "🔫 Оружия"), ("st", "🥋 Стили боя")):
+        g_items = await emoji_trade_items(only)
+        lines.append(f"\n<b>{title}:</b> {sum(1 for i, _n, _t in g_items if i in t_icons)}/{len(g_items)}")
+    p_icons = await profile_icons()
+    lines.append("\n<b>🔴 Профиль:</b> " + " ".join(
+        f"{custom_emoji_html(p_icons.get(k), '🔴')} {esc(n)}" for k, n in PROFILE_CUSTOM))
     t_items = await emoji_trade_items()
     if t_items:
         lines.append("\n<b>🔁 Трейды:</b>")
@@ -6510,6 +6569,7 @@ async def close_application(app_id: int) -> bool:
     if res.endswith(" 0"):
         return False
     await refresh_application_post(app_id)
+    spawn(game_on_app_closed(app_id))  # мини-игры: помощникам — счётчики и шанс дропа
     return True
 
 
@@ -6548,6 +6608,7 @@ async def applications_expiry_loop() -> None:
                 now_ts() - APP_TTL_HOURS * 3600)
             for r in rows:
                 await refresh_application_post(r["id"])
+                spawn(game_on_app_closed(r["id"]))
                 await asyncio.sleep(0.3)
         except Exception:
             LOG.exception("applications expiry failed")
@@ -8421,6 +8482,9 @@ async def search_open_answer(msg: Message):
 
 # ============================ О БОТЕ ============================
 CHANGELOG = [
+    ("3.29.0", "Мини игры, этап 2: PvP по команде !пвп (комнаты, вызов ответом, кулдаун наград 3/3 на пару), стороны Пират/Моряк с Bounty и Honor, "
+               "редактор комбо и статистика, 43 фрукта с шансами из игры, 39 мечей, 14 оружий, 13 стилей боя, крафты, дроп предметов с заявок, "
+               "сердце Левиафана и Sanguine Art, Advanced Combat, скрытые способы получения, магазин Permanent-фруктов за Gram; новый профиль"),
     ("3.28.0", "Мини игры, этап 1: гача раз в 2 часа, инвентарь, комбо, создание стилей боя, достижения (мечи и оружия), титулы и сворачиваемые блоки в профиле; настройка эмодзи мечей, оружий и стилей в /addemoji"),
     ("3.27.0", "Вики: возврат назад сохраняет место в списке; вкладки карточки «Обычный», «Мутация», «Скиллы»; скиллы и фото листаются по кругу; настройки: FPS и анимация переключателей"),
     ("3.26.4", "Вики: цена предмета (в долларах) — задаётся в редакторе, показывается зелёным под названием и во вкладках категорий"),
@@ -9244,8 +9308,6 @@ async def setrules_copy(msg: Message, state: FSMContext):
     await reply(msg, f"({{20}})Правила обновлены (версия {version}): опубликованы одним сообщением ровно как вы прислали.")
 
 
-# Автоварн — самым последним: он реагирует на любые групповые сообщения со ссылками.
-dp.message.register(autowarn_handler, F.chat.type.in_({"group", "supergroup"}))
 
 
 # ================================ ЗАПУСК ================================
@@ -9562,65 +9624,211 @@ def wiki_app_markup() -> InlineKeyboardMarkup | None:
 
 
 
-# ====================== МИНИ-ИГРЫ: гача, инвентарь, комбо, достижения, титулы ======================
+# ====================== МИНИ-ИГРЫ: гача, PvP, комбо, крафт, достижения, магазин ======================
+# Все данные (фрукты, мечи, оружия, стили, крафты, дропы, достижения, цены) — в game_data.py.
 GAME_KINDS = {"fruit": "Фрукты", "sword": "Мечи", "weapon": "Оружия", "style": "Стили боя", "title": "Титулы"}
-GAME_KIND_ONE = {"fruit": "фрукт", "sword": "меч", "weapon": "оружие", "style": "стиль", "title": "титул"}
-GAME_DEFAULT_ICON = {"fruit": "🍎", "sword": "⚔️", "weapon": "🔫", "style": "🥋", "title": "🏷"}
+GAME_KIND_ONE = {"fruit": "фрукт", "sword": "меч", "weapon": "оружие", "style": "стиль боя", "title": "титул",
+                 "item": "предмет"}
+GAME_DEFAULT_ICON = {"fruit": "🍎", "sword": "🗡", "weapon": "🔫", "style": "🥋", "title": "🏷", "item": "❤️"}
 GAME_NAME_MAP = {
-    "fruit": dict(TRADE_PHYS_FRUITS), "sword": dict(GD.SWORDS), "weapon": dict(GD.WEAPONS),
-    "style": {"combat": "Combat", **{k: n for k, n, _ in GD.STYLES}}, "title": dict(GD.TITLE_NAMES),
+    "fruit": dict(GD.FRUIT_NAMES), "sword": {k: n for k, n, _ in GD.SWORDS},
+    "weapon": {k: n for k, n, _ in GD.WEAPONS}, "style": {k: n for k, n, _ in GD.STYLES},
+    "title": dict(GD.TITLE_NAMES), "item": dict(GD.ITEMS),
 }
+GAME_POWER = {"sword": {k: p for k, _, p in GD.SWORDS}, "weapon": {k: p for k, _, p in GD.WEAPONS},
+              "style": {k: p for k, _, p in GD.STYLES}}
 GAME_ICON_PREFIX = {"sword": "sw_", "weapon": "wp_", "style": "st_"}
+GAME_TOTAL = {"fruit": len(GD.FRUITS), "sword": len(GD.SWORDS) - 1, "weapon": len(GD.WEAPONS),
+              "style": len(GD.STYLES), "title": len(GD.TITLES)}
+
+GI = {  # Premium Emoji кнопок и текстов мини-игр
+    "gacha": "5275991341698947709", "pvp": "5393115417688447946", "combo": "5393115417688447946",
+    "inv": "5276436798527021361", "craft": "5341715473882955310", "ach": "5350488305362315240",
+    "info": "5334544901428229844", "edit": "5879841310902324730", "fruit": "5445035537868040673",
+    "style": "5393068778638580604", "sword": "5393604996715552577", "weapon": "5393280924253197443",
+    "stats": "5390921123191890756", "ready": "5825794181183836432",
+}
+GI_FALLBACK = {"gacha": "🎰", "pvp": "🗡", "combo": "🎮", "inv": "🎒", "craft": "🛠", "ach": "🏆", "info": "ℹ️",
+               "edit": "✏️", "fruit": "▫️", "style": "◽️", "sword": "🗡", "weapon": "🔫", "stats": "📊", "ready": "✅"}
+SLOT_GI = {"style": "style", "fruit": "fruit", "sword": "sword", "weapon": "weapon"}
+SLOT_LABEL = {"style": "Стиль боя", "fruit": "Фрукт", "sword": "Меч", "weapon": "Оружие"}
+SIDES = {"pirate": ("🟥", "Пират", "Bounty", "bounty"), "marine": ("🟦", "Моряк", "Honor", "honor")}
+
+
+def gi(key: str) -> str:
+    return custom_emoji_html(GI[key], GI_FALLBACK[key])
+
+
+def gbtn(text: str, cb: str | None = None, icon: str | None = None, style: str | None = None, url: str | None = None):
+    return btn(text, cb, url=url, icon_id=GI.get(icon) if icon else None, style=style)
 
 
 def game_item_name(kind: str, key: str) -> str:
     return GAME_NAME_MAP.get(kind, {}).get(key, key)
 
 
-def game_em(icons: dict, kind: str, key: str) -> str:
-    """Эмодзи предмета: Premium из /addemoji, а если не задано — обычное."""
-    icon = icons.get(key) if kind == "fruit" else icons.get(GAME_ICON_PREFIX.get(kind, "?") + key)
-    return custom_emoji_html(icon, GAME_DEFAULT_ICON[kind]) if icon else GAME_DEFAULT_ICON[kind]
+def game_icon_id(icons: dict, kind: str, key: str, perm: bool = False) -> str | None:
+    if kind == "fruit":
+        if perm:
+            pk = "dragon" if key in DRAGON_PHYS_IDS else key
+            return icons.get("perm_" + pk) or icons.get(key)
+        return icons.get(key)
+    return icons.get(GAME_ICON_PREFIX.get(kind, "?") + key)
 
 
-def fmt_left(sec: int) -> str:
+def game_em(icons: dict, kind: str, key: str, perm: bool = False) -> str:
+    """Эмодзи предмета: Premium из /addemoji (или вшитое в код), иначе обычное."""
+    icon = game_icon_id(icons, kind, key, perm)
+    return custom_emoji_html(icon, GAME_DEFAULT_ICON.get(kind, "▫️")) if icon else GAME_DEFAULT_ICON.get(kind, "▫️")
+
+
+def g_left(sec: int) -> str:
     sec = max(0, int(sec))
     h, m = sec // 3600, (sec % 3600) // 60
-    return f"{h}ч {m}м" if h else f"{m}м {sec % 60}с"
+    return f"{h} ч {m} мин" if h else f"{m} мин {sec % 60} с"
 
 
+async def gshow(cb: CallbackQuery, text: str, markup=None) -> None:
+    """Показ экрана мини-игр: правка сообщения, а если не вышло (например, это было Rich-сообщение) — новое."""
+    try:
+        await cb.message.edit_text(R(text), reply_markup=markup)
+    except Exception as exc:
+        if "not modified" not in str(exc).lower():
+            try:
+                await cb.message.answer(R(text), reply_markup=markup)
+                await _delete_quiet(cb.message)
+            except Exception:
+                LOG.exception("gshow failed")
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+
+
+async def gshow_article(cb: CallbackQuery, rich_html: str, text: str, markup=None) -> None:
+    """Экран «статьёй» (Rich-сообщение с заголовками); запасной вариант — обычный текст."""
+    try:
+        await edit_rich(cb.message.chat.id, cb.message.message_id, R(rich_html), {}, markup)
+        try:
+            await cb.answer()
+        except Exception:
+            pass
+    except Exception as exc:
+        if "not modified" in str(exc).lower():
+            try:
+                await cb.answer()
+            except Exception:
+                pass
+            return
+        await gshow(cb, text, markup)
+
+
+# ---------------------------- база ----------------------------
 async def game_init() -> None:
     for q in (
         """CREATE TABLE IF NOT EXISTS game_players (user_id BIGINT PRIMARY KEY, last_pull BIGINT NOT NULL DEFAULT 0,
            pity INT NOT NULL DEFAULT 0, side TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '',
            combo TEXT NOT NULL DEFAULT '{}')""",
+        "ALTER TABLE game_players ADD COLUMN IF NOT EXISTS bounty BIGINT NOT NULL DEFAULT 2500000",
+        "ALTER TABLE game_players ADD COLUMN IF NOT EXISTS honor BIGINT NOT NULL DEFAULT 2500000",
+        "ALTER TABLE game_players ADD COLUMN IF NOT EXISTS stat TEXT NOT NULL DEFAULT 'fruit'",
+        "ALTER TABLE game_players ADD COLUMN IF NOT EXISTS streak INT NOT NULL DEFAULT 0",
         """CREATE TABLE IF NOT EXISTS game_items (user_id BIGINT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
            got_at BIGINT NOT NULL, PRIMARY KEY (user_id, kind, key))""",
+        "ALTER TABLE game_items ADD COLUMN IF NOT EXISTS perm BOOL NOT NULL DEFAULT FALSE",
         """CREATE TABLE IF NOT EXISTS game_counters (user_id BIGINT NOT NULL, name TEXT NOT NULL,
            value BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (user_id, name))""",
         """CREATE TABLE IF NOT EXISTS game_ach (user_id BIGINT NOT NULL, key TEXT NOT NULL, done_at BIGINT NOT NULL,
            PRIMARY KEY (user_id, key))""",
         """CREATE TABLE IF NOT EXISTS game_mastery (user_id BIGINT NOT NULL, style TEXT NOT NULL,
            mastery INT NOT NULL DEFAULT 0, PRIMARY KEY (user_id, style))""",
+        """CREATE TABLE IF NOT EXISTS game_mast (user_id BIGINT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
+           mastery INT NOT NULL DEFAULT 0, PRIMARY KEY (user_id, kind, key))""",
+        """CREATE TABLE IF NOT EXISTS game_discovered (what TEXT PRIMARY KEY, user_id BIGINT NOT NULL, at BIGINT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS game_pvp_cd (a BIGINT NOT NULL, b BIGINT NOT NULL, points INT NOT NULL DEFAULT 0,
+           last BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (a, b))""",
+        "CREATE TABLE IF NOT EXISTS game_app_done (app_id BIGINT PRIMARY KEY, at BIGINT NOT NULL)",
+        """CREATE TABLE IF NOT EXISTS game_orders (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, item TEXT NOT NULL,
+           amount_nano BIGINT NOT NULL, code TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending',
+           created_at BIGINT NOT NULL, paid_at BIGINT, tx_hash TEXT)""",
+        "CREATE TABLE IF NOT EXISTS game_tx_used (hash TEXT PRIMARY KEY, order_id BIGINT, at BIGINT NOT NULL)",
+        # переносим старое мастери стилей и переименованный стиль Water Karate -> Sharkman Karate
+        "INSERT INTO game_mast (user_id, kind, key, mastery) SELECT user_id, 'style', style, mastery FROM game_mastery "
+        "ON CONFLICT DO NOTHING",
+        "UPDATE game_items SET key='sharkman_karate' WHERE kind='style' AND key='water_karate'",
+        "UPDATE game_mast SET key='sharkman_karate' WHERE kind='style' AND key='water_karate'",
+        "UPDATE game_items SET key='long_sword' WHERE kind='sword' AND key='longsword'",
     ):
-        await pool().execute(q)
+        try:
+            await pool().execute(q)
+        except Exception:
+            LOG.exception("game_init: %s", q[:60])
+
+
+_game_ready: set[int] = set()
 
 
 async def game_player(uid: int):
-    await pool().execute("INSERT INTO game_players (user_id) VALUES ($1) ON CONFLICT DO NOTHING", uid)
-    if uid == CREATOR_ID:  # Triple Dark Blade — только создателю
-        await game_give(uid, "sword", GD.CREATOR_SWORD)
+    """Игрок мини-игр. Новичку: стиль Combat и 2.5 млн баунти/хонора. Создателю — все предметы и мастери."""
+    if uid not in _game_ready:
+        st = await pool().execute("INSERT INTO game_players (user_id, bounty, honor) VALUES ($1,$2,$2) "
+                                  "ON CONFLICT DO NOTHING", uid, GD.REP_START)
+        await game_give(uid, "style", GD.BASE_STYLE)
+        if uid == CREATOR_ID:
+            await game_seed_creator()
+        _game_ready.add(uid)
+        if st.endswith(" 1"):
+            LOG.info("мини-игры: новый игрок %s", uid)
     return await pool().fetchrow("SELECT * FROM game_players WHERE user_id=$1", uid)
 
 
-async def game_give(uid: int, kind: str, key: str) -> bool:
-    """Выдаёт предмет (по 1 экземпляру). True — предмет новый."""
-    st = await pool().execute("INSERT INTO game_items (user_id, kind, key, got_at) VALUES ($1,$2,$3,$4) "
-                              "ON CONFLICT DO NOTHING", uid, kind, key, now_ts())
-    if st.endswith(" 1") and kind == "style":
-        await pool().execute("INSERT INTO game_mastery (user_id, style, mastery) VALUES ($1,$2,0) ON CONFLICT DO NOTHING",
-                             uid, key)
+async def game_seed_creator() -> None:
+    """У создателя есть всё (включая Triple Dark Blade) и всё открыто."""
+    uid = CREATOR_ID
+    rows = ([(uid, "fruit", k, now_ts(), True) for k in GD.FRUIT_NAMES]
+            + [(uid, "sword", k, now_ts(), False) for k, *_ in GD.SWORDS]
+            + [(uid, "weapon", k, now_ts(), False) for k, *_ in GD.WEAPONS]
+            + [(uid, "style", k, now_ts(), False) for k, *_ in GD.STYLES]
+            + [(uid, "title", k, now_ts(), False) for k, *_ in GD.TITLES])
+    await pool().executemany("INSERT INTO game_items (user_id, kind, key, got_at, perm) VALUES ($1,$2,$3,$4,$5) "
+                             "ON CONFLICT (user_id, kind, key) DO UPDATE SET perm = game_items.perm OR EXCLUDED.perm", rows)
+    await pool().executemany("INSERT INTO game_mast (user_id, kind, key, mastery) VALUES ($1,$2,$3,$4) "
+                             "ON CONFLICT (user_id, kind, key) DO UPDATE SET mastery=EXCLUDED.mastery",
+                             [(uid, k, key, GD.MASTERY_MAX) for _u, k, key, _t, _p in rows if k != "title"])
+
+
+async def game_give(uid: int, kind: str, key: str, perm: bool = False) -> bool:
+    """Выдаёт предмет (по 1 экземпляру). True — предмет новый (или фрукт стал Permanent)."""
+    st = await pool().execute(
+        "INSERT INTO game_items (user_id, kind, key, got_at, perm) VALUES ($1,$2,$3,$4,$5) "
+        "ON CONFLICT (user_id, kind, key) DO UPDATE SET perm=TRUE WHERE $5 AND NOT game_items.perm",
+        uid, kind, key, now_ts(), perm)
     return st.endswith(" 1")
+
+
+async def game_has(uid: int, kind: str, key: str) -> bool:
+    return bool(await pool().fetchval("SELECT 1 FROM game_items WHERE user_id=$1 AND kind=$2 AND key=$3", uid, kind, key))
+
+
+async def game_inventory(uid: int) -> dict[str, dict[str, bool]]:
+    """{вид: {ключ: perm}} — только известные предметы."""
+    out: dict[str, dict[str, bool]] = {k: {} for k in GAME_KINDS}
+    for r in await pool().fetch("SELECT kind, key, perm FROM game_items WHERE user_id=$1 ORDER BY got_at", uid):
+        if r["kind"] in out and r["key"] in GAME_NAME_MAP.get(r["kind"], {}):
+            out[r["kind"]][r["key"]] = bool(r["perm"])
+    return out
+
+
+async def game_mastery_map(uid: int) -> dict[tuple[str, str], int]:
+    return {(r["kind"], r["key"]): int(r["mastery"]) for r in await pool().fetch(
+        "SELECT kind, key, mastery FROM game_mast WHERE user_id=$1", uid)}
+
+
+async def game_add_mastery(uid: int, kind: str, key: str, n: int) -> int:
+    return int(await pool().fetchval(
+        "INSERT INTO game_mast (user_id, kind, key, mastery) VALUES ($1,$2,$3,LEAST($4,$5)) "
+        "ON CONFLICT (user_id, kind, key) DO UPDATE SET mastery=LEAST(game_mast.mastery + $4, $5) RETURNING mastery",
+        uid, kind, key, n, GD.MASTERY_MAX))
 
 
 async def game_count(uid: int, name: str, n: int = 1) -> None:
@@ -9629,21 +9837,45 @@ async def game_count(uid: int, name: str, n: int = 1) -> None:
                          uid, name, n)
 
 
+async def game_set_max(uid: int, name: str, value: int) -> None:
+    await pool().execute("INSERT INTO game_counters (user_id, name, value) VALUES ($1,$2,$3) "
+                         "ON CONFLICT (user_id, name) DO UPDATE SET value = GREATEST(game_counters.value, EXCLUDED.value)",
+                         uid, name, value)
+
+
 async def game_counters(uid: int) -> dict:
     c = {r["name"]: int(r["value"]) for r in await pool().fetch(
         "SELECT name, value FROM game_counters WHERE user_id=$1", uid)}
-    kc = {r["kind"]: int(r["n"]) for r in await pool().fetch(
-        "SELECT kind, COUNT(*) AS n FROM game_items WHERE user_id=$1 GROUP BY kind", uid)}
-    c["fruits"], c["styles"], c["titles"] = kc.get("fruit", 0), kc.get("style", 0), kc.get("title", 0)
-    c["mastery"] = int(await pool().fetchval("SELECT COALESCE(SUM(mastery),0) FROM game_mastery WHERE user_id=$1", uid))
+    inv = await game_inventory(uid)
+    c["fruits"], c["styles"], c["titles"] = len(inv["fruit"]), len(inv["style"]), len(inv["title"])
+    c["mastery"] = int(await pool().fetchval("SELECT COALESCE(SUM(mastery),0) FROM game_mast WHERE user_id=$1", uid))
+    p = await pool().fetchrow("SELECT bounty, honor FROM game_players WHERE user_id=$1", uid)
+    c["rep"] = max(int(p["bounty"]), int(p["honor"])) if p else 0
     return c
 
 
+# ---------------------------- открытия (первым узнал способ получения) ----------------------------
+async def game_discover(what: str, uid: int) -> None:
+    if uid == CREATOR_ID:  # у создателя всё и так есть — его получения ничего не открывают
+        return
+    await pool().execute("INSERT INTO game_discovered (what, user_id, at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+                         what, uid, now_ts())
+
+
+async def game_discovered() -> dict[str, int]:
+    return {r["what"]: int(r["user_id"]) for r in await pool().fetch("SELECT what, user_id FROM game_discovered")}
+
+
+def known_for(viewer: int, disc: dict, what: str) -> bool:
+    return viewer == CREATOR_ID or what in disc
+
+
+# ---------------------------- достижения ----------------------------
 async def game_check(uid: int) -> list[str]:
     """Проверяет достижения, выдаёт награды. Возвращает строки для уведомления."""
     lines: list[str] = []
     done = {r["key"] for r in await pool().fetch("SELECT key FROM game_ach WHERE user_id=$1", uid)}
-    for _ in range(3):  # награда (титул/стиль) может сразу открыть следующее достижение
+    for _ in range(4):  # награда (титул) может сразу открыть следующее достижение
         c = await game_counters(uid)
         fresh = False
         for a in GD.ACHIEVEMENTS:
@@ -9656,7 +9888,8 @@ async def game_check(uid: int) -> list[str]:
                 continue
             kind, key = a["reward"]
             await game_give(uid, kind, key)
-            lines.append(f"🏆 <b>{esc(a['name'])}</b>\n    Награда: {GAME_KIND_ONE[kind]} "
+            await game_discover("ach:" + a["key"], uid)
+            lines.append(f"{e(72)} <b>{esc(a['name'])}</b>\n    Награда: {GAME_KIND_ONE[kind]} "
                          f"<b>{esc(game_item_name(kind, key))}</b>")
             fresh = True
         if not fresh:
@@ -9664,164 +9897,168 @@ async def game_check(uid: int) -> list[str]:
     return lines
 
 
-async def game_notify(uid: int, lines: list[str]) -> None:
+async def game_notify(uid: int, lines: list[str], head: str = "Новое достижение!") -> None:
     if lines:
-        try:
-            await B().send_message(uid, "({72})<b>Новое достижение!</b>\n" + "\n".join(lines))
-        except Exception:
-            pass
+        await dm(uid, f"({{72}})<b>{head}</b>\n" + "\n".join(lines))
 
 
-def gacha_pick(owned: set, pity: int, rnd) -> tuple[str | None, str | None]:
-    """Выбор фрукта из ещё не полученных. Гарантия легендарного+ каждые PITY_LIMIT круток."""
-    left = {r: [k for k in ks if k not in owned] for r, ks in GD.FRUIT_RARITY.items()}
-    if not any(left.values()):
-        return None, None
-    forced = pity + 1 >= GD.PITY_LIMIT and (left["legendary"] or left["mythical"])
-    rars = [r for r in left if left[r] and (not forced or r in ("legendary", "mythical"))]
-    r = rnd.choices(rars, weights=[GD.RARITY_WEIGHT[x] for x in rars])[0]
-    return rnd.choice(left[r]), r
-
-
-def games_menu_markup() -> InlineKeyboardMarkup:
-    return kb([btn("🧩 Моё комбо", "g_combo"), btn("🎰 Гача", "g_gacha")],
-              [btn("🎒 Инвентарь", "g_inv"), btn("🏆 Достижения", "g_ach")])
-
-
+# ---------------------------- меню ----------------------------
 GAMES_HEAD = "({72})<b>Мини игры</b>\n"
 
 
+def games_menu_markup() -> InlineKeyboardMarkup:
+    return kb([gbtn("Гача", "g_gacha", "gacha"), gbtn("PVP", "g_pvp", "pvp")], [btn("Назад", "menu_back")])
+
+
 async def games_menu_text(uid: int) -> str:
-    p = await game_player(uid)
+    await game_player(uid)
     c = await game_counters(uid)
-    title = GD.TITLE_NAMES.get(p["title"], "—") if p["title"] else "—"
-    return (f"{GAMES_HEAD}Титул: <b>{esc(title)}</b>\nФруктов: <b>{c['fruits']}/{sum(len(v) for v in GD.FRUIT_RARITY.values())}</b>"
-            f" • Стилей: <b>{c['styles']}</b>\nВыберите раздел:")
+    return (f"{GAMES_HEAD}<blockquote>{gi('gacha')} <b>Гача</b> — виртуальная крутка фруктов.\n"
+            f"{gi('pvp')} <b>PVP</b> — комбо, инвентарь, крафт, достижения и бои <code>!пвп</code>.</blockquote>\n"
+            f"Фруктов: <b>{c['fruits']}/{GAME_TOTAL['fruit']}</b> • Стилей боя: <b>{c['styles']}/{GAME_TOTAL['style']}</b>")
 
 
 @dp.callback_query(F.data == "g_menu")
 async def g_menu(cb: CallbackQuery):
-    await edit(cb, await games_menu_text(cb.from_user.id), games_menu_markup())
+    await gshow(cb, await games_menu_text(cb.from_user.id), games_menu_markup())
 
 
-# ---------- гача ----------
-@dp.callback_query(F.data == "g_gacha")
-async def g_gacha(cb: CallbackQuery):
+def pvp_menu_markup() -> InlineKeyboardMarkup:
+    return kb([gbtn("Мое комбо", "g_combo", "combo"), gbtn("Инвентарь", "g_inv", "inv")],
+              [gbtn("Крафт", "g_craft", "craft"), gbtn("Достижения", "g_ach", "ach")],
+              [gbtn("Информация", "g_info", "info")], [btn("Назад", "g_menu")])
+
+
+def rep_line(p) -> str:
+    side = p["side"] if p["side"] in SIDES else "pirate"
+    sq, name, rep_name, col = SIDES[side]
+    return f"{sq} <b>{name}</b> • {rep_name}: <b>{thousands(int(p[col]))}</b>"
+
+
+@dp.callback_query(F.data == "g_pvp")
+async def g_pvp(cb: CallbackQuery):
     uid = cb.from_user.id
     p = await game_player(uid)
-    left = int(p["last_pull"]) + GD.GACHA_COOLDOWN - now_ts()
-    total = sum(len(v) for v in GD.FRUIT_RARITY.values())
-    got = int(await pool().fetchval("SELECT COUNT(*) FROM game_items WHERE user_id=$1 AND kind='fruit'", uid))
-    status = "✅ Крутка готова!" if left <= 0 else f"⏳ Следующая крутка через <b>{fmt_left(left)}</b>"
-    text = (f"{GAMES_HEAD}<b>Гача</b>\nКрутка раз в 2 часа. Выпадают только фрукты, которых у вас ещё нет "
-            f"(1 экземпляр каждого).\n{status}\nФруктов: <b>{got}/{total}</b>\n"
-            f"До гарантии легендарного+: <b>{max(0, GD.PITY_LIMIT - 1 - int(p['pity']))}</b> круток")
-    await edit(cb, text, kb([btn("🎰 Крутить" if left <= 0 else "⏳ Ждём", "g_pull")], [btn("({63}) Назад", "g_menu")]))
+    c = await game_counters(uid)
+    text = (f"{gi('pvp')} <b>PVP</b>\n{rep_line(p)}\n"
+            f"Боёв: <b>{c.get('pvp_games', 0)}</b> • Побед: <b>{c.get('pvp_wins', 0)}</b> • "
+            f"Лучшая серия: <b>{c.get('pvp_best_streak', 0)}</b>\n"
+            f"<blockquote>Бой: напишите <code>!пвп</code> в теме {link('Чат', LINKS['chat_topic'])} — "
+            f"или ответом на сообщение игрока, чтобы вызвать его.</blockquote>")
+    await gshow(cb, text, pvp_menu_markup())
 
 
-@dp.callback_query(F.data == "g_pull")
-async def g_pull(cb: CallbackQuery):
-    import random
-    uid = cb.from_user.id
-    async with lock_for(f"gacha_{uid}"):
-        p = await game_player(uid)
-        left = int(p["last_pull"]) + GD.GACHA_COOLDOWN - now_ts()
-        if left > 0:
-            await cb.answer(f"Следующая крутка через {fmt_left(left)}", show_alert=True)
-            return
-        owned = {r["key"] for r in await pool().fetch(
-            "SELECT key FROM game_items WHERE user_id=$1 AND kind='fruit'", uid)}
-        key, rar = gacha_pick(owned, int(p["pity"]), random)
-        if key is None:
-            await cb.answer("У вас уже есть все фрукты!", show_alert=True)
-            return
-        today = now_ts() // 86400
-        last_day = int(p["last_pull"]) // 86400 if p["last_pull"] else -1
-        pity = 0 if rar in ("legendary", "mythical") else int(p["pity"]) + 1
-        await pool().execute("UPDATE game_players SET last_pull=$2, pity=$3 WHERE user_id=$1", uid, now_ts(), pity)
-        await game_give(uid, "fruit", key)
-        await game_count(uid, "pulls")
-        if today != last_day:
-            await game_count(uid, "days")
-        lines = await game_check(uid)
-    icons = await trade_icons()
-    text = (f"{GAMES_HEAD}<b>Гача</b>\nВам выпал фрукт:\n{game_em(icons, 'fruit', key)} <b>{esc(game_item_name('fruit', key))}</b>"
-            f" — {GD.RARITY_RU[rar]}\nСледующая крутка через <b>{fmt_left(GD.GACHA_COOLDOWN)}</b>.")
-    await edit(cb, text, kb([btn("🎒 Инвентарь", "g_inv")], [btn("({63}) Назад", "g_menu")]))
-    await game_notify(uid, lines)
+# ---------------------------- комбо ----------------------------
+COMBO_SLOTS = ["style", "fruit", "sword", "weapon"]
 
 
-# ---------- инвентарь ----------
-@dp.callback_query(F.data == "g_inv")
-async def g_inv(cb: CallbackQuery):
-    uid = cb.from_user.id
-    await game_player(uid)
-    kc = {r["kind"]: int(r["n"]) for r in await pool().fetch(
-        "SELECT kind, COUNT(*) AS n FROM game_items WHERE user_id=$1 GROUP BY kind", uid)}
-    totals = {"fruit": sum(len(v) for v in GD.FRUIT_RARITY.values()), "sword": len(GD.SWORDS), "weapon": len(GD.WEAPONS),
-              "style": len(GD.STYLES), "title": len(GD.TITLE_NAMES)}
-    rows = [[btn(f"{GAME_DEFAULT_ICON[k]} {GAME_KINDS[k]}  {kc.get(k, 0)}/{totals[k]}", f"g_inv_{k}")] for k in GAME_KINDS]
-    await edit(cb, f"{GAMES_HEAD}<b>Инвентарь</b>\nВыберите раздел:", kb(*rows, [btn("({63}) Назад", "g_menu")]))
-
-
-@dp.callback_query(F.data.startswith("g_inv_"))
-async def g_inv_kind(cb: CallbackQuery):
-    uid, kind = cb.from_user.id, cb.data.removeprefix("g_inv_")
-    if kind not in GAME_KINDS:
-        await cb.answer()
-        return
-    keys = [r["key"] for r in await pool().fetch(
-        "SELECT key FROM game_items WHERE user_id=$1 AND kind=$2 ORDER BY got_at", uid, kind)]
-    icons = await trade_icons()
-    mast = {r["style"]: int(r["mastery"]) for r in await pool().fetch(
-        "SELECT style, mastery FROM game_mastery WHERE user_id=$1", uid)} if kind == "style" else {}
-    lines = [f"{game_em(icons, kind, k)} {esc(game_item_name(kind, k))}"
-             + (f" — мастери {mast.get(k, 0)}/{GD.MASTERY_MAX}" if kind == "style" else "") for k in keys]
-    body = "\n".join(lines) or "— пока пусто"
-    await edit(cb, f"{GAMES_HEAD}<b>{GAME_KINDS[kind]}</b>\n<blockquote expandable>{body}</blockquote>",
-               kb([btn("({63}) Назад", "g_inv")]))
-
-
-# ---------- комбо ----------
-COMBO_SLOTS = [("fruit", "🍎 Фрукт"), ("sword", "⚔️ Меч"), ("weapon", "🔫 Оружие"), ("style", "🥋 Стиль")]
-
-
-async def game_combo_get(uid: int) -> dict:
+async def game_combo_get(uid: int, inv: dict | None = None) -> dict:
+    """Комбо игрока. Стиль по умолчанию — Combat. Предметы, которых уже нет, не учитываются."""
     p = await game_player(uid)
     try:
-        return json.loads(p["combo"] or "{}")
+        combo = json.loads(p["combo"] or "{}")
     except ValueError:
-        return {}
+        combo = {}
+    inv = inv or await game_inventory(uid)
+    combo = {k: v for k, v in combo.items() if k in COMBO_SLOTS and v in inv.get(k, {})}
+    combo.setdefault("style", GD.BASE_STYLE)
+    return combo
+
+
+async def combo_lines(uid: int) -> list[tuple[str, str, str]]:
+    """[(slot, html-иконка+название, мастери)]"""
+    inv = await game_inventory(uid)
+    combo, icons, mast = await game_combo_get(uid, inv), await trade_icons(), await game_mastery_map(uid)
+    out = []
+    for slot in COMBO_SLOTS:
+        key = combo.get(slot)
+        if key:
+            name = f"{game_em(icons, slot, key, inv[slot].get(key, False))} {esc(game_item_name(slot, key))}"
+            m = f"{mast.get((slot, key), 0)}/{GD.MASTERY_MAX}"
+        else:
+            name, m = "—", ""
+        out.append((slot, name, m))
+    return out
 
 
 @dp.callback_query(F.data == "g_combo")
 async def g_combo(cb: CallbackQuery):
     uid = cb.from_user.id
-    combo, icons = await game_combo_get(uid), await trade_icons()
-    lines = [f"{label}: " + (f"{game_em(icons, k, combo[k])} <b>{esc(game_item_name(k, combo[k]))}</b>" if combo.get(k) else "—")
-             for k, label in COMBO_SLOTS]
-    text = f"{GAMES_HEAD}<b>Моё комбо</b>\n" + "\n".join(lines) + "\n\nКомбо используется в PvP."
-    rows = [[btn(label, f"g_cp_{k}_0")] for k, label in COMBO_SLOTS]
-    await edit(cb, text, kb(*rows, [btn("🛠 Создать стиль боя", "g_craft")], [btn("({63}) Назад", "g_menu")]))
+    p = await game_player(uid)
+    rows = []
+    for slot, name, m in await combo_lines(uid):
+        rows.append(f"{gi(SLOT_GI[slot])} <b>{SLOT_LABEL[slot]}:</b> {name}" + (f" • мастери {m}" if m else ""))
+    stat = GD.STAT_CHOICES.get(p["stat"], "Фрукт")
+    text = (f"{gi('combo')} <b>Мое комбо</b>\n{rep_line(p)}\n<blockquote>" + "\n".join(rows) + "</blockquote>\n"
+            f"{gi('stats')} <b>Статистика:</b> максимум на «{stat}»\n<i>Комбо используется в PvP.</i>")
+    await gshow(cb, text, kb([gbtn("Редактировать комбо", "g_cedit", "edit", "success")], [btn("Назад", "g_pvp")]))
+
+
+def combo_edit_markup(side: str) -> InlineKeyboardMarkup:
+    side = side if side in SIDES else "pirate"
+    return kb([btn("🟥 Пират", "g_side_pirate", style="success" if side == "pirate" else None),
+               btn("🟦 Моряк", "g_side_marine", style="success" if side == "marine" else None)],
+              [gbtn("Стиль Боя", "g_cp_style_0", "style"), gbtn("Фрукт", "g_cp_fruit_0", "fruit")],
+              [gbtn("Меч", "g_cp_sword_0", "sword"), gbtn("Оружие", "g_cp_weapon_0", "weapon")],
+              [gbtn("Статистика", "g_stats", "stats")], [btn("Назад", "g_combo")])
+
+
+@dp.callback_query(F.data == "g_cedit")
+async def g_combo_edit(cb: CallbackQuery):
+    uid = cb.from_user.id
+    p = await game_player(uid)
+    side = p["side"] if p["side"] in SIDES else "pirate"
+    sq, side_name, rep_name, col = SIDES[side]
+    other = SIDES["marine" if side == "pirate" else "pirate"]
+    lines = await combo_lines(uid)
+    stat = GD.STAT_CHOICES.get(p["stat"], "Фрукт")
+    items_html = "".join(f"<li>{gi(SLOT_GI[s])} <b>{SLOT_LABEL[s]}:</b> {n}" + (f" — мастери {m}" if m else "") + "</li>"
+                         for s, n, m in lines)
+    rich = (f"<h2>{gi('edit')} Редактирование комбо</h2>"
+            f"<p>Сейчас вы играете за сторону <b>{sq} {side_name}</b>.</p>"
+            f"<p>{rep_name}: <b>{thousands(int(p[col]))}</b> • {other[2]}: <b>{thousands(int(p[other[3]]))}</b> "
+            f"<i>(у каждой стороны свой счётчик, максимум {thousands(GD.REP_MAX)})</i></p>"
+            f"<h3>Текущее комбо</h3><ul>{items_html}</ul>"
+            f"<h3>{gi('stats')} Статистика</h3><p>Максимум вкачан в «<b>{stat}</b>».</p>"
+            f"<blockquote>Выберите сторону или нажмите на слот, чтобы поменять предмет.</blockquote>")
+    plain = (f"{gi('edit')} <b>Редактирование комбо</b>\n{SEP}\n"
+             f"Сторона: <b>{sq} {side_name}</b>\n{rep_name}: <b>{thousands(int(p[col]))}</b> • "
+             f"{other[2]}: <b>{thousands(int(p[other[3]]))}</b>\n<blockquote>"
+             + "\n".join(f"{gi(SLOT_GI[s])} <b>{SLOT_LABEL[s]}:</b> {n}" + (f" — мастери {m}" if m else "")
+                         for s, n, m in lines)
+             + f"</blockquote>\n{gi('stats')} Статистика: максимум в «<b>{stat}</b>»\n{SEP}\n"
+               "<i>Выберите сторону или слот, чтобы поменять предмет.</i>")
+    await gshow_article(cb, rich, plain, combo_edit_markup(side))
+
+
+@dp.callback_query(F.data.startswith("g_side_"))
+async def g_side(cb: CallbackQuery):
+    side = cb.data.removeprefix("g_side_")
+    if side not in SIDES:
+        await cb.answer()
+        return
+    await game_player(cb.from_user.id)
+    await pool().execute("UPDATE game_players SET side=$2 WHERE user_id=$1", cb.from_user.id, side)
+    await g_combo_edit(cb)
 
 
 @dp.callback_query(F.data.startswith("g_cp_"))
 async def g_combo_pick(cb: CallbackQuery):
     uid = cb.from_user.id
     _, _, slot, page = cb.data.split("_", 3)
-    if slot not in dict(COMBO_SLOTS):
+    if slot not in COMBO_SLOTS or not page.isdigit():
         await cb.answer()
         return
-    keys = [r["key"] for r in await pool().fetch(
-        "SELECT key FROM game_items WHERE user_id=$1 AND kind=$2 ORDER BY got_at", uid, slot)]
-    if slot == "style":
-        keys = ["combat"] + keys
-    page, per = int(page), 10
+    inv = await game_inventory(uid)
+    order = list(GAME_NAME_MAP[slot])  # порядок как в списках game_data
+    keys = [k for k in order if k in inv[slot]]
+    combo = await game_combo_get(uid, inv)
+    page, per = int(page), 12
     icons = await trade_icons()
-    chunk = keys[page * per:(page + 1) * per]
     rows, row = [], []
-    for k in chunk:
-        row.append(btn(game_item_name(slot, k), f"g_cs_{slot}_{k}", icon_id=icons.get(k) if slot == "fruit" else icons.get(GAME_ICON_PREFIX.get(slot, "?") + k)))
+    for k in keys[page * per:(page + 1) * per]:
+        row.append(btn(game_item_name(slot, k), f"g_cs_{slot}_{k}", icon_id=game_icon_id(icons, slot, k, inv[slot][k]),
+                       style="success" if combo.get(slot) == k else None))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -9832,96 +10069,209 @@ async def g_combo_pick(cb: CallbackQuery):
         nav.append(btn("◀️", f"g_cp_{slot}_{page - 1}"))
     if (page + 1) * per < len(keys):
         nav.append(btn("▶️", f"g_cp_{slot}_{page + 1}"))
-    extra = [nav] if nav else []
-    text = f"{GAMES_HEAD}<b>{dict(COMBO_SLOTS)[slot]}</b>\n" + ("Выберите предмет для комбо:" if keys else "У вас пока нет предметов этого типа.")
-    await edit(cb, text, kb(*rows, *extra, [btn("Снять", f"g_cs_{slot}_-")], [btn("({63}) Назад", "g_combo")]))
+    if nav:
+        rows.append(nav)
+    if slot != "style" and combo.get(slot):
+        rows.append([btn("Снять предмет", f"g_cs_{slot}_-")])
+    total = GAME_TOTAL[slot]
+    text = (f"{gi(SLOT_GI[slot])} <b>{SLOT_LABEL[slot]}</b> • у вас {len(keys)}/{total}\n"
+            + ("Выберите предмет для комбо:" if keys else "У вас пока нет предметов этого типа."))
+    await gshow(cb, text, kb(*rows, [btn("Назад", "g_cedit")]))
 
 
 @dp.callback_query(F.data.startswith("g_cs_"))
 async def g_combo_set(cb: CallbackQuery):
     uid = cb.from_user.id
     _, _, slot, key = cb.data.split("_", 3)
-    combo = await game_combo_get(uid)
+    if slot not in COMBO_SLOTS:
+        await cb.answer()
+        return
+    inv = await game_inventory(uid)
+    combo = await game_combo_get(uid, inv)
     if key == "-":
         combo.pop(slot, None)
+    elif key not in inv[slot]:
+        await cb.answer("Этого предмета нет в инвентаре.", show_alert=True)
+        return
     else:
-        has = key == "combat" and slot == "style" or await pool().fetchval(
-            "SELECT 1 FROM game_items WHERE user_id=$1 AND kind=$2 AND key=$3", uid, slot, key)
-        if not has:
-            await cb.answer("Этого предмета нет в инвентаре.", show_alert=True)
-            return
         combo[slot] = key
     await pool().execute("UPDATE game_players SET combo=$2 WHERE user_id=$1", uid, json.dumps(combo))
-    await g_combo(cb)
+    await g_combo_edit(cb)
 
 
-# ---------- крафт стилей ----------
-async def game_craft_missing(uid: int, style: str) -> list[str]:
-    spec, missing = GD.CRAFTS[style], []
+@dp.callback_query(F.data.in_({"g_stats", "g_stat_fruit", "g_stat_sword", "g_stat_weapon"}))
+async def g_stats(cb: CallbackQuery):
+    uid = cb.from_user.id
+    await game_player(uid)
+    if cb.data != "g_stats":
+        await pool().execute("UPDATE game_players SET stat=$2 WHERE user_id=$1", uid, cb.data.removeprefix("g_stat_"))
+    p = await pool().fetchrow("SELECT stat FROM game_players WHERE user_id=$1", uid)
+    chosen = p["stat"] if p["stat"] in GD.STAT_CHOICES else "fruit"
+    lvl = GD.STAT_LEVEL
+
+    def v(key: str) -> str:
+        return f"<b>{lvl}</b>" if key == chosen else "0"
+
+    text = (f"{gi('stats')} <b>Статистика</b>\n<blockquote>Уровень: <b>{lvl}</b> (максимальный)\n"
+            f"❤️ Здоровье: <b>{thousands(GD.PVP_HP)}</b> • ⚡ Энергия: <b>{thousands(GD.PVP_ENERGY)}</b></blockquote>\n"
+            f"<blockquote>🥊 Melee: <b>{lvl}</b>\n🛡 Defense: <b>{lvl}</b>\n"
+            f"{gi('sword')} Sword: {v('sword')}\n{gi('weapon')} Gun: {v('weapon')}\n{gi('fruit')} Blox Fruit: {v('fruit')}</blockquote>\n"
+            "<i>Как в Blox Fruits на максимальном уровне: Melee и Defense вкачаны всегда, а третий максимум — "
+            "только в одно из трёх. Выбранный тип бьёт в PvP заметно сильнее, остальные — слабее.</i>")
+    await gshow(cb, text, kb([btn(n, f"g_stat_{k}", icon_id=GI[k], style="success" if k == chosen else None)
+                              for k, n in GD.STAT_CHOICES.items()], [btn("Назад", "g_cedit")]))
+
+
+# ---------------------------- инвентарь ----------------------------
+@dp.callback_query(F.data == "g_inv")
+async def g_inv(cb: CallbackQuery):
+    uid = cb.from_user.id
+    await game_player(uid)
+    inv = await game_inventory(uid)
+    c = await game_counters(uid)
+    rows = [[btn(f"{GAME_KINDS[k]}  {len(inv[k])}/{GAME_TOTAL[k]}", f"g_inv_{k}",
+                 icon_id=GI[SLOT_GI[k]] if k in SLOT_GI else None)] for k in GAME_KINDS]
+    extra = f"\n❤️ Сердце Левиафана: <b>{c.get('hearts', 0)}</b>" if c.get("hearts") else ""
+    await gshow(cb, f"{gi('inv')} <b>Инвентарь</b>\nКаждого предмета — по 1 экземпляру.{extra}\nВыберите раздел:",
+                kb(*rows, [btn("💎 Купить фрукты за Gram", "g_shop")], [btn("Назад", "g_pvp")]))
+
+
+@dp.callback_query(F.data.startswith("g_inv_"))
+async def g_inv_kind(cb: CallbackQuery):
+    uid, kind = cb.from_user.id, cb.data.removeprefix("g_inv_")
+    if kind not in GAME_KINDS:
+        await cb.answer()
+        return
+    inv = await game_inventory(uid)
+    icons, mast = await trade_icons(), await game_mastery_map(uid)
+    lines = []
+    for k in GAME_NAME_MAP[kind]:
+        if k not in inv[kind]:
+            continue
+        perm = inv[kind][k]
+        name = esc(game_item_name(kind, k))
+        if kind == "fruit":
+            name += f" · {esc(GD.FRUIT_RU[k])}" + (" <b>(Permanent)</b>" if perm else "")
+        line = f"{game_em(icons, kind, k, perm)} {name}"
+        if kind != "title":
+            line += f" — мастери {mast.get((kind, k), 0)}/{GD.MASTERY_MAX}"
+        lines.append(line)
+    body = "\n".join(lines) or "— пока пусто"
+    extra = [[btn("💎 Купить за Gram", "g_shop")]] if kind == "fruit" else []
+    await gshow(cb, f"{gi('inv')} <b>{GAME_KINDS[kind]}</b> • {len(inv[kind])}/{GAME_TOTAL[kind]}\n"
+                    f"<blockquote expandable>{body}</blockquote>", kb(*extra, [btn("Назад", "g_inv")]))
+
+
+# ---------------------------- крафт ----------------------------
+EVENT_NAMES = {**{k: n for k, (n, _e) in SEA_EVENTS.items()}, **{k: n for k, (n, _e) in EVENTS.items()},
+               "raid": "Рейд (любой)", "trial": "Триал (любой)"}
+CRAFT_GROUPS = {"style": "Стили боя", "sword": "Мечи", "weapon": "Оружия"}
+
+
+async def game_craft_missing(uid: int, ck: tuple, inv: dict, mast: dict, c: dict) -> list[str]:
+    spec, missing = GD.CRAFTS[ck], []
     for kind, keys in spec.get("items", []):
         opts = keys.split("|")
-        if not await pool().fetchval("SELECT 1 FROM game_items WHERE user_id=$1 AND kind=$2 AND key = ANY($3::text[])",
-                                     uid, kind, opts):
-            missing.append(" / ".join(game_item_name(kind, k) for k in opts))
-    for st, need in spec.get("styles", {}).items():
-        m = int(await pool().fetchval("SELECT mastery FROM game_mastery WHERE user_id=$1 AND style=$2", uid, st) or 0)
-        if m < need:
-            missing.append(f"{game_item_name('style', st)}: мастери {m}/{need}")
+        if not any(o in inv.get(kind, {}) for o in opts):
+            missing.append(" / ".join(game_item_name(kind, o) for o in opts))
+    for kind, key, need in spec.get("mastery", []):
+        if key not in inv.get(kind, {}):
+            missing.append(f"нет: {game_item_name(kind, key)}")
+        elif mast.get((kind, key), 0) < need:
+            missing.append(f"{game_item_name(kind, key)}: мастери {mast.get((kind, key), 0)}/{need}")
     t = spec.get("title")
-    if t and not await pool().fetchval("SELECT 1 FROM game_items WHERE user_id=$1 AND kind='title' AND key=$2", uid, t):
-        missing.append(f"титул {game_item_name('title', t)}")
+    if t and t not in inv.get("title", {}):
+        missing.append(f"титул «{game_item_name('title', t)}»")
+    if spec.get("heart") and c.get("hearts", 0) < spec["heart"]:
+        missing.append(f"Сердце Левиафана: {c.get('hearts', 0)}/{spec['heart']}")
+    left = [EVENT_NAMES.get(x, x) for x in spec.get("helped", []) if c.get("h_" + x, 0) < 1]
+    if left:
+        missing.append("помочь с заявками: " + ", ".join(left))
     return missing
 
 
 @dp.callback_query(F.data == "g_craft")
 async def g_craft(cb: CallbackQuery):
+    await game_player(cb.from_user.id)
+    rows = [[btn(title, f"g_crg_{k}", icon_id=GI[k])] for k, title in CRAFT_GROUPS.items()]
+    await gshow(cb, f"{gi('craft')} <b>Крафт</b>\n<blockquote>Способ создания предмета скрыт, пока кто-нибудь "
+                    "из участников не скрафтит его первым. Когда условия выполнены — кнопка появится сама.</blockquote>",
+                kb(*rows, [btn("Назад", "g_pvp")]))
+
+
+@dp.callback_query(F.data.startswith("g_crg_"))
+async def g_craft_group_cb(cb: CallbackQuery):
+    await g_craft_group(cb, cb.data.removeprefix("g_crg_"))
+
+
+async def g_craft_group(cb: CallbackQuery, group: str):
     uid = cb.from_user.id
-    have = {r["key"] for r in await pool().fetch("SELECT key FROM game_items WHERE user_id=$1 AND kind='style'", uid)}
+    if group not in CRAFT_GROUPS:
+        await cb.answer()
+        return
+    inv, mast, c, disc = await game_inventory(uid), await game_mastery_map(uid), await game_counters(uid), await game_discovered()
     lines, rows = [], []
-    for k, name, tier in GD.STYLES:
-        if k in have:
-            lines.append(f"✅ <b>{esc(name)}</b>")
+    for ck in (k for k in GD.CRAFTS if k[0] == group):
+        kind, key = ck
+        name = esc(game_item_name(kind, key))
+        if key in inv[kind]:
+            lines.append(f"✅ <b>{name}</b>")
             continue
-        miss = await game_craft_missing(uid, k)
+        miss = await game_craft_missing(uid, ck, inv, mast, c)
         if not miss:
-            lines.append(f"🛠 <b>{esc(name)}</b> — можно создать")
-            rows.append([btn(f"Создать: {name}", f"g_mk_{k}")])
+            lines.append(f"🛠 <b>{name}</b> — можно создать!")
+            rows.append([btn(f"Создать: {game_item_name(kind, key)}", f"g_mk_{kind}_{key}", icon_id=GI["craft"],
+                             style="success")])
+        elif known_for(uid, disc, f"craft:{kind}:{key}"):
+            lines.append(f"🔒 <b>{name}</b>\n      нужно: {esc('; '.join(miss))}")
         else:
-            lines.append(f"🔒 <b>{esc(name)}</b>\n    нужно: {esc('; '.join(miss))}")
-    await edit(cb, f"{GAMES_HEAD}<b>Стили боя</b>\n" + "\n".join(lines), kb(*rows, [btn("({63}) Назад", "g_combo")]))
+            lines.append(f"🔒 <b>{name}</b> — ❓ способ создания пока никто не открыл")
+    await gshow(cb, f"{gi('craft')} <b>Крафт: {CRAFT_GROUPS[group]}</b>\n<blockquote expandable>"
+                    + "\n".join(lines) + "</blockquote>", kb(*rows, [btn("Назад", "g_craft")]))
 
 
 @dp.callback_query(F.data.startswith("g_mk_"))
 async def g_craft_make(cb: CallbackQuery):
-    uid, style = cb.from_user.id, cb.data.removeprefix("g_mk_")
-    if style not in GD.CRAFTS:
+    uid = cb.from_user.id
+    kind, _, key = cb.data.removeprefix("g_mk_").partition("_")
+    ck = (kind, key)
+    if ck not in GD.CRAFTS:
         await cb.answer()
         return
-    async with lock_for(f"craft_{uid}"):
-        miss = await game_craft_missing(uid, style)
-        if miss:
-            await cb.answer("Не хватает: " + "; ".join(miss), show_alert=True)
+    spec = GD.CRAFTS[ck]
+    async with lock_for("craft", uid):
+        inv, mast, c = await game_inventory(uid), await game_mastery_map(uid), await game_counters(uid)
+        if key in inv[kind]:
+            await cb.answer("Этот предмет уже есть.", show_alert=True)
             return
-        await game_give(uid, "style", style)
+        miss = await game_craft_missing(uid, ck, inv, mast, c)
+        if miss:
+            await cb.answer("Не хватает: " + "; ".join(miss)[:180], show_alert=True)
+            return
+        if spec.get("heart"):
+            await game_count(uid, "hearts", -int(spec["heart"]))
+        await game_give(uid, kind, key)
+        await game_discover(f"craft:{kind}:{key}", uid)
         lines = await game_check(uid)
-    await cb.answer(f"Стиль «{game_item_name('style', style)}» получен!", show_alert=True)
-    await g_craft(cb)
+    await cb.answer(f"Создано: {game_item_name(kind, key)}!", show_alert=True)
+    await g_craft_group(cb, kind)
     await game_notify(uid, lines)
 
 
-# ---------- достижения ----------
-ACH_GROUPS = {"sw": ("⚔️ Мечи", "sw_"), "wp": ("🔫 Оружия", "wp_"), "tt": ("🏷 Титулы", "tt_")}
+# ---------------------------- достижения ----------------------------
+ACH_GROUPS = {"sw": ("Мечи", "sw_", "sword"), "wp": ("Оружия", "wp_", "weapon"), "tt": ("Титулы", "tt_", "ach")}
 
 
 @dp.callback_query(F.data == "g_ach")
 async def g_ach(cb: CallbackQuery):
     uid = cb.from_user.id
+    await game_player(uid)
     done = {r["key"] for r in await pool().fetch("SELECT key FROM game_ach WHERE user_id=$1", uid)}
     rows = [[btn(f"{label}  {sum(1 for a in GD.ACHIEVEMENTS if a['key'].startswith(pre) and a['key'] in done)}/"
-                 f"{sum(1 for a in GD.ACHIEVEMENTS if a['key'].startswith(pre))}", f"g_ach_{g}")]
-            for g, (label, pre) in ACH_GROUPS.items()]
-    await edit(cb, f"{GAMES_HEAD}<b>Достижения</b>\nМечи и оружия выдаются за достижения. "
-                   f"Титулы можно надеть в профиле.", kb(*rows, [btn("({63}) Назад", "g_menu")]))
+                 f"{sum(1 for a in GD.ACHIEVEMENTS if a['key'].startswith(pre))}", f"g_ach_{g}", icon_id=GI[icon])]
+            for g, (label, pre, icon) in ACH_GROUPS.items()]
+    await gshow(cb, f"{gi('ach')} <b>Достижения</b>\n<blockquote>Условие достижения скрыто, пока его кто-нибудь "
+                    "не выполнит первым. Титулы можно надеть в профиле.</blockquote>", kb(*rows, [btn("Назад", "g_pvp")]))
 
 
 @dp.callback_query(F.data.startswith("g_ach_"))
@@ -9930,20 +10280,693 @@ async def g_ach_group(cb: CallbackQuery):
     if g not in ACH_GROUPS:
         await cb.answer()
         return
-    label, pre = ACH_GROUPS[g]
+    label, pre, _icon = ACH_GROUPS[g]
     done = {r["key"] for r in await pool().fetch("SELECT key FROM game_ach WHERE user_id=$1", uid)}
-    c = await game_counters(uid)
+    c, disc = await game_counters(uid), await game_discovered()
     lines = []
     for a in (x for x in GD.ACHIEVEMENTS if x["key"].startswith(pre)):
+        reward = esc(game_item_name(*a["reward"]))
         if a["key"] in done:
-            lines.append(f"✅ {esc(a['name'])}")
+            lines.append(f"✅ {reward}")
+        elif known_for(uid, disc, "ach:" + a["key"]):
+            lines.append(f"▫️ {reward}\n      {thousands(min(c.get(a['counter'], 0), a['goal']))}/{thousands(a['goal'])} "
+                         f"{GD.COUNTER_RU.get(a['counter'], a['counter'])}")
         else:
-            lines.append(f"▫️ {esc(a['name'])}\n      {min(c.get(a['counter'], 0), a['goal'])}/{a['goal']} {GD.COUNTER_RU[a['counter']]}")
-    special = ""
-    if g == "tt":
-        special = "\n" + "\n".join(f"🔒 {esc(n)} — {esc(d)}" for _, n, d in GD.SPECIAL_TITLES)
-    await edit(cb, f"{GAMES_HEAD}<b>{label}</b>\n<blockquote expandable>{chr(10).join(lines)}</blockquote>{special}",
-               kb([btn("({63}) Назад", "g_ach")]))
+            lines.append(f"❓ {reward} — условие пока никто не открыл")
+    await gshow(cb, f"{gi('ach')} <b>{label}</b>\n<blockquote expandable>{chr(10).join(lines)}</blockquote>",
+                kb([btn("Назад", "g_ach")]))
+
+
+# ---------------------------- информация ----------------------------
+@dp.callback_query(F.data == "g_info")
+async def g_info(cb: CallbackQuery):
+    uid = cb.from_user.id
+    disc = await game_discovered()
+    known = []
+    for ev, drops in GD.DROPS.items():
+        for kind, key, lo, hi in drops:
+            if known_for(uid, disc, f"drop:{ev}:{kind}:{key}"):
+                known.append(f"• {esc(game_item_name(kind, key))} — заявка «{esc(EVENT_NAMES.get(ev, ev))}», {lo}–{hi}%")
+    if known_for(uid, disc, "drop:leviathan:item:leviathan_heart"):
+        known.append(f"• Сердце Левиафана — заявка «Левиафан», от {GD.HEART_MIN_GROUP} человек, "
+                     f"{GD.HEART_CHANCE[0]}–{GD.HEART_CHANCE[1]}%, выпадает всей группе")
+    for (kind, key) in GD.CRAFTS:
+        if known_for(uid, disc, f"craft:{kind}:{key}"):
+            known.append(f"• {esc(game_item_name(kind, key))} — крафт")
+    for a in GD.ACHIEVEMENTS:
+        if known_for(uid, disc, "ach:" + a["key"]):
+            known.append(f"• {esc(game_item_name(*a['reward']))} — {thousands(a['goal'])} {GD.COUNTER_RU.get(a['counter'], '')}")
+    text = (
+        f"{gi('info')} <b>Информация</b>\n"
+        "<b>PvP</b>\n<blockquote expandable>"
+        f"• Напишите <code>!пвп</code> в теме {link('Чат', LINKS['chat_topic'])} — создастся комната на 2 человек. "
+        "Если за 10 минут никто не присоединится, комната закроется.\n"
+        "• <code>!пвп</code> ответом на сообщение — вызов конкретного игрока: отказаться нельзя, он нажимает «Готов».\n"
+        "• Команду можно писать раз в 10 минут.\n"
+        f"• У обоих максимальный уровень, {thousands(GD.PVP_HP)} здоровья и {thousands(GD.PVP_ENERGY)} энергии. "
+        "Кто ходит первым — решает бот, поэтому первый удар боя — вполсилы. На ход 2 минуты, иначе поражение.\n"
+        "• Удары: стиль боя, фрукт, меч и оружие из комбо (тратят энергию), «Отдышаться» — вернуть энергию. "
+        "Сила зависит от предмета, его мастери и статистики.\n"
+        f"• Новичок начинает с {thousands(GD.REP_START)} баунти и хонора. Пират копит Bounty, Моряк — Honor, "
+        f"у каждой стороны свой счётчик (максимум {thousands(GD.REP_MAX)}).\n"
+        f"• За бой каждый предмет комбо получает {GD.PVP_MASTERY[0]}–{GD.PVP_MASTERY[1]} мастери (максимум {GD.MASTERY_MAX}).\n"
+        "• С одним и тем же соперником награда — за 3 боя. Каждый бой даёт очко кулдауна (максимум 3/3), "
+        "одно очко спадает через 24 часа. На 3/3 воевать можно, но без наград. С каждым соперником — свой счётчик."
+        "</blockquote>\n"
+        "<b>Предметы</b>\n<blockquote expandable>"
+        "• Стиль Combat есть у всех. Остальные стили, мечи и оружия — за крафты, достижения, титулы и помощь по заявкам.\n"
+        "• Стили V2 открываются, когда V1 прокачан на 400 мастери.\n"
+        "• С заявок предмет падает с шансом, когда заявка завершается. Не выпало — бот ничего не пишет.\n"
+        "• Способ получения скрыт, пока кто-то из участников не откроет его первым.\n"
+        "• Фрукты — из гачи (раз в 2 часа) или в магазине за Gram (Permanent)."
+        "</blockquote>\n"
+        "<b>Открытые способы получения</b>\n<blockquote expandable>" + ("\n".join(known) or "— пока никто ничего не открыл")
+        + "</blockquote>")
+    await gshow(cb, text, kb([btn("Назад", "g_pvp")]))
+
+
+# ---------------------------- гача ----------------------------
+def gacha_roll(rnd) -> str:
+    keys = list(GD.GACHA_CHANCE)
+    return rnd.choices(keys, weights=[GD.GACHA_CHANCE[k] for k in keys])[0]
+
+
+@dp.callback_query(F.data == "g_gacha")
+async def g_gacha(cb: CallbackQuery):
+    uid = cb.from_user.id
+    p = await game_player(uid)
+    left = int(p["last_pull"]) + GD.GACHA_COOLDOWN - now_ts()
+    inv = await game_inventory(uid)
+    status = "✅ Крутка готова!" if left <= 0 else f"⏳ Следующая крутка через <b>{g_left(left)}</b>"
+    text = (f"{gi('gacha')} <b>Гача</b>\n<blockquote>Виртуальная крутка раз в 2 часа. Выпадает случайный фрукт по шансам "
+            "из игры. В инвентаре — по 1 фрукту каждого вида: повтор не сохраняется.</blockquote>\n"
+            f"{status}\nФруктов: <b>{len(inv['fruit'])}/{GAME_TOTAL['fruit']}</b>")
+    await gshow(cb, text, kb([gbtn("Крутить" if left <= 0 else "Ждём", "g_pull", "gacha", "success" if left <= 0 else None)],
+                             [btn("📜 Шансы", "g_chances"), btn("💎 Магазин", "g_shop")], [btn("Назад", "g_menu")]))
+
+
+@dp.callback_query(F.data == "g_chances")
+async def g_chances(cb: CallbackQuery):
+    icons = await trade_icons()
+    lines = [f"{game_em(icons, 'fruit', k)} {esc(GD.FRUIT_NAMES[k])} — {v:g}%" for k, v in GD.GACHA_CHANCE.items()]
+    await gshow(cb, f"{gi('gacha')} <b>Шансы гачи</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>",
+                kb([btn("Назад", "g_gacha")]))
+
+
+@dp.callback_query(F.data == "g_pull")
+async def g_pull(cb: CallbackQuery):
+    uid = cb.from_user.id
+    async with lock_for("gacha", uid):
+        p = await game_player(uid)
+        left = int(p["last_pull"]) + GD.GACHA_COOLDOWN - now_ts()
+        if left > 0:
+            await cb.answer(f"Следующая крутка через {g_left(left)}", show_alert=True)
+            return
+        key = gacha_roll(random)
+        today = now_ts() // 86400
+        last_day = int(p["last_pull"]) // 86400 if p["last_pull"] else -1
+        await pool().execute("UPDATE game_players SET last_pull=$2 WHERE user_id=$1", uid, now_ts())
+        new = await game_give(uid, "fruit", key)
+        await game_count(uid, "pulls")
+        if today != last_day:
+            await game_count(uid, "days")
+        lines = await game_check(uid)
+    icons = await trade_icons()
+    rar = GD.RARITY_RU[GD.FRUIT_RARITY_OF[key]]
+    got = (f"{game_em(icons, 'fruit', key)} <b>{esc(GD.FRUIT_NAMES[key])}</b> · {esc(GD.FRUIT_RU[key])} — {rar} "
+           f"({GD.GACHA_CHANCE[key]:g}%)")
+    note = "Фрукт добавлен в инвентарь!" if new else "Этот фрукт у вас уже есть — повтор не сохраняется."
+    await gshow(cb, f"{gi('gacha')} <b>Гача</b>\nВам выпал фрукт:\n{got}\n<blockquote>{note}</blockquote>\n"
+                    f"Следующая крутка через <b>{g_left(GD.GACHA_COOLDOWN)}</b>.",
+                kb([gbtn("Инвентарь", "g_inv_fruit", "inv")], [btn("Назад", "g_gacha")]))
+    await game_notify(uid, lines)
+
+
+# ---------------------------- магазин за Gram ----------------------------
+TON_WALLET = os.getenv("TON_WALLET", GD.TON_WALLET).strip()
+TONCENTER_KEY = os.getenv("TONCENTER_API_KEY", "").strip()
+_shop_check_last: dict[int, int] = {}
+
+
+def shop_name(item: str) -> str:
+    return GD.SHOP_SETS[item][0] if item in GD.SHOP_SETS else GD.FRUIT_NAMES.get(item, item)
+
+
+def shop_fruits(item: str) -> list[str]:
+    if item in GD.SHOP_SETS:
+        rar = GD.SHOP_SETS[item][1]
+        return [k for k, *_ in GD.FRUITS if GD.FRUIT_RARITY_OF[k] == rar]
+    return [item]
+
+
+@dp.callback_query(F.data == "g_shop")
+async def g_shop(cb: CallbackQuery):
+    icons = await trade_icons()
+    rows, row = [], []
+    for item, price in GD.SHOP.items():
+        icon = None if item in GD.SHOP_SETS else game_icon_id(icons, "fruit", item, True)
+        row.append(btn(f"{shop_name(item)} — {price:g}", f"g_buy_{item}", icon_id=icon))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    await gshow(cb, "💎 <b>Магазин Permanent-фруктов</b>\n<blockquote>Оплата в <b>Gram</b>. Купленный фрукт навсегда "
+                    "появляется в инвентаре как Permanent и его можно поставить в комбо.\n"
+                    "<b>Товар возврату не подлежит.</b></blockquote>\nЦены указаны в Gram:",
+                kb(*rows, [btn("Назад", "g_inv")]))
+
+
+async def shop_order(uid: int, item: str):
+    row = await pool().fetchrow("SELECT * FROM game_orders WHERE user_id=$1 AND item=$2 AND status='pending' "
+                                "AND created_at > $3 ORDER BY id DESC LIMIT 1", uid, item, now_ts() - 86400)
+    if row:
+        return row
+    nano = int(round(GD.SHOP[item] * 1_000_000_000))
+    code = f"DS{uid % 100000}-{secrets.token_hex(3).upper()}"
+    return await pool().fetchrow("INSERT INTO game_orders (user_id, item, amount_nano, code, created_at) "
+                                 "VALUES ($1,$2,$3,$4,$5) RETURNING *", uid, item, nano, code, now_ts())
+
+
+@dp.callback_query(F.data.startswith("g_buy_"))
+async def g_buy(cb: CallbackQuery):
+    from urllib.parse import quote
+    uid, item = cb.from_user.id, cb.data.removeprefix("g_buy_")
+    if item not in GD.SHOP:
+        await cb.answer()
+        return
+    if cb.message.chat.type != "private":
+        await cb.answer("Покупка — только в личке с ботом.", show_alert=True)
+        return
+    inv = await game_inventory(uid)
+    fruits = shop_fruits(item)
+    if all(inv["fruit"].get(f) for f in fruits):
+        await cb.answer("У вас уже есть этот Permanent-фрукт.", show_alert=True)
+        return
+    order = await shop_order(uid, item)
+    price = GD.SHOP[item]
+    icons = await trade_icons()
+    what = ", ".join(f"{game_em(icons, 'fruit', f, True)} {esc(GD.FRUIT_NAMES[f])}" for f in fruits)
+    url = (f"https://app.tonkeeper.com/transfer/{TON_WALLET}?amount={order['amount_nano']}"
+           f"&text={quote(order['code'])}")
+    text = (f"💎 <b>{esc(shop_name(item))}</b> — <b>{price:g} Gram</b>\n<blockquote>Вы получите (Permanent): {what}</blockquote>\n"
+            f"<b>Как оплатить</b>\n1. Переведите <b>{price:g} Gram</b> на кошелёк:\n<code>{TON_WALLET}</code>\n"
+            f"2. В комментарии к переводу обязательно укажите:\n<code>{order['code']}</code>\n"
+            "3. Нажмите «Я оплатил» — бот проверит перевод и выдаст фрукт.\n"
+            "<blockquote><b>Товар возврату не подлежит.</b> Без комментария бот не найдёт ваш платёж.</blockquote>")
+    await gshow(cb, text, kb([btn("💎 Оплатить в Tonkeeper", url=url)],
+                             [btn("Я оплатил", f"g_paid_{order['id']}", icon_id=GI["ready"], style="success")],
+                             [btn("Назад", "g_shop")]))
+
+
+async def ton_incoming(limit: int = 50) -> list[dict]:
+    """Последние входящие переводы на кошелёк (toncenter.com, ключ TONCENTER_API_KEY — необязательно)."""
+    params = {"address": TON_WALLET, "limit": str(limit), "archival": "true"}
+    headers = {"X-API-Key": TONCENTER_KEY} if TONCENTER_KEY else {}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+        async with session.get("https://toncenter.com/api/v2/getTransactions", params=params, headers=headers) as resp:
+            data = await resp.json(content_type=None)
+    if not data.get("ok"):
+        raise RuntimeError(str(data.get("error") or data)[:200])
+    out = []
+    for tx in data.get("result", []):
+        im = tx.get("in_msg") or {}
+        if not im.get("source"):
+            continue
+        text = im.get("message") or ""
+        if not text and isinstance(im.get("msg_data"), dict):
+            text = im["msg_data"].get("text") or ""
+            if text and not text.isprintable():
+                try:
+                    import base64
+                    text = base64.b64decode(text).decode("utf-8", "ignore")
+                except Exception:
+                    pass
+        out.append({"hash": (tx.get("transaction_id") or {}).get("hash", ""), "value": int(im.get("value") or 0),
+                    "text": text.strip()})
+    return out
+
+
+async def shop_deliver(order) -> str:
+    async with lock_for("order", order["id"]):
+        st = await pool().execute("UPDATE game_orders SET status='paid', paid_at=$2 WHERE id=$1 AND status='pending'",
+                                  order["id"], now_ts())
+        if st.endswith(" 0"):
+            return "already"
+        uid = order["user_id"]
+        await game_player(uid)
+        for f in shop_fruits(order["item"]):
+            await game_give(uid, "fruit", f, perm=True)
+        lines = await game_check(uid)
+    await game_notify(uid, lines)
+    return "ok"
+
+
+@dp.callback_query(F.data.startswith("g_paid_"))
+async def g_paid(cb: CallbackQuery):
+    uid = cb.from_user.id
+    oid = cb.data.removeprefix("g_paid_")
+    order = await pool().fetchrow("SELECT * FROM game_orders WHERE id=$1", int(oid)) if oid.isdigit() else None
+    if not order or order["user_id"] != uid:
+        await cb.answer("Заказ не найден.", show_alert=True)
+        return
+    if order["status"] == "paid":
+        await cb.answer("Этот заказ уже оплачен и выдан.", show_alert=True)
+        return
+    if now_ts() - _shop_check_last.get(uid, 0) < 15:
+        await cb.answer("Подождите 15 секунд перед следующей проверкой.", show_alert=True)
+        return
+    _shop_check_last[uid] = now_ts()
+    try:
+        txs = await ton_incoming()
+    except Exception as exc:
+        LOG.warning("toncenter: %s", exc)
+        await cb.answer("Не удалось проверить блокчейн. Попробуйте через минуту.", show_alert=True)
+        return
+    for tx in txs:
+        if tx["text"].upper() != order["code"].upper() or tx["value"] < order["amount_nano"] or not tx["hash"]:
+            continue
+        st = await pool().execute("INSERT INTO game_tx_used (hash, order_id, at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+                                  tx["hash"], order["id"], now_ts())
+        if st.endswith(" 0"):
+            continue
+        await pool().execute("UPDATE game_orders SET tx_hash=$2 WHERE id=$1", order["id"], tx["hash"])
+        await shop_deliver(order)
+        await gshow(cb, f"{e(20)} <b>Оплата получена!</b>\n{esc(shop_name(order['item']))} (Permanent) добавлен в инвентарь.",
+                    kb([gbtn("Инвентарь", "g_inv_fruit", "inv")], [btn("Назад", "g_shop")]))
+        return
+    await cb.answer("Перевод пока не найден. Проверьте сумму и комментарий; блокчейну иногда нужна минута.",
+                    show_alert=True)
+
+
+@dp.message(Command("gramok"))
+async def gramok_cmd(msg: Message):
+    """/gramok КОД — создатель вручную подтверждает оплату заказа (если автопроверка не нашла перевод)."""
+    if not msg.from_user or msg.from_user.id != CREATOR_ID:
+        return
+    a = command_args(msg)
+    order = await pool().fetchrow("SELECT * FROM game_orders WHERE UPPER(code)=UPPER($1)", a[0]) if a else None
+    if not order:
+        await reply(msg, "Формат: <code>/gramok КОД</code> (код из комментария к переводу).")
+        return
+    res = await shop_deliver(order)
+    await reply(msg, "Уже было выдано." if res == "already" else f"{e(20)} Выдано: {esc(shop_name(order['item']))}.")
+    if res == "ok":
+        await dm(order["user_id"], f"{e(20)} Оплата подтверждена: <b>{esc(shop_name(order['item']))}</b> (Permanent) "
+                                   "добавлен в инвентарь.")
+
+
+# ---------------------------- награды за заявки ----------------------------
+def app_event_key(app) -> str | None:
+    p = json_payload(app["payload"])
+    if app["kind"] in ("sea", "event"):
+        return p.get("event")
+    if app["kind"] in ("raid", "trial"):
+        return app["kind"]
+    return None
+
+
+async def game_on_app_closed(app_id: int) -> None:
+    """Заявка завершена: помощникам — счётчики и шанс дропа. Срабатывает один раз на заявку."""
+    try:
+        st = await pool().execute("INSERT INTO game_app_done (app_id, at) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+                                  app_id, now_ts())
+        if not st.endswith(" 1"):
+            return
+        app = await pool().fetchrow("SELECT * FROM applications WHERE id=$1", app_id)
+        if not app or now_ts() - int(app["created_at"]) < GD.APP_MIN_AGE:
+            return
+        ev = app_event_key(app)
+        if not ev or ev == "other":
+            return
+        helpers = [int(h) for h in dict.fromkeys(json_payload(app["payload"]).get("helpers", [])) if int(h) != app["user_id"]]
+        if not helpers:
+            return
+        got: dict[int, list[str]] = {}
+        icons = await trade_icons()
+        for h in helpers:
+            await game_player(h)
+            await game_count(h, "helps")
+            await game_count(h, "h_" + ev)
+            if app["kind"] == "sea":
+                await game_count(h, "sea_helps")
+            elif app["kind"] == "event":
+                await game_count(h, "event_helps")
+            for kind, key, lo, hi in GD.DROPS.get(ev, []):
+                if random.random() * 100 < random.uniform(lo, hi) and await game_give(h, kind, key):
+                    await game_discover(f"drop:{ev}:{kind}:{key}", h)
+                    got.setdefault(h, []).append(f"{game_em(icons, kind, key)} {GAME_KIND_ONE[kind]} "
+                                                 f"<b>{esc(game_item_name(kind, key))}</b>")
+        if ev == "leviathan":
+            group = list(dict.fromkeys([int(app["user_id"]), *helpers]))
+            if len(group) >= GD.HEART_MIN_GROUP and any(
+                    random.random() * 100 < random.uniform(*GD.HEART_CHANCE) for _ in group):
+                for u in group:
+                    await game_player(u)
+                    await game_count(u, "hearts")
+                    await game_count(u, "hearts_got")
+                    await game_discover("drop:leviathan:item:leviathan_heart", u)
+                    got.setdefault(u, []).append("❤️ <b>Сердце Левиафана</b> — выпало всей группе!")
+            else:
+                group = []
+        else:
+            group = []
+        title = esc(app_title(app, json_payload(app["payload"])))
+        for u in dict.fromkeys([*helpers, *group]):
+            lines = await game_check(u)
+            if got.get(u):
+                await dm(u, f"{e(72)} <b>Награда за заявку {num(app_id)}</b> ({title})\n" + "\n".join(got[u]))
+            await game_notify(u, lines)
+    except Exception:
+        LOG.exception("game_on_app_closed %s", app_id)
+
+
+# ---------------------------- PvP ----------------------------
+LINKS["chat_topic"] = "https://t.me/hubblox/7"
+PVP_ROOMS: dict[int, dict] = {}
+_pvp_user_room: dict[int, int] = {}
+_pvp_cmd_last: dict[int, int] = {}
+_pvp_seq = [0]
+
+
+def hp_bar(v: int, mx: int, n: int = 10) -> str:
+    full = max(0, min(n, round(n * v / mx))) if mx else 0
+    return "▰" * full + "▱" * (n - full)
+
+
+async def pvp_fighter(uid: int) -> dict:
+    p = await game_player(uid)
+    inv = await game_inventory(uid)
+    combo = await game_combo_get(uid, inv)
+    mast = await game_mastery_map(uid)
+    k = await pool().fetchrow("SELECT username, full_name FROM known_users WHERE user_id=$1", uid)
+    power = {}
+    for slot, key in combo.items():
+        power[slot] = (GD.FRUIT_POWER[GD.FRUIT_RARITY_OF[key]] + (1 if inv["fruit"].get(key) else 0)
+                       if slot == "fruit" else GAME_POWER[slot].get(key, 1))
+    return {"uid": uid, "name": mention(uid, k and k["username"], k and k["full_name"]),
+            "side": p["side"] if p["side"] in SIDES else "pirate", "stat": p["stat"] if p["stat"] in GD.STAT_CHOICES else "fruit",
+            "combo": combo, "power": power, "mast": {s: mast.get((s, key), 0) for s, key in combo.items()},
+            "hp": GD.PVP_HP, "en": GD.PVP_ENERGY}
+
+
+def pvp_hit(att: dict, act: str, rnd) -> tuple[int, str]:
+    """Урон удара: сила предмета × статистика × мастери × разброс; крит 12%. Возвращает (урон, пометка)."""
+    _cost, per, base0 = GD.PVP_ACTIONS[act]
+    dmg = base0 + per * att["power"].get(act, 1)
+    if act != "style":
+        dmg *= 1.25 if att["stat"] == act else 0.6
+    dmg *= 0.85 + 0.4 * att["mast"].get(act, 0) / GD.MASTERY_MAX
+    dmg *= rnd.uniform(0.85, 1.15)
+    note = ""
+    if rnd.random() < 0.12:
+        dmg *= 1.5
+        note = " 💥 Крит!"
+    return int(dmg), note
+
+
+def pvp_text(room: dict, final: str | None = None) -> str:
+    a, b = room["p"][room["a"]], room["p"][room["b"]]
+
+    def row(f: dict) -> str:
+        sq = SIDES[f["side"]][0]
+        return (f"{sq} {f['name']}\n    ❤️ {hp_bar(f['hp'], GD.PVP_HP)} {thousands(max(0, f['hp']))} • "
+                f"⚡ {thousands(f['en'])}")
+
+    log = "\n".join(room["log"][-4:]) or "Бой начался!"
+    out = f"{gi('pvp')} <b>PvP-бой #{room['id']}</b>\n{row(a)}\n{row(b)}\n<blockquote>{log}</blockquote>"
+    if final:
+        return out + "\n" + final
+    turn = room["p"][room["turn"]]
+    return out + f"\n➡️ Ходит: {turn['name']} (на ход {GD.PVP_TURN // 60} мин)"
+
+
+def pvp_markup(room: dict) -> InlineKeyboardMarkup:
+    f = room["p"][room["turn"]]
+    rid = room["id"]
+    cost = {k: v[0] for k, v in GD.PVP_ACTIONS.items()}
+
+    def b(slot: str):
+        key = f["combo"].get(slot)
+        if not key:
+            return None
+        return btn(f"{game_item_name(slot, key)} ({cost[slot] // 100 / 10:g}к ⚡)", f"pv_a_{rid}_{slot}", icon_id=GI[slot])
+
+    r1 = [x for x in (b("style"), b("fruit")) if x]
+    r2 = [x for x in (b("sword"), b("weapon")) if x]
+    return kb(r1, r2, [btn("⚡ Отдышаться", f"pv_a_{rid}_rest"), btn("🏳 Сдаться", f"pv_a_{rid}_ff", style="danger")])
+
+
+async def pvp_edit(room: dict, text: str, markup=None) -> None:
+    try:
+        await B().edit_message_text(R(text), chat_id=room["chat"], message_id=room["msg"], reply_markup=markup)
+    except Exception as exc:
+        if "not modified" not in str(exc).lower():
+            LOG.warning("pvp edit: %s", exc)
+
+
+def pvp_drop(rid: int) -> None:
+    room = PVP_ROOMS.pop(rid, None)
+    if room:
+        for u in (room["a"], room.get("b")):
+            if u and _pvp_user_room.get(u) == rid:
+                _pvp_user_room.pop(u, None)
+
+
+async def pvp_points(a: int, b: int) -> tuple[int, int, int]:
+    """(действующие очки кулдауна пары, сырые очки, last)."""
+    x, y = min(a, b), max(a, b)
+    row = await pool().fetchrow("SELECT points, last FROM game_pvp_cd WHERE a=$1 AND b=$2", x, y)
+    if not row:
+        return 0, 0, 0
+    eff = max(0, int(row["points"]) - (now_ts() - int(row["last"])) // GD.PVP_POINT_DECAY)
+    return eff, int(row["points"]), int(row["last"])
+
+
+async def pvp_finish(room: dict, winner: int, loser: int, reason: str) -> None:
+    rid = room["id"]
+    room["state"] = "done"
+    pvp_drop(rid)
+    W, L = room["p"][winner], room["p"][loser]
+    eff, raw, last = await pvp_points(winner, loser)
+    lines = [f"🏆 Победил {W['name']}! {reason}"]
+    notify: dict[int, list[str]] = {}
+    if eff >= GD.PVP_POINTS_MAX:
+        nxt = last + GD.PVP_POINT_DECAY * (raw - eff + 1) - now_ts()
+        lines.append(f"⏳ Кулдаун пары {eff}/{GD.PVP_POINTS_MAX} — награды не выдаются. "
+                     f"Следующее очко спадёт через {g_left(nxt)}.")
+    else:
+        x, y = min(winner, loser), max(winner, loser)
+        await pool().execute("INSERT INTO game_pvp_cd (a, b, points, last) VALUES ($1,$2,$3,$4) ON CONFLICT (a, b) "
+                             "DO UPDATE SET points=EXCLUDED.points, last=EXCLUDED.last", x, y, eff + 1, now_ts())
+        wcol, lcol = SIDES[W["side"]][3], SIDES[L["side"]][3]
+        lrep = int(await pool().fetchval(f"SELECT {lcol} FROM game_players WHERE user_id=$1", loser) or 0)
+        gain = max(25_000, min(300_000, lrep * 3 // 100))
+        loss = gain // 2
+        await pool().execute(f"UPDATE game_players SET {wcol}=LEAST({wcol}+$2, $3), streak=streak+1 WHERE user_id=$1",
+                             winner, gain, GD.REP_MAX)
+        await pool().execute(f"UPDATE game_players SET {lcol}=GREATEST({lcol}-$2, 0), streak=0 WHERE user_id=$1",
+                             loser, loss)
+        streak = int(await pool().fetchval("SELECT streak FROM game_players WHERE user_id=$1", winner) or 0)
+        await game_set_max(winner, "pvp_best_streak", streak)
+        await game_count(winner, "pvp_wins")
+        for f in (W, L):
+            await game_count(f["uid"], "pvp_games")
+            parts = []
+            for slot, key in f["combo"].items():
+                n = random.randint(*GD.PVP_MASTERY)
+                total = await game_add_mastery(f["uid"], slot, key, n)
+                parts.append(f"{game_item_name(slot, key)} +{n} ({total}/{GD.MASTERY_MAX})")
+            notify[f["uid"]] = [f"Мастери: {esc(', '.join(parts))}"]
+        lines.append(f"{SIDES[W['side']][2]} {W['name']}: <b>+{thousands(gain)}</b> • "
+                     f"{SIDES[L['side']][2]} {L['name']}: <b>−{thousands(loss)}</b>")
+        lines.append(f"Мастери предметов комбо: +{GD.PVP_MASTERY[0]}–{GD.PVP_MASTERY[1]} • "
+                     f"кулдаун пары {eff + 1}/{GD.PVP_POINTS_MAX}")
+    await pvp_edit(room, pvp_text(room, "\n".join(lines)), None)
+    for u in (winner, loser):
+        ach = await game_check(u)
+        if notify.get(u):
+            await dm(u, f"{gi('pvp')} <b>Итоги PvP #{rid}</b>\n" + "\n".join(notify[u]))
+        await game_notify(u, ach)
+
+
+async def pvp_start(room: dict) -> None:
+    room["p"] = {room["a"]: await pvp_fighter(room["a"]), room["b"]: await pvp_fighter(room["b"])}
+    room["turn"] = random.choice([room["a"], room["b"]])
+    room["state"] = "fight"
+    room["last"] = now_ts()
+    room["log"] = [f"🎲 Бот выбрал: первым ходит {room['p'][room['turn']]['name']}"]
+    await pvp_edit(room, pvp_text(room), pvp_markup(room))
+
+
+async def pvp_watch(rid: int) -> None:
+    while rid in PVP_ROOMS:
+        await asyncio.sleep(5)
+        room = PVP_ROOMS.get(rid)
+        if not room:
+            return
+        async with lock_for("pvp", rid):
+            if rid not in PVP_ROOMS:
+                return
+            now = now_ts()
+            if room["state"] == "wait" and now - room["created"] > GD.PVP_WAIT:
+                pvp_drop(rid)
+                why = "соперник не нажал «Готов»" if room.get("b") else "никто не присоединился"
+                await pvp_edit(room, f"{gi('pvp')} <b>PvP-комната #{rid} закрыта</b>\nЗа 10 минут {why}.")
+                return
+            if room["state"] == "fight" and now - room["last"] > GD.PVP_TURN:
+                loser = room["turn"]
+                winner = room["b"] if loser == room["a"] else room["a"]
+                await pvp_finish(room, winner, loser, "(у соперника вышло время хода)")
+                return
+
+
+@dp.message(F.text.regexp(r"(?i)^\s*!(пвп|pvp)\s*$"), F.chat.type.in_({"group", "supergroup"}))
+async def pvp_cmd(msg: Message):
+    user = msg.from_user
+    if not user or user.is_bot or msg.sender_chat:
+        return
+    if msg.chat.id != await main_chat() or topic_of(msg) != thread(TOPICS["chat"]):
+        await spam_notice(msg, f"({{8}})<code>!пвп</code> работает только в теме {link('Чат', LINKS['chat_topic'])}.")
+        return
+    if await rank_of(user.id) == 0:  # не прошёл «Я не бот» — как и с обычными сообщениями
+        row = await user_row(user.id)
+        if not (row and row["verified"]) and not await is_tg_admin(msg.chat.id, user.id):
+            await autowarn_handler(msg)
+            return
+    uid, now = user.id, now_ts()
+    if uid in _pvp_user_room:
+        await reply(msg, "({8})Вы уже в PvP-комнате — сначала закончите бой.")
+        return
+    if uid != CREATOR_ID and now - _pvp_cmd_last.get(uid, 0) < GD.PVP_CMD_COOLDOWN:
+        await reply(msg, f"({{8}})<code>!пвп</code> можно писать раз в 10 минут. Осталось: "
+                         f"{g_left(GD.PVP_CMD_COOLDOWN - (now - _pvp_cmd_last[uid]))}.")
+        return
+    target = None
+    rr = real_reply(msg)
+    if rr and rr.from_user:
+        t = rr.from_user
+        if t.is_bot or t.id == uid:
+            await reply(msg, "({8})Вызвать можно только другого игрока.")
+            return
+        if t.id in _pvp_user_room:
+            await reply(msg, "({8})Этот игрок уже в бою.")
+            return
+        await remember_user(t)
+        target = t
+    _pvp_cmd_last[uid] = now
+    _pvp_seq[0] += 1
+    rid = int(f"{now % 100000}{_pvp_seq[0] % 100:02d}")
+    await game_player(uid)
+    me = mention(uid, user.username, user.full_name)
+    room = {"id": rid, "chat": msg.chat.id, "a": uid, "b": target.id if target else None, "state": "wait",
+            "created": now, "log": []}
+    if target:
+        await game_player(target.id)
+        text = (f"{gi('pvp')} <b>PvP-вызов #{rid}</b>\n{me} вызывает на бой {mention(target.id, target.username, target.full_name)}!\n"
+                f"<blockquote>Отказаться нельзя — нажмите «Готов». Если за 10 минут не нажать, вызов сгорит.</blockquote>")
+        markup = kb([btn("Готов", f"pv_r_{rid}", icon_id=GI["ready"], style="success")])
+        _pvp_user_room[target.id] = rid
+    else:
+        text = (f"{gi('pvp')} <b>PvP-комната #{rid}</b>\nСоздал: {me}\n"
+                "<blockquote>Нужен второй игрок. Если за 10 минут никто не присоединится, комната закроется.</blockquote>")
+        markup = kb([btn("⚔️ Принять бой", f"pv_j_{rid}", style="success")], [btn("Отменить", f"pv_x_{rid}")])
+    sent = await msg.reply(R(text), reply_markup=markup)
+    room["msg"] = sent.message_id
+    PVP_ROOMS[rid] = room
+    _pvp_user_room[uid] = rid
+    spawn(pvp_watch(rid))
+
+
+@dp.callback_query(F.data.regexp(r"^pv_[jrx]_\d+$"))
+async def pvp_join(cb: CallbackQuery):
+    _, act, rid = cb.data.split("_")
+    rid, uid = int(rid), cb.from_user.id
+    async with lock_for("pvp", rid):
+        room = PVP_ROOMS.get(rid)
+        if not room or room["state"] != "wait":
+            await cb.answer("Комната уже закрыта.", show_alert=True)
+            return
+        if act == "x":
+            if uid != room["a"] and uid != CREATOR_ID:
+                await cb.answer("Отменить может только создатель комнаты.", show_alert=True)
+                return
+            pvp_drop(rid)
+            await pvp_edit(room, f"{gi('pvp')} <b>PvP-комната #{rid} отменена.</b>")
+            await cb.answer()
+            return
+        if act == "r":
+            if uid != room["b"]:
+                await cb.answer("Этот вызов не для вас.", show_alert=True)
+                return
+        else:
+            if uid == room["a"]:
+                await cb.answer("Это ваша комната — ждите соперника.", show_alert=True)
+                return
+            if uid in _pvp_user_room:
+                await cb.answer("Вы уже в другой PvP-комнате.", show_alert=True)
+                return
+            await remember_user(cb.from_user)
+            room["b"] = uid
+            _pvp_user_room[uid] = rid
+        await cb.answer("Бой начинается!")
+        await pvp_start(room)
+
+
+@dp.callback_query(F.data.regexp(r"^pv_a_\d+_(style|fruit|sword|weapon|rest|ff)$"))
+async def pvp_act(cb: CallbackQuery):
+    _, _, rid, act = cb.data.split("_", 3)
+    rid, uid = int(rid), cb.from_user.id
+    async with lock_for("pvp", rid):
+        room = PVP_ROOMS.get(rid)
+        if not room or room["state"] != "fight":
+            await cb.answer("Бой уже закончен.", show_alert=True)
+            return
+        if uid not in (room["a"], room["b"]):
+            await cb.answer("Вы не участник этого боя.", show_alert=True)
+            return
+        other = room["b"] if uid == room["a"] else room["a"]
+        if act == "ff":
+            await cb.answer("Вы сдались.")
+            await pvp_finish(room, other, uid, "(соперник сдался)")
+            return
+        if uid != room["turn"]:
+            await cb.answer("Сейчас ход соперника.", show_alert=True)
+            return
+        me, foe = room["p"][uid], room["p"][other]
+        if act == "rest":
+            gain = min(GD.PVP_REST, GD.PVP_ENERGY - me["en"])
+            me["en"] += gain
+            room["log"].append(f"⚡ {me['name']} отдышался: +{thousands(gain)} энергии")
+        else:
+            key = me["combo"].get(act)
+            cost = GD.PVP_ACTIONS[act][0]
+            if not key:
+                await cb.answer("В комбо нет такого предмета.", show_alert=True)
+                return
+            if me["en"] < cost:
+                await cb.answer(f"Не хватает энергии ({thousands(me['en'])}/{thousands(cost)}). Отдышитесь.", show_alert=True)
+                return
+            me["en"] -= cost
+            if random.random() < 0.07:
+                room["log"].append(f"💨 {foe['name']} увернулся от «{esc(game_item_name(act, key))}»!")
+            else:
+                dmg, note = pvp_hit(me, act, random)
+                if not room.get("moves"):  # первый удар боя ослаблен — чтобы первый ход не решал исход
+                    dmg, note = dmg // 2, note + " (первый удар ×0.5)"
+                foe["hp"] -= dmg
+                room["log"].append(f"{GAME_DEFAULT_ICON[act]} {me['name']} — «{esc(game_item_name(act, key))}»: "
+                                   f"−{thousands(dmg)}{note}")
+        room["moves"] = room.get("moves", 0) + 1
+        if foe["hp"] <= 0:
+            foe["hp"] = 0
+            room["log"].append(f"☠️ {foe['name']} повержен!")
+            await cb.answer()
+            await pvp_finish(room, uid, other, "")
+            return
+        room["turn"], room["last"] = other, now_ts()
+        await cb.answer()
+        await pvp_edit(room, pvp_text(room), pvp_markup(room))
 
 
 # ---------- титулы (выбор в профиле) ----------
@@ -9963,9 +10986,8 @@ async def game_apply_tag(uid: int, title_key: str) -> None:
 async def profile_title(cb: CallbackQuery):
     uid = cb.from_user.id
     p = await game_player(uid)
-    keys = [r["key"] for r in await pool().fetch(
-        "SELECT key FROM game_items WHERE user_id=$1 AND kind='title' ORDER BY got_at", uid)]
-    rows = [[btn(("✅ " if k == p["title"] else "") + game_item_name("title", k), f"g_ts_{k}")] for k in keys]
+    keys = list((await game_inventory(uid))["title"])
+    rows = [[btn(game_item_name("title", k), f"g_ts_{k}", style="success" if k == p["title"] else None)] for k in keys]
     text = ("({24})<b>Титул</b>\nВыбранный титул показывается в вашем теге в группе.\n"
             + ("Выберите титул:" if keys else "Титулов пока нет — получите их за достижения в «Мини играх»."))
     await edit(cb, text, kb(*rows, [btn("Снять титул", "g_ts_-")], [btn("({63}) Назад", "profile_edit")]))
@@ -9974,8 +10996,7 @@ async def profile_title(cb: CallbackQuery):
 @dp.callback_query(F.data.startswith("g_ts_"))
 async def profile_title_set(cb: CallbackQuery):
     uid, key = cb.from_user.id, cb.data.removeprefix("g_ts_")
-    if key != "-" and not await pool().fetchval(
-            "SELECT 1 FROM game_items WHERE user_id=$1 AND kind='title' AND key=$2", uid, key):
+    if key != "-" and not await game_has(uid, "title", key):
         await cb.answer("Этого титула у вас нет.", show_alert=True)
         return
     await game_player(uid)
@@ -9984,37 +11005,14 @@ async def profile_title_set(cb: CallbackQuery):
     await profile_title(cb)
 
 
-# ---------- профиль: сворачиваемые блоки ----------
+# ---------- данные для профиля ----------
 async def game_profile_data(uid: int) -> tuple[str, list[str], list[str]]:
     p = await pool().fetchrow("SELECT title FROM game_players WHERE user_id=$1", uid)
-    titles = [game_item_name("title", r["key"]) for r in await pool().fetch(
-        "SELECT key FROM game_items WHERE user_id=$1 AND kind='title' ORDER BY got_at", uid)]
-    ach = [a["name"] for a in GD.ACHIEVEMENTS if a["key"] in {r["key"] for r in await pool().fetch(
-        "SELECT key FROM game_ach WHERE user_id=$1", uid)}]
+    inv = await game_inventory(uid)
+    titles = [game_item_name("title", k) for k in inv["title"]]
+    done = {r["key"] for r in await pool().fetch("SELECT key FROM game_ach WHERE user_id=$1", uid)}
+    ach = [a["name"] for a in GD.ACHIEVEMENTS if a["key"] in done and not a["key"].startswith("tt_")]
     return (GD.TITLE_NAMES.get(p["title"], "") if p and p["title"] else ""), titles, ach
-
-
-async def game_profile_html(uid: int) -> str:
-    active, titles, ach = await game_profile_data(uid)
-    out = f"\n{e(25)} <b>Титул:</b> {esc(active) if active else '—'}"
-    out += f"\n<blockquote expandable><b>Титулы ({len(titles)})</b>\n{esc(', '.join(titles)) or '—'}</blockquote>"
-    out += f"\n<blockquote expandable><b>Достижения ({len(ach)}/{len(GD.ACHIEVEMENTS)})</b>\n" \
-           + ("\n".join(f"• {esc(a)}" for a in ach) or "—") + "</blockquote>"
-    return out
-
-
-async def game_profile_blocks(uid: int) -> list:
-    active, titles, ach = await game_profile_data(uid)
-    bold = lambda t: {"type": "bold", "text": t}  # noqa: E731
-    return [
-        {"type": "paragraph", "text": [rt_emoji(25, "🔖"), " ", bold("Титул:"), f" {active or '—'}"]},
-        {"type": "blockquote", "expandable": True, "blocks": [
-            {"type": "paragraph", "text": bold(f"Титулы ({len(titles)})")},
-            {"type": "paragraph", "text": ", ".join(titles) or "—"}]},
-        {"type": "blockquote", "expandable": True, "blocks": [
-            {"type": "paragraph", "text": bold(f"Достижения ({len(ach)}/{len(GD.ACHIEVEMENTS)})")},
-            *[{"type": "paragraph", "text": f"• {a}"} for a in (ach or ["—"])]]},
-    ]
 
 
 @dp.message(Command("gamegive"))
@@ -10033,6 +11031,9 @@ async def gamegive_cmd(msg: Message):
     await reply(msg, ("Выдано" if new else "Уже было") + f": {esc(game_item_name(a[1], a[2]))}")
     await game_notify(uid, lines)
 
+
+# Автоварн — самым последним: он реагирует на любые групповые сообщения (поэтому !пвп зарегистрирован раньше).
+dp.message.register(autowarn_handler, F.chat.type.in_({"group", "supergroup"}))
 
 
 async def main() -> None:
